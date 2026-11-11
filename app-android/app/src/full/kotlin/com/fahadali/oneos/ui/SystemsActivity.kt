@@ -253,7 +253,6 @@ class SystemsFragment : Fragment() {
     override fun onResume() {
         super.onResume()
         Readiness.onResume(requireContext())
-        com.fahadali.oneos.session.AppUpdater.check(requireContext())
         if (navigatingAway) {
             // Keep the mapped source attached until the 280 ms shared return finishes.
             view?.postDelayed({
@@ -270,7 +269,6 @@ class SystemsFragment : Fragment() {
         super.onStart()
         // A finished check also reads the last session's logs (Readiness.tick), as Home does.
         subs += StageCheck.observe { if (!it.busy) context?.let(Readiness::tick); redraw() }
-        subs += com.fahadali.oneos.session.AppUpdater.observe { updateLine() }
         subs += PrepareJob.observe { redraw() }
         subs += OldStagesJob.observe { redraw() }
         subs += com.fahadali.oneos.session.RemoveJob.observe { redraw() }
@@ -362,11 +360,11 @@ class SystemsFragment : Fragment() {
      */
     private fun updateLine() {
         val root = view ?: return
-        val ctx = context ?: return
         val line = root.findViewById<TextView>(R.id.systems_hero_subtitle)
         val banner = root.findViewById<View>(R.id.systems_update_banner)
+        val next: com.fahadali.oneos.core.model.AppUpdate? = null
         val u = com.fahadali.oneos.session.AppUpdater.state
-        val next = u.update?.takeIf { it.newerThan(com.fahadali.oneos.BuildConfig.VERSION_CODE) }
+        val ctx = context ?: return
         if (next != null && banner != null) {
             // 0.4.47 (owner: "the update bar is so small on the main page"): a banner with the version,
             // what it fixes or its progress, and an Update button; the whole card is the tap target.

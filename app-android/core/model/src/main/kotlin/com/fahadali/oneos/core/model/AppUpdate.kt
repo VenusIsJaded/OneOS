@@ -33,7 +33,7 @@ data class AppUpdate(
     fun changes(imageId: String): Boolean = "*" in systems || imageId in systems
 
     companion object {
-        const val URL = "https://github.com/fahadalijaved/OneOS/releases/latest/download/update.json"
+        const val URL = "" // Disabled on fork: never fetch upstream update.json
         const val APK_PREFIX = "https://github.com/fahadalijaved/OneOS/releases/download/"
 
         /**

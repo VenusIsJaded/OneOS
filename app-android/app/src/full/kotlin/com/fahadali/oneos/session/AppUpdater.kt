@@ -67,15 +67,8 @@ object AppUpdater : BackgroundJob<AppUpdater.State>(State(), "oneos-update") {
     fun testChannel(ctx: Context): Boolean = testCode(ctx) != null
 
     /** Stores [code] (empty: test channel off); false when it is no test channel code. */
-    fun setTestCode(ctx: Context, code: String): Boolean {
-        val c = code.trim()
-        if (c.isNotEmpty() && AppUpdate.testUrl(c) == null) return false
-        ctx.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString("test_code", c.ifEmpty { null }).remove("test_channel").apply()
-        if (!state.busy) update(State())
-        check(ctx, force = true)
-        return true
-    }
+    @Suppress("UNUSED_PARAMETER")
+    fun setTestCode(ctx: Context, code: String): Boolean = false
 
     fun dir(ctx: Context): File = File(ctx.applicationContext.filesDir, "oneos-update").apply { mkdirs() }
 
@@ -83,32 +76,14 @@ object AppUpdater : BackgroundJob<AppUpdater.State>(State(), "oneos-update") {
         StageCheck.state.busy || PrepareJob.state.busy || LaunchJob.state.busy || LogJob.state.busy ||
             OldStagesJob.state.busy || RemoveJob.state.busy
 
-    /** Reads update.json unless it was read in the last hours ([force]: now). */
+    /**
+     * Upstream update checks are disabled so the app never prompts or confuses
+     * the user to replace their fork build with upstream releases (and avoids
+     * background network/thread startup overhead).
+     */
+    @Suppress("UNUSED_PARAMETER")
     fun check(ctx: Context, force: Boolean = false) {
-        if (state.busy) return
-        val app = ctx.applicationContext
-        val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val now = System.currentTimeMillis()
-        if (!force && state.phase != Phase.IDLE && now - prefs.getLong("checked", 0) < CHECK_EVERY_MS) return
-        update(state.copy(phase = Phase.CHECKING, message = null))
-        executor.execute {
-            val testUrl = AppUpdate.testUrl(testCode(app))
-            val test = testUrl != null
-            val r = runCatching { AppUpdate.parse(fetchText(testUrl ?: AppUpdate.URL), test).getOrThrow() }
-            prefs.edit().putLong("checked", now).apply()
-            val u = r.getOrNull()
-            update(
-                when {
-                    u == null -> State(Phase.FAILED, message = "Could not check for an update: ${r.exceptionOrNull()?.message ?: "no answer"}")
-                    u.newerThan(BuildConfig.VERSION_CODE) -> State(Phase.AVAILABLE, u)
-                    else -> State(Phase.CURRENT, u)
-                },
-            )
-            // The APK an earlier update installed stayed in files/oneos-update (0.4.44): only the
-            // update on offer is kept (its part, to resume, or its download, checked again before use).
-            val keep = u?.takeIf { it.newerThan(BuildConfig.VERSION_CODE) }?.let { setOf("OneOS-${it.versionCode}.part", APK) }.orEmpty()
-            dir(app).listFiles()?.filter { it.name !in keep }?.forEach { it.delete() }
-        }
+        if (!state.busy && state.phase != Phase.IDLE) update(State())
     }
 
     fun canInstall(): Boolean =

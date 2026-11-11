@@ -230,14 +230,12 @@ class StatusHomeFragment : Fragment(R.layout.home_content) {
         // rebuilt under the finger lost its tap, and "Skip saving logs" showed nothing for half a second).
         subs += LogJob.observeBy({ Triple(it.phase, it.recovering, it.stopping) }, onChange)
         subs += OldStagesJob.observe(onChange)
-        subs += AppUpdater.observe(onChange)
     }
 
     override fun onResume() {
         super.onResume()
         // Back from Settings (screen lock removed?), from the root app, or a new open: read again.
         Readiness.onResume(requireContext())
-        AppUpdater.check(requireContext())
         redraw()
     }
 
@@ -296,8 +294,8 @@ class StatusHomeFragment : Fragment(R.layout.home_content) {
                 picked = FixActions.pickedImage(ctx, report?.profile),
                 // A cold start: the last known Home, read-only, until this start's first check ends.
                 cached = Readiness.coldStartHome(ctx),
-                appUpdate = appUpdateOffer(report?.image ?: check.result?.status?.marker?.imageId?.let(Images::byId), report?.profile),
-                appUpdateBusy = AppUpdater.state.phase == AppUpdater.Phase.DOWNLOADING || AppUpdater.state.phase == AppUpdater.Phase.INSTALLING,
+                appUpdate = null,
+                appUpdateBusy = false,
             ),
         )
         return Now(state, report, facts)
