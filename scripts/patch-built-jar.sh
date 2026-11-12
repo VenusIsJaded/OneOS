@@ -22,7 +22,17 @@ for d in $DIRS; do
     DEX="$(echo "$d" | sed 's/^smali_//; s/^smali$/classes/').dex"
     rm -rf "$W/dex" && mkdir -p "$W/dex"
     unzip -q -o "$W/rebuilt.jar" "$DEX" -d "$W/dex"
-    (cd "$W/dex" && zip -q -0 "$W/out.jar" "$DEX")
+    python3 - "$W/out.jar" "$W/dex/$DEX" "$DEX" <<'PYEOF'
+import os, sys, zipfile
+jar, dex, name = sys.argv[1:4]
+tmp = jar + ".tmp"
+with zipfile.ZipFile(jar) as src, zipfile.ZipFile(tmp, "w") as dst:
+    for entry in src.infolist():
+        if entry.filename != name:
+            dst.writestr(entry, src.read(entry.filename))
+    dst.write(dex, name, compress_type=zipfile.ZIP_STORED)
+os.replace(tmp, jar)
+PYEOF
     echo "replaced $DEX"
 done
 python3 "$ROOT/scripts/check-dex.py" "$W/out.jar" >&2 || true

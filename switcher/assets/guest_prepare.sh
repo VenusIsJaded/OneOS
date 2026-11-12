@@ -1034,6 +1034,12 @@ elif [ -d "$SAMCAM_SRC" ] && [ "${ONEOS_GUEST_SAMSUNG_CAMERA:-1}" = 1 ]; then
         mkdir -p "$SOV"
         mount | grep -q " $SOV " || $BB mount -t tmpfs -o size=1m,mode=755 tmpfs "$SOV"
         rm -rf "$SOV/up" && mkdir -p "$SOV/up"
+        mkdir -p "$SOV/up/etc/permissions" &&
+            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<permissions>' '    <feature name="android.hardware.fingerprint" />' '</permissions>' > "$SOV/up/etc/permissions/android.hardware.fingerprint.xml" &&
+            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<permissions>' '    <feature name="android.hardware.biometrics.face" />' '</permissions>' > "$SOV/up/etc/permissions/android.hardware.biometrics.face.xml" &&
+            chmod 755 "$SOV/up/etc" "$SOV/up/etc/permissions" &&
+            chmod 644 "$SOV/up/etc/permissions/android.hardware.fingerprint.xml" "$SOV/up/etc/permissions/android.hardware.biometrics.face.xml" &&
+            $BB chcon -R u:object_r:system_file:s0 "$SOV/up/etc" 2>/dev/null || true
         echo "Samsung Camera: overlay $(date +%T)"
         if samcam_mountpoints "$SOV/up" sys && guest_root_mountpoint "$SOV/up" &&
            $BB mount -t overlay overlay -o "ro,lowerdir=$SOV/up:$ROOTFS/system" "$ROOTFS/system"; then
@@ -1053,6 +1059,21 @@ elif [ -d "$SAMCAM_SRC" ]; then
 fi
 # Without the camera's system overlay, add only the missing directory in a
 # private read-only layer before later system submounts are installed.
+# Ensure android.hardware.fingerprint & biometrics.face permissions exist even when Samsung Camera overlay was not mounted.
+if [ ! -e "$ROOTFS/system/etc/permissions/android.hardware.fingerprint.xml" ] && ! mount | grep -q " $ROOTFS/system type overlay"; then
+    BOV="$STAGE/biometric_ov"
+    if [ ! -L "$BOV" ] && mkdir -p "$BOV" && (mount | grep -q " $BOV " || $BB mount -t tmpfs -o size=1m,mode=755 tmpfs "$BOV"); then
+        rm -rf "$BOV/up" && mkdir -p "$BOV/up/etc/permissions" &&
+            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<permissions>' '    <feature name="android.hardware.fingerprint" />' '</permissions>' > "$BOV/up/etc/permissions/android.hardware.fingerprint.xml" &&
+            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<permissions>' '    <feature name="android.hardware.biometrics.face" />' '</permissions>' > "$BOV/up/etc/permissions/android.hardware.biometrics.face.xml" &&
+            chmod 755 "$BOV/up/etc" "$BOV/up/etc/permissions" &&
+            chmod 644 "$BOV/up/etc/permissions/android.hardware.fingerprint.xml" "$BOV/up/etc/permissions/android.hardware.biometrics.face.xml" &&
+            ([ ! -f "$STAGE/data/oneos_root/enabled" ] || guest_root_mountpoint "$BOV/up") &&
+            $BB chcon -R u:object_r:system_file:s0 "$BOV/up" 2>/dev/null &&
+            $BB mount -t overlay overlay -o "ro,lowerdir=$BOV/up:$ROOTFS/system" "$ROOTFS/system" 2>/dev/null &&
+            echo "Biometric features: fingerprint and face permissions mounted onto $ROOTFS/system" || true
+    fi
+fi
 if [ -f "$STAGE/data/oneos_root/enabled" ] && [ ! -d "$ROOTFS/system/xbin" ]; then
     GRO="$STAGE/guest_root_ov"
     [ ! -L "$GRO" ] || { echo 'ERROR: guest root overlay is a symlink'; exit 3; }
@@ -2366,6 +2387,58 @@ if [ -f "$STAGE/SystemUI_patched.apk" ] && [ -f "$QS_APK" ]; then
         fi
     else
         echo "Quick settings density patch left out (ONEOS_GUEST_QS_DENSITY=0)"
+    fi
+fi
+
+# ColorOS has no fingerprint ripples of its own: the wake glyph and the wave
+# after a successful unlock are this patched SystemUI
+# (switcher/patches/systemui-fingerprint-wave). When SystemUI_wave.dex and
+# OneOSWaveRepack.dex are staged, rebuild SystemUI_wave.apk in the guest's data
+# only when the stock APK or patched dex changes; guest_start binds it and sets
+# the 120 Hz floor.
+WAVE_STAMP_DEX="$STAGE/data/local/tmp/SystemUI_wave.dex.sha256"
+if [ -f "$STAGE/SystemUI_wave.dex" ] && [ -f "$STAGE/OneOSWaveRepack.dex" ] &&
+   [ -f "$QS_APK" ] && [ ! -f "$STAGE/SystemUI_patched.apk" ] &&
+   [ -f "$ROOTFS/system/framework/oplus-services.jar" ]; then
+    wave_dst="$STAGE/data/local/tmp"
+    mkdir -p "$wave_dst" || true
+    wave_stock_size=$(stat -c %s "$QS_APK" 2>/dev/null)
+    wave_stock_sha=$(sha256sum "$QS_APK" 2>/dev/null | awk '{print $1}')
+    wave_dex_sha=$(sha256sum "$STAGE/SystemUI_wave.dex" 2>/dev/null | awk '{print $1}')
+    if [ -f "$wave_dst/SystemUI_wave.apk" ] &&
+       [ "$(cat "$wave_dst/SystemUI_wave.stock.sha256" 2>/dev/null)" = "$wave_stock_sha" ] &&
+       [ "$(cat "$WAVE_STAMP_DEX" 2>/dev/null)" = "$wave_dex_sha" ]; then
+        echo "Guest SystemUI: the fingerprint wave APK is up to date"
+    else
+        $BB umount -l "$QS_APK" 2>/dev/null || true
+        wave_env=
+        if [ -n "${ONEOS_HOST_BOOTCLASSPATH:-}" ] && [ -n "${ONEOS_HOST_DEX2OATBOOTCLASSPATH:-}" ]; then
+            wave_env="BOOTCLASSPATH=$ONEOS_HOST_BOOTCLASSPATH DEX2OATBOOTCLASSPATH=$ONEOS_HOST_DEX2OATBOOTCLASSPATH"
+        else
+            wave_zpid=$(pidof zygote64 2>/dev/null | awk '{print $1}')
+            [ -n "$wave_zpid" ] || wave_zpid=$(pidof zygote 2>/dev/null | awk '{print $1}')
+            [ -n "$wave_zpid" ] &&
+                wave_env=$(tr '\0' '\n' < "/proc/$wave_zpid/environ" 2>/dev/null |
+                    grep -e '^BOOTCLASSPATH=' -e '^DEX2OATBOOTCLASSPATH=')
+        fi
+        rm -f "$wave_dst/SystemUI_wave.apk"
+        if [ -n "$wave_env" ] &&
+           env $wave_env ANDROID_ROOT=/system ANDROID_DATA=/data \
+               CLASSPATH="$STAGE/OneOSWaveRepack.dex" \
+               /system/bin/app_process /system/bin com.oneos.wave.OneOSWaveRepack \
+               "$QS_APK" classes3.dex "$STAGE/SystemUI_wave.dex" "$wave_dst/SystemUI_wave.apk"; then
+            printf '%s\n' "$wave_dex_sha" > "$WAVE_STAMP_DEX"
+            echo "Guest SystemUI: built the fingerprint wave APK from the stock SystemUI"
+        else
+            rm -f "$wave_dst/SystemUI_wave.apk"
+            echo "!!! WARNING: could not build the fingerprint wave APK; the stock SystemUI has no wave"
+        fi
+    fi
+    if [ -f "$wave_dst/SystemUI_wave.apk" ]; then
+        printf '%s\n' "$wave_stock_size" > "$wave_dst/SystemUI_wave.stock.size"
+        printf '%s\n' "$wave_stock_sha" > "$wave_dst/SystemUI_wave.stock.sha256"
+        chmod 644 "$wave_dst/SystemUI_wave.apk" "$wave_dst"/SystemUI_wave.stock.* 2>/dev/null || true
+        $BB chcon -h u:object_r:system_file:s0 "$wave_dst/SystemUI_wave.apk" 2>/dev/null || true
     fi
 fi
 
@@ -3784,6 +3857,35 @@ mkdir -p "$STAGE/data/anr" "$STAGE/data/app" "$STAGE/data/rollback" "$STAGE/data
 # The guest's own shared storage. Never the phone's /data/media: in run 25 the
 # guest's cleanup of a user it could not prepare deleted the photos in it.
 mkdir -p "$STAGE/data/media/0" "$STAGE/data/media/obb" "$STAGE/data/vendor_de/0" "$STAGE/data/vendor_ce/0"
+# The fingerprint framework makes this before setting the active user; without
+# it FingerprintUpdateActiveUserClient fails and no sensor is ever opened.
+mkdir -p "$STAGE/data/vendor_de/0/fpdata"
+chown 1000:1000 "$STAGE/data/vendor_de/0/fpdata" 2>/dev/null || true
+chmod 700 "$STAGE/data/vendor_de/0/fpdata" 2>/dev/null || true
+$BB chcon u:object_r:fingerprint_vendor_data_file:s0 "$STAGE/data/vendor_de/0/fpdata" 2>/dev/null || true
+
+# Carry One UI's biometric enrollment metadata into the guest so the guest's
+# FingerprintService/FaceService recognizes fingers/faces already enrolled in
+# the phone's TEE without touching One UI's credentials, gatekeeper or spblob.
+# ColorOS reads the legacy settings_fingerprint.xml; One UI writes _0.
+BIO_DST="$STAGE/data/system/users/0"
+mkdir -p "$BIO_DST" || true
+rm -f "$BIO_DST/settings_fingerprint_0.xml"
+bio=0
+for f in settings_fingerprint_0.xml settings_face.xml face_enrolled_position_0.xml; do
+    out=$f
+    [ "$f" = settings_fingerprint_0.xml ] && out=settings_fingerprint.xml
+    if [ -f "/data/system/users/0/$f" ]; then
+        cp -f "/data/system/users/0/$f" "$BIO_DST/$out" &&
+            chown 1000:1000 "$BIO_DST/$out" 2>/dev/null &&
+            chmod 644 "$BIO_DST/$out" 2>/dev/null &&
+            $BB chcon -h u:object_r:system_data_file:s0 "$BIO_DST/$out" 2>/dev/null
+        bio=$((bio + 1))
+    else
+        rm -f "$BIO_DST/$out"
+    fi
+done
+[ "$bio" -gt 0 ] && echo "Guest biometrics: carried One UI's $bio enrollment file(s) into the guest"
 
 # OneOS: without OneLineage's LineageOS packages (Launcher3, LatinIME,
 # LineageSettings; ColorOS has none of them) and with the OneOS app in place
