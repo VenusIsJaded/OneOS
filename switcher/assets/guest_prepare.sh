@@ -6022,6 +6022,27 @@ if [ "${ONEOS_GUEST_OEM_CAMERA:-0}" != 1 ] && { [ -d "$GUEST_PRODUCT/app/Apertur
             echo "Hid guest ${d#"$ROOTFS"/} (OPPO's camera needs the Find X9 Ultra's camera config and SDK; $OCWHY; ONEOS_GUEST_OEM_CAMERA=1 keeps it)"
     done
 fi
+
+# Strip OEM analytics, ad-delivery daemons, and background crash/telemetry uploaders
+# (ONEOS_GUEST_KEEP_TELEMETRY=1 keeps them). None of these provide user features:
+# they poll absent vendor diagnostic HALs or upload device telemetry in the background,
+# burning CPU and generating heat. Mainline APEX payloads (adservices,
+# ondevicepersonalization) stay mounted for BOOTCLASSPATH integrity and have their
+# background jobs disabled post-boot in UI Activator instead.
+if [ "${ONEOS_GUEST_KEEP_TELEMETRY:-0}" != 1 ]; then
+    hid_tel=0
+    for tname in         AnalyticsCore MSA MsaGlobal MiuiDaemon Joyose HybridAccessory CatchLog         NearmeStatisticsRom OplusStatisticsRom Heimdall Olc         OplusQualityProtect OplusLogKit HeytapLog         Vivoabe PemUsageStatistics VivoLog VivoCloudDiag         DiagnosticsPrivacy DiagnosticsTool NTDiagnostics StabilityMonitor         Traceur BetterBug Bug2GoRamdump; do
+        for d in             "$ROOTFS/system/app/$tname" "$ROOTFS/system/priv-app/$tname"             "$GUEST_PRODUCT/app/$tname" "$GUEST_PRODUCT/priv-app/$tname"             "$GUEST_SYSTEM_EXT/app/$tname" "$GUEST_SYSTEM_EXT/priv-app/$tname"             "$ROOTFS"/my_*/app/"$tname" "$ROOTFS"/my_*/priv-app/"$tname"             "$ROOTFS/mi_ext/product/app/$tname" "$ROOTFS/mi_ext/product/priv-app/$tname"; do
+            [ -d "$d" ] && [ ! -L "$d" ] || continue
+            mount | grep -qF " on $d " && continue
+            if $BB mount -t tmpfs -o ro,size=4k,mode=755 tmpfs "$d" 2>/dev/null; then
+                hid_tel=$((hid_tel + 1))
+                echo "Hid guest telemetry/tracker ${d#"$ROOTFS"/} (ONEOS_GUEST_KEEP_TELEMETRY=1 keeps it)"
+            fi
+        done
+    done
+    [ "$hid_tel" -gt 0 ] && echo "Guest telemetry: hid $hid_tel background tracker/analytics package folder(s)"
+fi
 # Google Play services (GMS_WANT, top; docs/pixel-guest.md). GmsCore is
 # presented as a plain product priv-app, as Pixels had it before Android 17,
 # and the image is not changed: a small tmpfs package folder ($STAGE/gmscore,

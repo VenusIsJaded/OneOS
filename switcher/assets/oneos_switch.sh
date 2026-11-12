@@ -2234,6 +2234,29 @@ while true; do
             echo \"[UI Activator] navigation: hide_navigationbar_enable=\$NAVK navigation_mode=\$NAVM\"
             case \"\$NAVK:\$NAVM\" in 0:2|2:0|3:0) echo \"[UI Activator] WARNING: ColorOS nav key and AOSP navigation_mode disagree\" ;; esac
             $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/pm disable android.ext.services/android.ext.services.notification.Assistant 2>/dev/null || true
+            # Once per stage, disable background advertising/personalization sandboxes
+            # and any remaining OEM analytics/telemetry packages (keeping APEX jars
+            # mounted so BOOTCLASSPATH and framework callers never throw).
+            if [ '${ONEOS_GUEST_KEEP_TELEMETRY:-0}' != 1 ] && [ ! -e $STAGE/data/oneos_trackers_off ] && [ ! -L $STAGE/data/oneos_trackers_off ]; then
+                (
+                    G_TRK="timeout 10 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh"
+                    \$G_TRK /system/bin/device_config put adservices global_kill_switch true >/dev/null 2>&1 || true
+                    \$G_TRK /system/bin/device_config put adservices adid_kill_switch true >/dev/null 2>&1 || true
+                    \$G_TRK /system/bin/device_config put on_device_personalization global_kill_switch true >/dev/null 2>&1 || true
+                    \$G_TRK /system/bin/settings put global multi_cb 0 >/dev/null 2>&1 || true
+                    \$G_TRK /system/bin/settings put secure send_action_app_error 0 >/dev/null 2>&1 || true
+                    \$G_TRK /system/bin/settings put global upload_log_pref 0 >/dev/null 2>&1 || true
+                    \$G_TRK /system/bin/settings put secure user_experience_enabled 0 >/dev/null 2>&1 || true
+                    disabled_trk=0
+                    for tp in                         com.google.android.adservices.api                         com.android.adservices.api                         com.google.android.ondevicepersonalization.services                         com.android.ondevicepersonalization.services                         com.miui.analytics                         com.miui.msa.global                         com.miui.daemon                         com.xiaomi.joyose                         com.nearme.statistics.rom                         com.oplus.statistics.rom                         com.oplus.olc                         com.oplus.logkit                         com.heytap.habit.analysis                         com.coloros.oshare.statistics                         com.vivo.epm                         com.nothing.proxy                         com.android.traceur; do
+                        if \$G_TRK /system/bin/pm list packages \$tp 2>/dev/null | grep -qxF "package:\$tp"; then
+                            \$G_TRK /system/bin/pm disable-user --user 0 \$tp >/dev/null 2>&1 && disabled_trk=\$((disabled_trk + 1))
+                        fi
+                    done
+                    mkdir $STAGE/data/oneos_trackers_off 2>/dev/null || true
+                    echo "[UI Activator] privacy/heat: disabled \$disabled_trk background tracker/adservices package(s) and set AdServices/ODP kill-switches"
+                ) </dev/null &
+            fi
             # Fallback for a staged /data that had no settings files to seed, before
             # HOME: a fresh stage has none. Pixel's two setup wizards (ColorOS has
             # none) would take that first boot and wait for Google services.

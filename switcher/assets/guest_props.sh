@@ -1169,6 +1169,17 @@ add)
         done
         echo "guest_props: ColorOS fingerprint icon ${fp_loc}px from the bottom (${fp_mb}mm + ${fp_ah}mm/2 at ${fp_dpi} dpi)"
     fi
+    # Suppress OEM background analytics, statistics daemons, and log uploaders
+    # in memory for the session (never overwriting a property One UI itself owns).
+    if [ "${ONEOS_GUEST_KEEP_TELEMETRY:-0}" != 1 ]; then
+        for kv in             persist.sys.oplus.heimdall=false             persist.sys.assert.panic=false             persist.sys.oem.statistics=0             ro.miui.has_gmscore_telemetry=0             persist.sys.miui_optimization_upload=false             logd.statistics=0             ro.logd.kernel=false; do
+            k=${kv%%=*}
+            grep -qxF "$k" "$HOST" && continue
+            drop_new "$k"
+            echo "$kv" >> "$NEW"
+        done
+        echo "guest_props: OEM background telemetry/statistics properties suppressed for the session"
+    fi
     echo "guest_props add: batch $(date +%T)"
     if "$RP" -n -f "$NEW" 2>/dev/null; then
         cut -d= -f1 "$NEW" > "$ADDED"
