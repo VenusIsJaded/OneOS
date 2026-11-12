@@ -95,7 +95,8 @@ object PatchChannels {
         }
         return manifest
     }
-    fun stableRelease(): AppUpdate = AppUpdate.parse(fetch(AppUpdate.URL).toString(Charsets.UTF_8)).getOrThrow()
+    fun stableRelease(): AppUpdate =
+        AppUpdate(BuildConfig.VERSION_CODE, BuildConfig.VERSION_NAME, "", 0L, "")
 
     private fun fetch(url: String): ByteArray {
         val connection = URL(url).openConnection() as HttpURLConnection

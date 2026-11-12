@@ -286,11 +286,12 @@ class EnvironmentActivity : EdgeToEdgeActivity() {
                         dialog.dismiss(); choosePatches(patchSources[which].id)
                     }.setNegativeButton(android.R.string.cancel, null).show()
             }
-            PrebootCards.row(patches, getString(R.string.patch_channel_refresh),
-                PatchChannels.setFor(patchProfile.id, image.id)?.let { set ->
-                    if (!source.stable) runCatching { PatchChannels.snapshot(this, set, patchProfile.id)?.revision }.getOrNull()
-                    else getString(R.string.patch_channel_stable_version, PatchChannels.stableVersion(this))
-                }, enabled = idle) { checkPatches() }
+            if (!source.stable) {
+                PrebootCards.row(patches, getString(R.string.patch_channel_refresh),
+                    PatchChannels.setFor(patchProfile.id, image.id)?.let { set ->
+                        runCatching { PatchChannels.snapshot(this, set, patchProfile.id)?.revision }.getOrNull()
+                    }, enabled = idle) { checkPatches() }
+            }
         }
         if (maintenance != null) {
             Cards.row(Cards.section(column, null, rows = true), Icons.drawable.ic_oui_refresh,
@@ -427,25 +428,7 @@ class EnvironmentActivity : EdgeToEdgeActivity() {
     private fun checkPatches() {
         val profile = channelProfile() ?: return
         val source = PatchChannels.selected(this, profile.id, image.id)
-        if (!source.stable) { choosePatches(source.id, showResult = true); return }
-        if (patchBusy || Readiness.anyBusy()) return
-        patchBusy = true; render()
-        io.execute {
-            val result = runCatching { PatchChannels.stableRelease() }
-            runOnUiThread {
-                patchBusy = false
-                if (!isDestroyed) {
-                    val release = result.getOrNull()
-                    val message = release?.let {
-                        getString(if (it.versionCode > PatchChannels.stableCode(this)) R.string.patch_channel_stable_newer
-                            else R.string.patch_channel_stable_current, it.versionName)
-                    } ?: result.exceptionOrNull()?.message
-                    AlertDialog.Builder(this).setTitle(if (result.isSuccess) R.string.patch_channel_refresh else R.string.patch_channel_failed)
-                        .setMessage(message).setPositiveButton(android.R.string.ok, null).show()
-                    render()
-                }
-            }
-        }
+        if (!source.stable) choosePatches(source.id, showResult = true)
     }
 
     private fun choosePatches(sourceId: String, showResult: Boolean = false) {
