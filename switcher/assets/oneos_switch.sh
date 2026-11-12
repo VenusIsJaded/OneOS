@@ -2045,7 +2045,7 @@ BB=\"$BB\"
 GEN=\$(cat $STAGE/tmp/softreboot.gen 2>/dev/null); PASS=1; BRPID=''
 while true; do
 while true; do
-    sleep 2
+    sleep 0.5
     PID=\$(pidof system_server | awk '{print \$1}')
     if [ -n \"\$PID\" ]; then
         # Bring apps, early (owner, 11-10: the apps came 10-15 s after the
@@ -2807,46 +2807,31 @@ while true; do
                 if [ -d \$NTG ] && [ -z \"\$(ls \$NTG/GenerateVibr 2>/dev/null)\" ]; then
                     ( sleep 30; timeout 20 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/am broadcast -a com.nothing.settings.nt_generative_ringtone_reset -n com.nothing.generateringtoneservice/.BootReceiver >/dev/null 2>&1 && echo \"[UI Activator] Nothing ringtones: regenerate requested (no haptic tracks yet)\" ) </dev/null &
                 fi
-                # Nothing's launcher on the inner panel (run 16): one phone-wide
-                # column of icons, no room at the sides, and the drawer's search
-                # bar under the navigation handle. Its own dump (DeviceProfile:
-                # two panels, grid, insets, taskbar) 40 s after HOME, folded or
-                # not, to diag_launcher.txt.
-                ( sleep 40; timeout 15 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys activity com.nothing.launcher > $STAGE/diag_launcher.txt 2>&1 ) </dev/null >/dev/null 2>&1 &
-                # The power key's double press (Essential Space, run 24: nothing
-                # opened): the policy's multi-press behavior and target, the
-                # overlays on android, 20 s after HOME (sessions can be a minute), to diag_power.txt.
-                ( sleep 20; {
-                      timeout 15 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys window policy 2>&1 | grep -i -E 'press|power|gesture|target' | head -n 40
-                      echo '== overlays (android)'
-                      timeout 15 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/cmd overlay list android 2>&1 | head -n 40
-                      echo '== camera gesture settings'
-                      for k in camera_double_tap_power_gesture_disabled double_tap_power_button_gesture_enabled double_tap_power_button_gesture; do
-                          echo \"\$k=\$(timeout 10 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings get secure \$k 2>&1)\"
-                      done
-                  } > $STAGE/diag_power.txt 2>&1 ) </dev/null >/dev/null 2>&1 &
-                # One UI's cameraserver waits 5 s in every connect (runs 19-21,
-                # every app), right after its lookups of these services; the
-                # worker and the Knox stand-in both answer. Each name checked from
-                # One UI's side (the cameraserver's) and the guest's, timed, 45 s
-                # after HOME, to diag_camsvc.txt.
-                ( sleep 45; for n in activity appops permission processinfo sensor_privacy media.camera.proxy media.camera.worker edmnativehelper media.camera; do
-                      t0=\$(date +%s%N); h=\$(timeout 8 /system/bin/service check \$n 2>&1 | tr -d '\n'); t1=\$(date +%s%N)
-                      g=\$(timeout 8 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/service check \$n 2>&1 | tr -d '\n'); t2=\$(date +%s%N)
-                      echo \"\$n | host \$(( (t1 - t0) / 1000000 )) ms: \$h | guest \$(( (t2 - t1) / 1000000 )) ms: \$g\"
-                  done > $STAGE/diag_camsvc.txt 2>&1 ) </dev/null >/dev/null 2>&1 &
-                # Samsung Camera's libraries as the guest's package manager has them
-                # (ColorOS on the S25+: ClassNotFoundException oneos.semcompat.Sem,
-                # the compat library declared and read; report 6ddd6a87), 50 s
-                # after HOME, to diag_samcam.txt. Read-only.
-                if [ -d $STAGE/samcam_build ]; then
-                    ( sleep 50; {
-                        timeout 20 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys package com.sec.android.app.camera 2>&1 | grep -A14 -E 'usesLibraries|usesOptionalLibraries|usesLibraryFiles|usesLibraryInfos|sharedLibrar'
-                        echo '== library declarations'
-                        timeout 20 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys package libraries 2>&1 | grep -E 'worker_wrapper_compat|semextendedformat|secimaging'
-                        echo '== files'
-                        timeout 10 $BB nsenter -t \$PID -m /system/bin/sh -c 'ls -laZ /system_ext/framework/oneos-camera-compat.jar /system_ext/framework/semextendedformat.jar /system_ext/framework/secimaging.jar' 2>&1
-                      } > $STAGE/diag_samcam.txt 2>&1 ) </dev/null >/dev/null 2>&1 &
+                if [ '${ONEOS_BOOT_DIAG:-0}' = 1 ]; then
+                    ( sleep 40; timeout 15 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys activity com.nothing.launcher > $STAGE/diag_launcher.txt 2>&1 ) </dev/null >/dev/null 2>&1 &
+                    ( sleep 20; {
+                          timeout 15 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys window policy 2>&1 | grep -i -E 'press|power|gesture|target' | head -n 40
+                          echo '== overlays (android)'
+                          timeout 15 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/cmd overlay list android 2>&1 | head -n 40
+                          echo '== camera gesture settings'
+                          for k in camera_double_tap_power_gesture_disabled double_tap_power_button_gesture_enabled double_tap_power_button_gesture; do
+                              echo \"\$k=\$(timeout 10 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings get secure \$k 2>&1)\"
+                          done
+                      } > $STAGE/diag_power.txt 2>&1 ) </dev/null >/dev/null 2>&1 &
+                    ( sleep 45; for n in activity appops permission processinfo sensor_privacy media.camera.proxy media.camera.worker edmnativehelper media.camera; do
+                          t0=\$(date +%s%N); h=\$(timeout 8 /system/bin/service check \$n 2>&1 | tr -d '\n'); t1=\$(date +%s%N)
+                          g=\$(timeout 8 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/service check \$n 2>&1 | tr -d '\n'); t2=\$(date +%s%N)
+                          echo \"\$n | host \$(( (t1 - t0) / 1000000 )) ms: \$h | guest \$(( (t2 - t1) / 1000000 )) ms: \$g\"
+                      done > $STAGE/diag_camsvc.txt 2>&1 ) </dev/null >/dev/null 2>&1 &
+                    if [ -d $STAGE/samcam_build ]; then
+                        ( sleep 50; {
+                            timeout 20 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys package com.sec.android.app.camera 2>&1 | grep -A14 -E 'usesLibraries|usesOptionalLibraries|usesLibraryFiles|usesLibraryInfos|sharedLibrar'
+                            echo '== library declarations'
+                            timeout 20 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys package libraries 2>&1 | grep -E 'worker_wrapper_compat|semextendedformat|secimaging'
+                            echo '== files'
+                            timeout 10 $BB nsenter -t \$PID -m /system/bin/sh -c 'ls -laZ /system_ext/framework/oneos-camera-compat.jar /system_ext/framework/semextendedformat.jar /system_ext/framework/secimaging.jar' 2>&1
+                          } > $STAGE/diag_samcam.txt 2>&1 ) </dev/null >/dev/null 2>&1 &
+                    fi
                 fi
                 # With a staged OneOSDisplayProbe.dex (patches/OneOSDisplayProbe.java,
                 # diagnostics only): the default display's possible sizes as the
@@ -3176,7 +3161,7 @@ while true; do
                 # now for the first six lid events of a session only; after that one
                 # line per event, and the touch IC handling as before.
                 # ONEOS_FOLD_DIAG=all samples every event, =0 none, a number that many.
-                FDN='${ONEOS_FOLD_DIAG:-6}'; case \"\$FDN\" in all) FDN=1000000 ;; ''|*[!0-9]*) FDN=6 ;; esac
+                FDN='${ONEOS_FOLD_DIAG:-0}'; case \"\$FDN\" in all) FDN=1000000 ;; ''|*[!0-9]*) FDN=0 ;; esac
                 [ -n \"\$FLIP\" ] && [ \$PASS = 1 ] && ( n=0; getevent -lq \$FLIP 2>/dev/null | while read typ code val rest; do
                     [ \"\$code\" = SW_LID ] || continue
                     n=\$((n + 1)); ts=\$(date +%T)
@@ -3252,7 +3237,7 @@ while true; do
             # dumpsys activity top 4 s later caught Settings Font instead (the user
             # had moved on), so dump every com.oplus.wallpapers activity, stopped
             # ones included, 2 s after it comes to the front.
-            if [ '${ONEOS_WALLPAPER_PROBE:-1}' = 1 ]; then
+            if [ '${ONEOS_WALLPAPER_PROBE:-0}' = 1 ]; then
                 ( WD=$STAGE/diag_pages; mkdir -p \$WD; n=0; i=0; last=''
                   while [ \$n -lt 2 ] && [ \$i -lt 400 ]; do
                       i=\$((i + 1)); sleep 3
@@ -3283,11 +3268,13 @@ while true; do
                 # settings, SurfaceFlinger's color matrix, the overlay that decides
                 # config_cv_available and the bridge's log, 60 s after Home, in
                 # diag_display. Read only.
-                ( sleep 60; WD=$STAGE/diag_display; mkdir -p \$WD
-                  for k in cv_enabled cv_preferred_intensity cv_dynamic_enabled; do echo \"\$k=\$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings get system \$k 2>&1)\"; done > \$WD/cv.txt
-                  timeout 20 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys SurfaceFlinger 2>&1 | grep -i -E -A6 'color ?matrix|colortransform' > \$WD/sf_color.txt
-                  timeout 15 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/cmd overlay lookup android android:bool/config_cv_available > \$WD/cv_overlay.txt 2>&1
-                  timeout 10 logcat -d -s OneOSComfortView DisplayTransformManager 2>/dev/null | tail -n 20 > \$WD/cv_log.txt ) </dev/null >/dev/null 2>&1 &
+                if [ '${ONEOS_BOOT_DIAG:-0}' = 1 ]; then
+                    ( sleep 60; WD=$STAGE/diag_display; mkdir -p \$WD
+                      for k in cv_enabled cv_preferred_intensity cv_dynamic_enabled; do echo \"\$k=\$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings get system \$k 2>&1)\"; done > \$WD/cv.txt
+                      timeout 20 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys SurfaceFlinger 2>&1 | grep -i -E -A6 'color ?matrix|colortransform' > \$WD/sf_color.txt
+                      timeout 15 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/cmd overlay lookup android android:bool/config_cv_available > \$WD/cv_overlay.txt 2>&1
+                      timeout 10 logcat -d -s OneOSComfortView DisplayTransformManager 2>/dev/null | tail -n 20 > \$WD/cv_log.txt ) </dev/null >/dev/null 2>&1 &
+                fi
             fi
             echo '[UI Activator] Creating missing app data dirs...'
             $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/sh /data/local/tmp/fix_app_dirs.sh 2>/dev/null || true
@@ -3311,15 +3298,32 @@ while true; do
                 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/sh /data/oneos_pixel_hinge/runtime.sh runtime >\"$STAGE/pixel_hinge_runtime.log\" 2>&1 || echo '[UI Activator] Pixel hinge relay unavailable; native sensor fallback active'
             fi
 
-            # Populate network permissions for all installed packages
-            for uid in \$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/pm list packages -U 2>/dev/null | grep -o 'uid:[0-9]*' | cut -d: -f2 | sort -u); do
-                [ -n \"\$uid\" ] || continue
-                b0=\$(printf \"%02x\" \$((uid & 0xff)))
-                b1=\$(printf \"%02x\" \$(((uid >> 8) & 0xff)))
-                b2=\$(printf \"%02x\" \$(((uid >> 16) & 0xff)))
-                b3=\$(printf \"%02x\" \$(((uid >> 24) & 0xff)))
-                bpftool map update pinned /sys/fs/bpf/netd_shared/map_netd_uid_permission_map key hex \$b0 \$b1 \$b2 \$b3 value hex 0c 2>/dev/null || true
-            done
+            # Populate network permissions for all installed packages in one batched bpftool call
+            BPF_BATCH=$STAGE/tmp/bpf_uid_perms.batch
+            if [ -r $STAGE/data/system/packages.list ]; then
+                awk '\$2 ~ /^[0-9]+\$/ && !seen[\$2]++ {
+                    u = \$2 + 0
+                    b0 = u % 256; u = int(u / 256)
+                    b1 = u % 256; u = int(u / 256)
+                    b2 = u % 256; b3 = int(u / 256) % 256
+                    printf \"map update pinned /sys/fs/bpf/netd_shared/map_netd_uid_permission_map key hex %02x %02x %02x %02x value hex 0c\\n\", b0, b1, b2, b3
+                }' $STAGE/data/system/packages.list > \$BPF_BATCH 2>/dev/null
+                if [ -s \$BPF_BATCH ]; then
+                    bpftool batch file \$BPF_BATCH >/dev/null 2>&1 || while IFS= read -r bline; do
+                        bpftool \$bline 2>/dev/null || true
+                    done < \$BPF_BATCH
+                fi
+                rm -f \$BPF_BATCH
+            else
+                for uid in \$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/pm list packages -U 2>/dev/null | grep -o 'uid:[0-9]*' | cut -d: -f2 | sort -u); do
+                    [ -n \"\$uid\" ] || continue
+                    b0=\$(printf \"%02x\" \$((uid & 0xff)))
+                    b1=\$(printf \"%02x\" \$(((uid >> 8) & 0xff)))
+                    b2=\$(printf \"%02x\" \$(((uid >> 16) & 0xff)))
+                    b3=\$(printf \"%02x\" \$(((uid >> 24) & 0xff)))
+                    bpftool map update pinned /sys/fs/bpf/netd_shared/map_netd_uid_permission_map key hex \$b0 \$b1 \$b2 \$b3 value hex 0c 2>/dev/null || true
+                done
+            fi
 
             # Ensure default routing
             DEF_IF=\$(ip route | grep -o 'dev [^ ]*' | head -n 1 | awk '{print \$2}')
@@ -3351,7 +3355,7 @@ while true; do
                     # state in diag_wifi (network names only there, never in this
                     # log). In the background. None of it needs verbose logging (set
                     # above; run 43: switching it on here gave the debug text).
-                    if [ $GUEST_OPLUS = 0 ]; then
+                    if [ $GUEST_OPLUS = 0 ] && [ '${ONEOS_BOOT_DIAG:-0}' = 1 ]; then
                         rm -rf $STAGE/diag_wifi
                         ( sleep 45; mkdir -p $STAGE/diag_wifi
                           for c in status list-scan-results list-networks is-verbose-logging; do echo \"== cmd wifi \$c\"; timeout 15 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/cmd wifi \$c 2>&1; done > $STAGE/diag_wifi/wifi.txt
@@ -3403,39 +3407,63 @@ fi
 # $STAGE/cpu_top.log (collected with the stage's logs), the six busiest
 # processes over one second and the CPU totals (HyperOS run 11: 42-44 C skin
 # all session and nothing said which process kept the CPU busy).
-$BB sh -c "
+SKIN_NODE=''
+for tz in /sys/class/thermal/thermal_zone*; do
+    [ -r "$tz/type" ] && [ -r "$tz/temp" ] || continue
+    case "$(cat "$tz/type" 2>/dev/null)" in
+        skin-therm|skin_therm|sec-skin-therm|sec_skin_therm|surface_therm|surface-therm|quiet-therm|quiet_therm|ap_ntc)
+            tv=$(cat "$tz/temp" 2>/dev/null)
+            case "$tv" in -*[0-9]*|[1-9][0-9]*) SKIN_NODE="$tz/temp"; break ;; esac ;;
+    esac
+done
+
+$BB nice -n 19 $BB sh -c "
     echo \$\$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null
     F=$STAGE/diag_series.txt
     T=$STAGE/cpu_top.log
-    echo \"# \$(date) OneOS session sampler: every 30 s, CPU totals and the six busiest processes over 1 s (%CPU of one core)\" > \$T
-    echo \"# \$(date) OneOS session sampler, one line every 30 s: time, thermal status, skin C, policyN=scaling_max_freq/cpuinfo_max_freq kHz, mBlurEnabled, disable_window_blurs, battery %,status\" > \$F
+    SKIN_NODE='$SKIN_NODE'
+    BOOT_DIAG='${ONEOS_BOOT_DIAG:-0}'
+    echo \"# \$(date) OneOS session sampler: every 60 s (sysfs-first, nice 19)\" > \$T
+    echo \"# \$(date) OneOS session sampler, one line every 60 s: time, thermal status, skin C, policyN=scaling_max_freq/cpuinfo_max_freq kHz, gpu_max_clock, battery %,status\" > \$F
     while true; do
         [ -f $STAGE/data/oneos_rec_stop ] && { echo \"# \$(date +%T) the return started: sampler stopped\" >> \$F; exit 0; }
         [ -s $STAGE/guest_mntns ] || { echo \"# \$(date +%T) no guest namespace record: sampler stopped\" >> \$F; exit 0; }
         t0=\$(date +%s)
+        st=''; sk=''; bl='-'; dw='-'
+        if [ -n \"\$SKIN_NODE\" ] && [ -r \"\$SKIN_NODE\" ]; then
+            raw=\$(cat \"\$SKIN_NODE\" 2>/dev/null)
+            case \"\$raw\" in
+                -*|'') ;;
+                *) sk=\$(awk -v v=\"\$raw\" 'BEGIN { if (v > 200) printf \"%.1f\", v / 1000.0; else if (v > 0) printf \"%.1f\", v }') ;;
+            esac
+        fi
         P=\$(pidof system_server | awk '{print \$1}')
-        st=''; sk=''; bl=''; dw=''
-        if [ -n \"\$P\" ]; then
+        if [ -n \"\$P\" ] && { [ -z \"\$sk\" ] || [ \"\$BOOT_DIAG\" = 1 ]; }; then
             TH=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys thermalservice 2>/dev/null)
             st=\$(echo \"\$TH\" | sed -n 's/^Thermal Status: *\([0-9][0-9]*\).*/\1/p' | head -n 1)
-            sk=\$(echo \"\$TH\" | sed -n '/^Current temperatures from HAL/,/^[^[:space:]]/p' | sed -n 's/.*mValue=\([-0-9.]*\), mType=[0-9]*, mName=SKIN,.*/\1/p' | head -n 1)
-            bl=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys window windows 2>/dev/null | grep -m 1 -o 'mBlurEnabled=[a-z]*' | sed 's/.*=//')
-            dw=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings get global disable_window_blurs 2>/dev/null)
+            [ -n \"\$sk\" ] || sk=\$(echo \"\$TH\" | sed -n '/^Current temperatures from HAL/,/^[^[:space:]]/p' | sed -n 's/.*mValue=\([-0-9.]*\), mType=[0-9]*, mName=SKIN,.*/\1/p' | head -n 1)
+            if [ \"\$BOOT_DIAG\" = 1 ]; then
+                bl=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys window windows 2>/dev/null | grep -m 1 -o 'mBlurEnabled=[a-z]*' | sed 's/.*=//')
+                dw=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings get global disable_window_blurs 2>/dev/null)
+            fi
         fi
         c=''
         for p in /sys/devices/system/cpu/cpufreq/policy*; do
             [ -r \$p/scaling_max_freq ] && c=\"\$c \${p##*/}=\$(cat \$p/scaling_max_freq 2>/dev/null)/\$(cat \$p/cpuinfo_max_freq 2>/dev/null)\"
         done
+        [ -r /sys/kernel/gpu/gpu_max_clock ] && c=\"\$c gpu=\$(cat /sys/kernel/gpu/gpu_max_clock 2>/dev/null)\"
         bc=\$(cat /sys/class/power_supply/battery/capacity 2>/dev/null)
         bs=\$(cat /sys/class/power_supply/battery/status 2>/dev/null | tr ' ' _)
         echo \"\$(date +%T) thermal=\${st:--} skin=\${sk:--}\$c blur=\${bl:--} disable_window_blurs=\${dw:--} battery=\${bc:-?}%,\${bs:-?}\" >> \$F
-        TOP=\$(timeout 10 top -b -n 1 -d 1 -m 6 -s 1 -o %CPU,PID,NAME 2>/dev/null)
-        echo \"\$(date +%T) \$(echo \"\$TOP\" | grep -m 1 'cpu ' | tr -s ' ') |\$(echo \"\$TOP\" | awk '\$1 ~ /^[0-9.]+\$/ && \$2 ~ /^[0-9]+\$/ { printf \" %s %s\", \$1, \$3 }')\" >> \$T
-        s=\$((t0 + 30 - \$(date +%s))); [ \$s -gt 0 ] || s=1
+        if [ \"\$BOOT_DIAG\" = 1 ]; then
+            TOP=\$(timeout 10 top -b -n 1 -d 1 -m 6 -s 1 -o %CPU,PID,NAME 2>/dev/null)
+            echo \"\$(date +%T) \$(echo \"\$TOP\" | grep -m 1 'cpu ' | tr -s ' ') |\$(echo \"\$TOP\" | awk '\$1 ~ /^[0-9.]+\$/ && \$2 ~ /^[0-9]+\$/ { printf \" %s %s\", \$1, \$3 }')\" >> \$T
+        fi
+        s=\$((t0 + 60 - \$(date +%s))); [ \$s -gt 0 ] || s=1
         sleep \$s
     done
 " </dev/null >/dev/null 2>&1 &
-echo "Session sampler: every 30 s to $STAGE/diag_series.txt"
+echo "Session sampler: every 60 s to $STAGE/diag_series.txt (skin sysfs: ${SKIN_NODE:-dumpsys fallback})"
 
 # Heat cap (S25 Ultra af6c2b17; owner 2026-10-27: cap only when hot). One UI's
 # heat control (SSRM) stops with One UI's system_server, and nothing in the
@@ -3470,14 +3498,35 @@ GUEST_THERMAL_MAP=0
 [ "${ONEOS_GUEST_THERMAL_MAP:-1}" = 1 ] && grep -q '^  "image": "pixel' "$STAGE/.oneos_stage" 2>/dev/null && GUEST_THERMAL_MAP=1
 if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
     [ $HEAT_CAP = 1 ] && : > "$STAGE/heat_cap.active"
-    rm -f "$STAGE/cpufreq_max_limit.released"
+    rm -f "$STAGE/cpufreq_max_limit.released" "$STAGE/gpu_max_clock.capped"
     $BB sh -c "
     : oneos_heat_cap
     echo \$\$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null
     F=$STAGE/heat_cap.log
     CFL=/sys/devices/system/cpu/cpufreq_limit/cpufreq_max_limit
+    GCLK=/sys/kernel/gpu/gpu_max_clock
+    SKIN_NODE='$SKIN_NODE'
+    GFREQS=''
+    if [ -r /sys/class/kgsl/kgsl-3d0/gpu_available_frequencies ]; then
+        GFREQS=\$(awk '{for(i=1;i<=NF;i++)if(\$i~/^[0-9]+\$/)printf \"%d \", int(\$i/1000000)}' /sys/class/kgsl/kgsl-3d0/gpu_available_frequencies 2>/dev/null)
+    elif [ -r /sys/kernel/gpu/gpu_freq_table ]; then
+        GFREQS=\$(awk '{for(i=1;i<=NF;i++)if(\$i~/^[0-9]+\$/)printf \"%d \", \$i}' /sys/kernel/gpu/gpu_freq_table 2>/dev/null)
+    fi
+    GMAX=\$(echo \"\$GFREQS\" | awk '{for(i=1;i<=NF;i++)if(\$i>m)m=\$i}END{print m+0}')
+    gpu_step() {
+        [ \"\$GMAX\" -gt 0 ] || return 0
+        echo \"\$GFREQS\" | awk -v max=\"\$GMAX\" -v pct=\"\$1\" '{
+            lim = int(max * pct / 100); best = 0; low = 0
+            for (i = 1; i <= NF; i++) {
+                f = \$i + 0; if (f <= 0) continue
+                if (low == 0 || f < low) low = f
+                if (f <= lim && f > best) best = f
+            }
+            print (best > 0 ? best : low)
+        }'
+    }
     if [ $HEAT_CAP = 1 ]; then
-        echo \"# \$(date) OneOS heat cap: from 45, 47, 50 C skin every CPU policy at 80, 65, 50% of its top clock (2 C hysteresis)\" > \$F
+        echo \"# \$(date) OneOS heat cap: from 43, 45, 47, 50 C skin every CPU policy & GPU at 85, 75, 62, 48% of top clock (2 C hysteresis; sysfs: \${SKIN_NODE:-none})\" > \$F
     else
         echo \"# \$(date) OneOS heat cap off (Cool down when hot): the guest thermal status only\" > \$F
     fi
@@ -3495,6 +3544,11 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
             echo \$hw > \$p/scaling_max_freq 2>/dev/null
             c=\"\$c \${p##*/}=\$(cat \$p/scaling_max_freq 2>/dev/null)/\$hw\"
         done
+        if [ \"$HOST_LOW_POWER\" = 0 ] && [ \"\$GMAX\" -gt 0 ] && [ -w \$GCLK ]; then
+            echo \$GMAX > \$GCLK 2>/dev/null
+            rm -f $STAGE/gpu_max_clock.capped
+            c=\"\$c gpu=\$(cat \$GCLK 2>/dev/null)/\$GMAX\"
+        fi
         echo \"\$(date +%T) \$1: full clock:\$c\" >> \$F
     }
     lvl=0; first=1; tl=-1; lp=''
@@ -3504,10 +3558,19 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
             echo \"# \$(date +%T) stopped (the return started, or no guest namespace record)\" >> \$F
             exit 0
         fi
-        P=\$(pidof system_server | awk '{print \$1}')
         sk=''
-        [ -n \"\$P\" ] && sk=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys thermalservice 2>/dev/null | sed -n '/^Current temperatures from HAL/,/^[^[:space:]]/p' | sed -n 's/.*mValue=\([-0-9.]*\), mType=[0-9]*, mName=SKIN,.*/\1/p' | head -n 1)
-        if [ -n \"\$sk\" ] && [ $GUEST_THERMAL_MAP = 1 ]; then
+        if [ -n \"\$SKIN_NODE\" ] && [ -r \"\$SKIN_NODE\" ]; then
+            raw=\$(cat \"\$SKIN_NODE\" 2>/dev/null)
+            case \"\$raw\" in
+                -*|'') ;;
+                *) sk=\$(awk -v v=\"\$raw\" 'BEGIN { if (v > 200) printf \"%.1f\", v / 1000.0; else if (v > 0) printf \"%.1f\", v }') ;;
+            esac
+        fi
+        P=\$(pidof system_server | awk '{print \$1}')
+        if [ -z \"\$sk\" ] && [ -n \"\$P\" ]; then
+            sk=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys thermalservice 2>/dev/null | sed -n '/^Current temperatures from HAL/,/^[^[:space:]]/p' | sed -n 's/.*mValue=\([-0-9.]*\), mType=[0-9]*, mName=SKIN,.*/\1/p' | head -n 1)
+        fi
+        if [ -n \"\$sk\" ] && [ $GUEST_THERMAL_MAP = 1 ] && [ -n \"\$P\" ]; then
             [ \"\$P\" = \"\$lp\" ] || tl=-1
             lp=\$P
             nt=\$(awk -v s=\"\$sk\" -v l=\$tl 'BEGIN { t[1] = 47; t[2] = 50; t[3] = 53; t[4] = 56; if (l < 0) l = 0; while (l < 4 && s >= t[l + 1]) l++; while (l > 0 && s < t[l] - 1) l--; print l }')
@@ -3519,18 +3582,19 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
             fi
         fi
         if [ -n \"\$sk\" ] && [ $HEAT_CAP = 1 ]; then
-            new=\$(awk -v s=\"\$sk\" -v l=\$lvl 'BEGIN { t[1] = 45; t[2] = 47; t[3] = 50; while (l < 3 && s >= t[l + 1]) l++; while (l > 0 && s < t[l] - 2) l--; print l }')
+            new=\$(awk -v s=\"\$sk\" -v l=\$lvl 'BEGIN { t[1] = 43; t[2] = 45; t[3] = 47; t[4] = 50; while (l < 4 && s >= t[l + 1]) l++; while (l > 0 && s < t[l] - 2) l--; print l }')
             if [ \"\$new\" = 0 ] && [ \$first = 1 ]; then
                 capped=''
                 for p in /sys/devices/system/cpu/cpufreq/policy*; do
                     [ \"\$(cat \$p/scaling_max_freq 2>/dev/null)\" = \"\$(cat \$p/cpuinfo_max_freq 2>/dev/null)\" ] || capped=1
                 done
+                [ \"\$GMAX\" -gt 0 ] && [ -r \$GCLK ] && [ \"\$(cat \$GCLK 2>/dev/null)\" != \"\$GMAX\" ] && capped=1
                 if [ -n \"\$capped\" ]; then full \"skin \$sk C, a cap from before the switch lifted\"
                 else echo \"\$(date +%T) skin \$sk C: no cap\" >> \$F; fi
             elif [ \"\$new\" = 0 ] && [ \$lvl != 0 ]; then
                 full \"skin \$sk C, level \$lvl to 0\"
             elif [ \"\$new\" != 0 ] && [ \"\$new\" != \$lvl ]; then
-                case \$new in 1) pct=80 ;; 2) pct=65 ;; *) pct=50 ;; esac
+                case \$new in 1) pct=85 ;; 2) pct=75 ;; 3) pct=62 ;; *) pct=48 ;; esac
                 c=''
                 for p in /sys/devices/system/cpu/cpufreq/policy*; do
                     hw=\$(cat \$p/cpuinfo_max_freq 2>/dev/null)
@@ -3538,6 +3602,14 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
                     echo \$((hw / 100 * pct)) > \$p/scaling_max_freq 2>/dev/null
                     c=\"\$c \${p##*/}=\$(cat \$p/scaling_max_freq 2>/dev/null)/\$hw\"
                 done
+                if [ \"\$GMAX\" -gt 0 ] && [ -w \$GCLK ]; then
+                    gt=\$(gpu_step \$pct)
+                    if [ -n \"\$gt\" ] && [ \"\$gt\" -gt 0 ]; then
+                        [ -f $STAGE/gpu_max_clock.capped ] || echo \"\$GMAX\" > $STAGE/gpu_max_clock.capped
+                        echo \$gt > \$GCLK 2>/dev/null
+                        c=\"\$c gpu=\$(cat \$GCLK 2>/dev/null)/\$GMAX\"
+                    fi
+                fi
                 echo \"\$(date +%T) skin \$sk C, level \$lvl to \$new: \$pct%:\$c\" >> \$F
             fi
             lvl=\$new; first=0
@@ -3545,7 +3617,7 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
         sleep 10
     done
 " </dev/null >/dev/null 2>&1 &
-    [ $HEAT_CAP = 1 ] && echo "Heat cap: on (from 45 C skin; every 10 s to $STAGE/heat_cap.log)"
+    [ $HEAT_CAP = 1 ] && echo "Heat cap: on (from 43 C skin, CPU + GPU; every 10 s to $STAGE/heat_cap.log)" 
     [ $HEAT_CAP = 1 ] || echo "Heat cap: off (ONEOS_HEAT_CAP=0, Cool down when hot off in Advanced)"
     [ $GUEST_THERMAL_MAP = 1 ] && echo "Guest thermal status: from the skin temperature, the HAL status from 56 C ($STAGE/heat_cap.log)"
 else
@@ -3728,7 +3800,7 @@ if [ "$RETURN_MAX" -gt 0 ]; then
                 done
                 echo \"\$(date) logcat capture: \$(ls $LOGS/head 2>/dev/null | wc -l) files of the boot kept in $LOGS/head (hard links)\"
             fi
-            if [ -n \"\$dname\" ]; then
+            if [ -n \"\$dname\" ] && { [ \"\$dname\" = final ] || [ '${ONEOS_BOOT_DIAG:-0}' = 1 ]; }; then
                 SFP=\$(pidof surfaceflinger | awk '{print \$1}')
                 if [ -n \"\$SFP\" ]; then
                     D=$STAGE/diag_\$dname; mkdir -p \$D

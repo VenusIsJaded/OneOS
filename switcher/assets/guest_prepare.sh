@@ -5309,12 +5309,22 @@ cat > "$STAGE/data/local/tmp/app_storage_loop.sh" <<'APPLOOP'
 #!/system/bin/sh
 # Watches for installs/removals, gives the new package its data dirs, and makes
 # the launcher re-query so the app actually shows up.
+# Uses a lightweight stat signature (%s:%Y:%i) on /data/system/packages.list so
+# idle ticks skip md5sum + full directory walks of /data/data and /data/user_de
+# unless a package actually changed (with a safety sweep once every 18 ticks).
 last=""
+last_sig=""
+ticks=0
 while true; do
     sleep 10
     case "$(getprop sys.boot_completed)" in 1) ;; *) continue ;; esac
     netout=$(/system/bin/sh /data/local/tmp/net_fix.sh 2>/dev/null)
     [ -n "$netout" ] && echo "$(date) $netout" >> /data/app_storage.log
+    ticks=$((ticks + 1))
+    sig=$(stat -c '%s:%Y:%i' /data/system/packages.list 2>/dev/null)
+    if [ -n "$last" ] && [ -n "$sig" ] && [ "$sig" = "$last_sig" ] && [ $((ticks % 18)) -ne 0 ]; then
+        continue
+    fi
     cur=$(md5sum /data/system/packages.list 2>/dev/null | cut -d' ' -f1)
     out=$(/system/bin/sh /data/local/tmp/ensure_app_storage.sh 2>/dev/null)
     if [ -n "$last" ] && { [ "$cur" != "$last" ] || [ -n "$out" ]; }; then
@@ -5328,6 +5338,7 @@ while true; do
         echo "$(date) $out" >> /data/app_storage.log
     fi
     last=$cur
+    last_sig=$sig
 done
 APPLOOP
 chmod 755 "$STAGE/data/local/tmp/app_storage_loop.sh" 2>/dev/null || true

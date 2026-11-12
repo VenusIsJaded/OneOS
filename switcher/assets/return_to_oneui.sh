@@ -293,8 +293,14 @@ if [ -f $S/heat_cap.active ]; then
         echo "$hw" > "$p/scaling_max_freq" 2>/dev/null
         hc="$hc ${p##*/}=$(cat "$p/scaling_max_freq" 2>/dev/null)/$hw"
     done
+    GCLK=/sys/kernel/gpu/gpu_max_clock
+    if [ -f $S/gpu_max_clock.capped ] && [ -w $GCLK ]; then
+        gmax=$(cat $S/gpu_max_clock.capped 2>/dev/null)
+        case "$gmax" in ''|*[!0-9]*) ;; *) echo "$gmax" > $GCLK 2>/dev/null; hc="$hc gpu=$(cat $GCLK 2>/dev/null)/$gmax" ;; esac
+        rm -f $S/gpu_max_clock.capped
+    fi
     rm -f $S/heat_cap.active
-    echo "Heat cap: stopped, CPU policies at full clock:$hc"
+    echo "Heat cap: stopped, CPU/GPU policies at full clock:$hc" 
 fi
 
 # Every process still in the container's mount namespace (recorded by
