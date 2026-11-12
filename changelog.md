@@ -50,6 +50,49 @@ read-only there, and the guest now has its own), **no more boot failures from fa
 **ColorOS lock screen depth effect** (0.4.60 gave its files to the wrong app; OPPO's AI engine from the
 Find X9 Ultra's own firmware is in ColorOS too), and the **Samsung Camera on the A56** (its sensor crop).
 
+New in 0.4.95: **a screen lock of the guest's own** (a PIN, a pattern or a password) in ColorOS, HyperOS, Nothing OS
+and OriginOS, and two more phones: the **Galaxy M35 5G** and the **Galaxy A15 5G with MediaTek**.
+- Until now a guest system refused every screen lock: it shares the phone's lock hardware with One UI, and a lock
+  set from a guest once left One UI unable to unlock. Now these systems take a PIN, pattern or password in their
+  own Settings, as on any phone. OneOS keeps it inside the guest (a salted hash in the guest's own data) and
+  checks it there; nothing of it reaches the phone's lock hardware or keystore, and One UI's lock state stays
+  exactly what it was. The idea comes from pull request #152 by @vdcoolok.
+- What it is not: it keeps other people out of the guest's lock screen, it does not protect the data. A restart
+  of the phone always lands in One UI, which has no lock while OneOS is in use, and with root there the guest's
+  files are within reach. No fingerprint or face: "Add fingerprint" in the guest refuses. An app that asks for
+  the device PIN in its own prompt behaves as on a phone without a lock. One UI's own lock still has to be off
+  before a switch.
+- Forgotten: from One UI, with root, `su -c 'rm -f /data/local/tmp/oneos/data/system/oneos_guest_lock /data/local/tmp/oneos/data/system/oneos_guest_lock.tries'`;
+  the guest starts without a lock the next time (docs/guest-screen-lock.md).
+- Where: ColorOS on the Galaxy Z Fold8 Ultra, Z Fold7, Z Fold6 and Z Fold5 (tried on the Z Fold8 Ultra: set,
+  unlock, back to One UI, all good), ColorOS on the bar phones (the Find X9 Ultra build), HyperOS, Nothing OS
+  and OriginOS. The last four have the same change but have not run on a phone yet: if such a system does not
+  start after its update, send a report. Not yet: the Pixel systems, Infinity-X, OxygenOS 16 and ColorOS on the
+  Galaxy Z Fold8; they refuse a lock as before. **Tap Update on the system's page** to get it.
+- The Galaxy M35 5G (SM-M356B, Exynos 1380, One UI 9.0), from findings of 2026-11-11: the Galaxy A35 5G's
+  systems (ColorOS 17, Infinity-X, HyperOS, OxygenOS 16), untested on it.
+- The Galaxy A15 5G with MediaTek (SM-A156M, One UI 8.5), from findings of the same day: OxygenOS 16, as on the
+  Galaxy A07 5G, untested on it. The Galaxy A15 with the Helio G99 was there already.
+
+New in 0.4.93: **root for the guest on the Galaxy S22 series, S23 FE, A25, A33 and A53**, and three more phones:
+the **Galaxy S22 with Exynos**, the **Galaxy A16 5G with MediaTek** and the **au Galaxy S23 (SCG19)**.
+- With root for the guest switched on, no system got past its logo on these phones: every switch ended in a black
+  screen or a return to One UI (reports from a Galaxy A33 on 0.4.85 and 0.4.90 and a Galaxy S22 Ultra with Exynos
+  on 0.4.92, all OxygenOS 16; with root for the guest off the same phones start). Their kernel has no overlayfs,
+  so guest root puts a copy of the system's top folder in front of the image, with each of the image's folders
+  attached inside it. One of them is the image's own folder of system modules (APEX files), and OneOS took it for
+  One UI's, which has to be at that place: the list of modules comes from One UI. The guest then looked for One
+  UI's modules among the image's, did not find them ("Unable to parse: /system/apex/com.android.bt.apex") and its
+  system server stopped at once, again and again. OneOS now checks what the folder at that place is, not only
+  that something is attached there, and puts One UI's folder over it. Not tried on the phones of the reports
+  yet. **Tap Update on each system's page** to get it: the session scripts changed.
+- The Galaxy S22 with Exynos (SM-S901B), now that findings show it on One UI 8.0: OxygenOS 16, as on the Galaxy
+  S22+ and S22 Ultra with Exynos, untested on it.
+- The Galaxy A16 5G with MediaTek (SM-A166P, One UI 8.5), from findings of 0.4.91: OxygenOS 16, as on the Galaxy
+  A07 5G, untested on it. The A16 5G with Exynos and the A16 4G were there already.
+- The au Galaxy S23 (SCG19), from findings of a phone on One UI 9.0: it takes the Galaxy S23's systems (ColorOS
+  17, Pixel, Infinity X, HyperOS and OriginOS on One UI 9; OxygenOS 16 on One UI 8.0/8.5), untested on it.
+
 New in 0.4.92: **a switch that stood on the "shutting down" splash for good with guest root on**, and the
 **au Galaxy S23 Ultra (SCG20)**.
 - With root for the guest switched on, the switch could stop behind the splash and never go on; only a forced
