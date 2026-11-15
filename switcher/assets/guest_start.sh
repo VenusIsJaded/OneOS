@@ -1105,20 +1105,72 @@ if [ -f /data/guest_audio.flag ]; then
     # parser fell back to setDefault: volume groups with max index 0, and SystemUI's
     # volume slider crashes on NaN. Put QTI's _base file at the top-level path
     # through a guest-only overlay on /vendor/etc.
+    # Also strip Samsung's MySpace / music_helper default stream postprocess from the
+    # guest's /vendor/etc/audio_effects.xml (and /odm/etc/audio_effects.xml if present):
+    # in One UI, SoundAlive drives MySpace, whereas in the guest AudioPolicyEffects
+    # attaches "MySpace Library" (SoundAlive_3DPosisiton_Factory) to every STREAM_MUSIC
+    # session unconfigured (!mContext, mPreset = 0), filtering music before OneOSSoundFx's
+    # Samsung Dolby DAX3 speaker tuning on session 0 and making speaker playback sound dull.
+    # Leaving the library/effect definitions intact while removing <apply effect="myspace|music_helper"/>
+    # from <postprocess> keeps spatializer/headphone effects available without muddying music.
+    NEED_COLOROS_APM=0
     if [ -e /system/framework/oplus-services.jar ] && grep -rqs 'android.hardware.audio.core' /vendor/etc/vintf/ &&
        [ -f /vendor/etc/audio_policy_configuration_base.xml ] && [ ! -e /vendor/etc/audio_policy_configuration.xml ]; then
+        NEED_COLOROS_APM=1
+    fi
+    NEED_FX_CLEAN=0
+    if [ "${ONEOS_GUEST_KEEP_MYSPACE:-0}" != 1 ] && [ -f /vendor/etc/audio_effects.xml ] && [ ! -L /vendor/etc/audio_effects.xml ] &&
+       grep -Eq '<apply[[:space:]]+effect="(myspace|music_helper)"' /vendor/etc/audio_effects.xml 2>/dev/null; then
+        NEED_FX_CLEAN=1
+    fi
+    if [ "$NEED_COLOROS_APM" = 1 ] || [ "$NEED_FX_CLEAN" = 1 ]; then
         AOV=/data/oneos_audio_policy
         mkdir -p "$AOV"
         mount | grep -q " $AOV " || $BB mount -t tmpfs -o size=8m,mode=755 tmpfs "$AOV"
-        mkdir -p "$AOV/upper" "$AOV/work"
-        cp /vendor/etc/audio_policy_configuration_base.xml "$AOV/upper/audio_policy_configuration.xml" &&
-            chmod 644 "$AOV/upper/audio_policy_configuration.xml" &&
-            $BB chcon u:object_r:vendor_configs_file:s0 "$AOV/upper/audio_policy_configuration.xml" 2>/dev/null || true
-        if $BB mount -t overlay overlay -o "lowerdir=/vendor/etc,upperdir=$AOV/upper,workdir=$AOV/work" /vendor/etc; then
-            echo "[Pivoted Root] ColorOS audio policy: _base.xml as /vendor/etc/audio_policy_configuration.xml (volume tables)"
-        else
-            echo "!!! WARNING: ColorOS audio policy: the overlay on /vendor/etc was refused; volume groups may be default"
+        rm -rf "$AOV/upper" "$AOV/work" && mkdir -p "$AOV/upper" "$AOV/work"
+        if [ "$NEED_COLOROS_APM" = 1 ]; then
+            cp /vendor/etc/audio_policy_configuration_base.xml "$AOV/upper/audio_policy_configuration.xml" &&
+                chmod 644 "$AOV/upper/audio_policy_configuration.xml" &&
+                $BB chcon u:object_r:vendor_configs_file:s0 "$AOV/upper/audio_policy_configuration.xml" 2>/dev/null || true
         fi
+        if [ "$NEED_FX_CLEAN" = 1 ]; then
+            sed -E '/<postprocess>/,/<\/postprocess>/{ /^[[:space:]]*<apply[[:space:]]+effect="(myspace|music_helper)"[[:space:]]*\/>/d; }' \
+                /vendor/etc/audio_effects.xml > "$AOV/upper/audio_effects.xml" &&
+                [ -s "$AOV/upper/audio_effects.xml" ] &&
+                chmod 644 "$AOV/upper/audio_effects.xml" &&
+                $BB chcon u:object_r:vendor_configs_file:s0 "$AOV/upper/audio_effects.xml" 2>/dev/null || rm -f "$AOV/upper/audio_effects.xml"
+        fi
+        if $BB mount -t overlay overlay -o "lowerdir=/vendor/etc,upperdir=$AOV/upper,workdir=$AOV/work" /vendor/etc; then
+            [ "$NEED_COLOROS_APM" = 1 ] && echo "[Pivoted Root] ColorOS audio policy: _base.xml as /vendor/etc/audio_policy_configuration.xml (volume tables)"
+            [ -f "$AOV/upper/audio_effects.xml" ] && echo "[Pivoted Root] Guest audio effects: stripped unconfigured MySpace/music_helper stream postprocess from /vendor/etc/audio_effects.xml"
+        elif [ "$NEED_FX_CLEAN" = 1 ] && [ -s "$AOV/upper/audio_effects.xml" ] &&
+             $BB mount --bind "$AOV/upper/audio_effects.xml" /vendor/etc/audio_effects.xml 2>/dev/null; then
+            $BB mount -o remount,ro,bind /vendor/etc/audio_effects.xml 2>/dev/null || true
+            echo "[Pivoted Root] Guest audio effects: bound cleaned /vendor/etc/audio_effects.xml (overlay refused)"
+            [ "$NEED_COLOROS_APM" = 1 ] && echo "!!! WARNING: ColorOS audio policy: the overlay on /vendor/etc was refused; volume groups may be default"
+        else
+            [ "$NEED_COLOROS_APM" = 1 ] && echo "!!! WARNING: ColorOS audio policy: the overlay on /vendor/etc was refused; volume groups may be default"
+        fi
+    fi
+    if [ "${ONEOS_GUEST_KEEP_MYSPACE:-0}" != 1 ]; then
+        for fx_alt in /odm/etc/audio_effects.xml /vendor/etc/audio/sku_"$(getprop ro.boot.product.vendor.sku)"/audio_effects.xml \
+                      /vendor/etc/audio/sku_"$(getprop ro.boot.product.vendor.sku)"_qssi/audio_effects.xml; do
+            [ -f "$fx_alt" ] && [ ! -L "$fx_alt" ] || continue
+            grep -Eq '<apply[[:space:]]+effect="(myspace|music_helper)"' "$fx_alt" 2>/dev/null || continue
+            AOV=/data/oneos_audio_policy
+            mkdir -p "$AOV"
+            mount | grep -q " $AOV " || $BB mount -t tmpfs -o size=8m,mode=755 tmpfs "$AOV"
+            fx_bn=$(echo "$fx_alt" | tr '/' '_')
+            if sed -E '/<postprocess>/,/<\/postprocess>/{ /^[[:space:]]*<apply[[:space:]]+effect="(myspace|music_helper)"[[:space:]]*\/>/d; }' \
+                "$fx_alt" > "$AOV/$fx_bn" && [ -s "$AOV/$fx_bn" ]; then
+                chmod 644 "$AOV/$fx_bn"
+                $BB chcon u:object_r:vendor_configs_file:s0 "$AOV/$fx_bn" 2>/dev/null || true
+                if $BB mount --bind "$AOV/$fx_bn" "$fx_alt" 2>/dev/null; then
+                    $BB mount -o remount,ro,bind "$fx_alt" 2>/dev/null || true
+                    echo "[Pivoted Root] Guest audio effects: stripped unconfigured MySpace/music_helper postprocess from $fx_alt"
+                fi
+            fi
+        done
     fi
     # Samsung's audio HAL keeps the streams of a dead audioserver: a fresh one
     # then gets -38 on every openOutputStream, AudioPolicyManager init fails and

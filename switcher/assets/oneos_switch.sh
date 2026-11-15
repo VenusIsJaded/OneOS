@@ -140,12 +140,39 @@ if [ "$APP" = 1 ]; then
                 check_host_apex.sh bridges.sh zygote_exec guards.txt $GUARD_JARS; do
         awk -v n="$need" '$2 == n { f = 1 } END { exit !f }' "$SUMS" || refuse "files.sha256 does not list $need"
     done
+    # Verify file ownership/modes synchronously, then hash in 8-worker batches
+    # (serial sha256sum across ~35 staged payloads/archives added ~15 s before preflight).
+    sums_n=0; sums_pids=""; sums_names=""
     while read -r sum name || [ -n "$sum" ]; do
         f="$STAGE/$name"
         [ -f "$f" ] && [ ! -L "$f" ] || refuse "$name (files.sha256) is missing or a link"
         root_only "$f" || refuse "$name is not root's or is writable by others"
-        [ "$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)" = "$sum" ] || refuse "$name does not match files.sha256"
+        sums_n=$((sums_n + 1))
+        ( [ "$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)" = "$sum" ] ) &
+        sums_pids="$sums_pids $!"
+        sums_names="$sums_names $name"
+        if [ $((sums_n % 8)) -eq 0 ]; then
+            set -- $sums_names
+            for sp in $sums_pids; do
+                if ! wait "$sp"; then
+                    for rp in $sums_pids; do wait "$rp" 2>/dev/null || true; done
+                    refuse "$1 does not match files.sha256"
+                fi
+                shift
+            done
+            sums_pids=""; sums_names=""
+        fi
     done < "$SUMS"
+    if [ -n "$sums_pids" ]; then
+        set -- $sums_names
+        for sp in $sums_pids; do
+            if ! wait "$sp"; then
+                for rp in $sums_pids; do wait "$rp" 2>/dev/null || true; done
+                refuse "$1 does not match files.sha256"
+            fi
+            shift
+        done
+    fi
     # A leftover the package does not carry would still be bound by
     # guest_prepare.sh (framework_patched.jar, libaudio*_patched.so,
     # PermissionController_patched.apk, an extra payload, an apex info list).
@@ -2173,7 +2200,12 @@ GUEST_OXYGEN=0; grep -q '^  "image": "oxygenos' "$STAGE/.oneos_stage" 2>/dev/nul
 # Start UI Activator daemon. One pass per boot of the guest: after a soft
 # reboot of it (guest_softreboot.sh bumps tmp/softreboot.gen, 0.4.39) the
 # same steps run again for the new boot; it ends with the session.
-$BB sh -c "
+# Written to $STAGE/tmp/ui_activator.sh with printf '%s\n' "..." rather than
+# passed inline via $BB sh -c "..." so it can never exceed Linux's 131,072-byte
+# MAX_ARG_STRLEN per-argv limit (which caused E2BIG "Argument list too long").
+mkdir -p "$STAGE/tmp" && chmod 700 "$STAGE/tmp"
+rm -f "$STAGE/tmp/ui_activator.sh" "$STAGE/sound_fx.log" "$STAGE/camera_worker.log" "$STAGE/screen_watch.log"
+printf '%s\n' "#!/system/bin/sh
 BB=\"$BB\"
 [ -n \"\$BB\" ] || BB=\$(which busybox 2>/dev/null || echo /data/adb/ksu/bin/busybox)
 GEN=\$(cat $STAGE/tmp/softreboot.gen 2>/dev/null); PASS=1; BRPID=''
@@ -3651,7 +3683,9 @@ done
 GEN=\$(cat $STAGE/tmp/softreboot.gen 2>/dev/null); PASS=\$((PASS + 1))
 echo \"[UI Activator] soft reboot of the guest (generation \$GEN): pass \$PASS, waiting for its new boot\"
 done
-" </dev/null >/data/local/tmp/ui_activator.log 2>&1 &
+" > "$STAGE/tmp/ui_activator.sh"
+chmod 700 "$STAGE/tmp/ui_activator.sh"
+$BB sh "$STAGE/tmp/ui_activator.sh" </dev/null >/data/local/tmp/ui_activator.log 2>&1 &
 
 # Samsung CPU/GPU votes survive the host framework; capability-detected on every profile.
 # 0.4.38: only with the heat cap off (Cool down when hot, Advanced). With it on, the heat cap
