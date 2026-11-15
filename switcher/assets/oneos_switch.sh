@@ -1232,7 +1232,9 @@ for t in CaptureStateTracker libbinder.Parcel Parcel ResourcesManager MediaCodec
          SettingsState SG QuickStartRUSHelper OplusGcSupressionHelper "[UAH_CLIENT]" \
          OplusDynamicFrameRateRUS DynamicFramerate FlexibleWindowManagerService \
          Blur_WindowBlurSessionImpl Blur_ScreenCapture Blur_BlurServiceImpl \
-         OplusBenchHelper OplusViewDebugManager MSP-LOG-SDK- MSP-LOG-APP-MSP-LOG-APP-ProcessBridge MSPAPK_DlCore-FileCall; do
+         OplusBenchHelper OplusViewDebugManager MSP-LOG-SDK- MSP-LOG-APP-MSP-LOG-APP-ProcessBridge MSPAPK_DlCore-FileCall \
+         qcc_file_aidl QCC minksocket PluginSeedling--Origin PluginSeedling--Capsule PluginSeedling--Template \
+         OplusStartingWindowManager OplusAppStartupManager ULELite "COSA->DefaultPackageInfo" Athena; do
     setprop "log.tag.$t" SILENT 2>/dev/null
 done
 if [ "${ONEOS_SOUND_VERBOSE:-0}" != 1 ]; then
@@ -2391,7 +2393,7 @@ while true; do
             # Once per stage (versioned marker so upgraded lists apply to existing stages),
             # disable background advertising/personalization sandboxes and remaining OEM
             # analytics/telemetry/trace daemons (keeping APEX jars mounted for BOOTCLASSPATH).
-            if [ '${ONEOS_GUEST_KEEP_TELEMETRY:-0}' != 1 ] && [ ! -e $STAGE/data/oneos_trackers_off_v3 ] && [ ! -L $STAGE/data/oneos_trackers_off_v3 ]; then
+            if [ '${ONEOS_GUEST_KEEP_TELEMETRY:-0}' != 1 ] && [ ! -e $STAGE/data/oneos_trackers_off_v4 ] && [ ! -L $STAGE/data/oneos_trackers_off_v4 ]; then
                 (
                     G_TRK=\"timeout 10 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh\"
                     \$G_TRK /system/bin/device_config put adservices global_kill_switch true >/dev/null 2>&1 || true
@@ -2416,11 +2418,25 @@ while true; do
                     # On non-OPPO vendor HALs without OPPO's AudioX effect UUID (41f6c0f4),
                     # AudioxService retries AudioEffect creation every 3 s forever while
                     # OneOSSoundFx already attaches Samsung Dolby (DAX3); disable only the
-                    # spinning service component so Sound & Vibration settings UI stays intact.
+                    # spinning service component so Sound & Vibration settings UI stays intact,
+                    # and terminate any process that spawned before UI Activator ran.
                     if ! grep -rqi '41f6c0f4-5d8f-11ec-bf63-0242ac130002' /vendor/etc /odm/etc 2>/dev/null; then
                         if \$G_TRK /system/bin/pm list packages com.oplus.audio.effectcenter 2>/dev/null | grep -qxF 'package:com.oplus.audio.effectcenter'; then
                             \$G_TRK /system/bin/pm disable com.oplus.audio.effectcenter/com.oplus.audio.effectcenter.service.AudioxService >/dev/null 2>&1 || true
+                            \$G_TRK /system/bin/am stopservice com.oplus.audio.effectcenter/com.oplus.audio.effectcenter.service.AudioxService >/dev/null 2>&1 || true
+                            aec_p=\$(\$G_TRK /system/bin/pidof com.oplus.audio.effectcenter 2>/dev/null)
+                            [ -n \"\$aec_p\" ] && \$G_TRK /system/bin/kill \$aec_p >/dev/null 2>&1 || true
                         fi
+                    fi
+                    # On ColorOS images where HotwordEnrollment*HEXAGON_WIDEBAND.apk lives directly
+                    # under /my_product/priv-app without its EnrollmentUtil shared library or DSP
+                    # sound-model HAL, StartupReceiver crashes with ClassNotFoundException at every boot.
+                    if [ -f $STAGE/rootfs/my_product/priv-app/HotwordEnrollmentXGoogleHEXAGON_WIDEBAND.apk ] ||
+                       [ -f $STAGE/rootfs/my_product/priv-app/HotwordEnrollmentYGoogleHEXAGON_WIDEBAND.apk ]; then
+                        for hwp in com.android.hotwordenrollment.okgoogle com.android.hotwordenrollment.xgoogle; do
+                            \$G_TRK /system/bin/pm disable --user 0 \$hwp/com.android.hotwordenrollment.common.StartupReceiver >/dev/null 2>&1 ||
+                                \$G_TRK /system/bin/pm disable-user --user 0 \$hwp >/dev/null 2>&1 || true
+                        done
                     fi
                     # On phones without OPPO Insta360/DJI cross-device camera features,
                     # com.oplus.devicehub's DeviceAppProvider kills its own process 4x per query.
@@ -2429,9 +2445,15 @@ while true; do
                             \$G_TRK /system/bin/pm disable com.oplus.devicehub/com.oplus.mydevices.sdk.DeviceAppProvider >/dev/null 2>&1 || true
                         fi
                     fi
-                    mkdir -p $STAGE/data/oneos_trackers_off $STAGE/data/oneos_trackers_off_v2 $STAGE/data/oneos_trackers_off_v3 2>/dev/null || true
+                    mkdir -p $STAGE/data/oneos_trackers_off $STAGE/data/oneos_trackers_off_v2 $STAGE/data/oneos_trackers_off_v3 $STAGE/data/oneos_trackers_off_v4 2>/dev/null || true
                     echo \"[UI Activator] privacy/heat: disabled \$disabled_trk background tracker/adservices package(s) and set AdServices/ODP kill-switches\"
                 ) </dev/null &
+            elif [ '${ONEOS_GUEST_KEEP_TELEMETRY:-0}' != 1 ] && ! grep -rqi '41f6c0f4-5d8f-11ec-bf63-0242ac130002' /vendor/etc /odm/etc 2>/dev/null; then
+                aec_p=\$(pidof com.oplus.audio.effectcenter 2>/dev/null)
+                if [ -n \"\$aec_p\" ]; then
+                    timeout 5 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/am stopservice com.oplus.audio.effectcenter/com.oplus.audio.effectcenter.service.AudioxService >/dev/null 2>&1 || true
+                    kill \$aec_p 2>/dev/null || true
+                fi
             fi
             # Grant GMS device_config development permissions so Phenotype's
             # PlatformConfigurator does not retry-storm SettingsProvider with
@@ -3658,13 +3680,14 @@ fi
 # processes over one second and the CPU totals (HyperOS run 11: 42-44 C skin
 # all session and nothing said which process kept the CPU busy).
 SKIN_NODE=''
+SKIN_SCALE=1000
 AP_NODES=''
 for tz in /sys/class/thermal/thermal_zone*; do
     [ -r "$tz/type" ] && [ -r "$tz/temp" ] || continue
     tzt=''
     IFS= read -r tzt < "$tz/type" 2>/dev/null
     case "$tzt" in
-        skin-therm|skin_therm|sec-skin-therm|sec_skin_therm|surface_therm|surface-therm|quiet-therm|quiet_therm|ap_ntc)
+        skin-therm|skin_therm|skin-msm-therm*|skin_msm_therm*|sec-skin-therm*|sec_skin_therm*|sec-therm|sec_therm|surface_therm*|surface-therm*|quiet-therm*|quiet_therm*|xo-therm*|xo_therm*|ap_ntc)
             [ -n "$SKIN_NODE" ] && continue
             tv=''
             IFS= read -r tv < "$tz/temp" 2>/dev/null
@@ -3675,6 +3698,19 @@ for tz in /sys/class/thermal/thermal_zone*; do
             case "$tv" in [1-9][0-9]*) AP_NODES="$AP_NODES $tz/temp" ;; esac ;;
     esac
 done
+if [ -z "$SKIN_NODE" ]; then
+    for sn in /sys/class/sec/sec-therm/temperature /sys/class/sec/sec-ap-therm/temperature; do
+        [ -r "$sn" ] || continue
+        tv=''
+        IFS= read -r tv < "$sn" 2>/dev/null
+        case "$tv" in
+            [1-9][0-9]*)
+                SKIN_NODE="$sn"
+                [ "$tv" -le 1200 ] 2>/dev/null && SKIN_SCALE=10
+                break ;;
+        esac
+    done
+fi
 AP_NODES=${AP_NODES# }
 
 $BB nice -n 19 $BB sh -c "
@@ -3682,6 +3718,7 @@ $BB nice -n 19 $BB sh -c "
     F=$STAGE/diag_series.txt
     T=$STAGE/cpu_top.log
     SKIN_NODE='$SKIN_NODE'
+    SKIN_SCALE='$SKIN_SCALE'
     AP_NODES='$AP_NODES'
     BOOT_DIAG='${ONEOS_BOOT_DIAG:-0}'
     fmt_c() {
@@ -3689,8 +3726,12 @@ $BB nice -n 19 $BB sh -c "
             -*|''|*[!0-9.]*) echo '' ;;
             *.*) echo \"\$1\" ;;
             *)
-                if [ \"\$1\" -gt 200 ] 2>/dev/null; then
+                if [ \"\$SKIN_SCALE\" = 10 ] && [ \"\$1\" -gt 100 ] && [ \"\$1\" -le 1200 ] 2>/dev/null; then
+                    echo \"\$(( \$1 / 10 )).\$(( \$1 % 10 ))\"
+                elif [ \"\$1\" -gt 1200 ] 2>/dev/null; then
                     echo \"\$(( \$1 / 1000 )).\$(( (\$1 % 1000) / 100 ))\"
+                elif [ \"\$1\" -gt 100 ] 2>/dev/null; then
+                    echo \"\$(( \$1 / 10 )).\$(( \$1 % 10 ))\"
                 elif [ \"\$1\" -gt 0 ] 2>/dev/null; then
                     echo \"\$1.0\"
                 fi
@@ -3708,6 +3749,10 @@ $BB nice -n 19 $BB sh -c "
             raw=''
             IFS= read -r raw < \"\$SKIN_NODE\" 2>/dev/null
             sk=\$(fmt_c \"\$raw\")
+        fi
+        if [ -z \"\$sk\" ]; then
+            tc=\$(timeout 2 logcat -d -t 80 -s thermal_core:I 2>/dev/null | sed -n 's/.* skin : \([1-9][0-9]*\).*/\1/p' | tail -n 1)
+            [ -n \"\$tc\" ] && sk=\"\$((tc / 10)).\$((tc % 10))\"
         fi
         ap_max=0
         for an in \$AP_NODES; do
@@ -3765,7 +3810,7 @@ $BB nice -n 19 $BB sh -c "
         sleep \$s
     done
 " </dev/null >/dev/null 2>&1 &
-echo "Session sampler: every 60 s to $STAGE/diag_series.txt (skin sysfs: ${SKIN_NODE:-dumpsys fallback})"
+echo "Session sampler: every 60 s to $STAGE/diag_series.txt (skin sysfs: ${SKIN_NODE:-thermal_core/dumpsys fallback})"
 
 # Heat cap (S25 Ultra af6c2b17; owner 2026-10-27: cap only when hot). One UI's
 # heat control (SSRM) stops with One UI's system_server, and nothing in the
@@ -3834,6 +3879,7 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
     CFL=/sys/devices/system/cpu/cpufreq_limit/cpufreq_max_limit
     GCLK=/sys/kernel/gpu/gpu_max_clock
     SKIN_NODE='$SKIN_NODE'
+    SKIN_SCALE='$SKIN_SCALE'
     AP_NODES='$AP_NODES'
     GFREQS=''
     if [ -r /sys/class/kgsl/kgsl-3d0/gpu_available_frequencies ]; then
@@ -3855,7 +3901,7 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
         }'
     }
     if [ $HEAT_CAP = 1 ]; then
-        echo \"# \$(date) OneOS heat cap: from 43, 45, 47, 50 C skin CPU+GPU at [85,75,62,48]% of top clock (2 C hysteresis; skin: \${SKIN_NODE:-HAL})\" > \$F
+        echo \"# \$(date) OneOS heat cap: from 43, 45, 47, 50 C skin CPU+GPU at [85,75,62,48]% of top clock (2 C hysteresis; skin: \${SKIN_NODE:-thermal_core/HAL})\" > \$F
     else
         echo \"# \$(date) OneOS heat cap off (Cool down when hot): the guest thermal status only\" > \$F
     fi
@@ -3894,12 +3940,29 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
             raw=''
             IFS= read -r raw < \"\$SKIN_NODE\" 2>/dev/null
             case \"\$raw\" in
-                -*|'') ;;
-                *) sk=\$(awk -v v=\"\$raw\" 'BEGIN { if (v > 200) printf \"%.1f\", v / 1000.0; else if (v > 0) printf \"%.1f\", v }') ;;
+                -*|''|*[!0-9.]*) ;;
+                *.*) sk=\"\$raw\" ;;
+                *)
+                    if [ \"\$SKIN_SCALE\" = 10 ] && [ \"\$raw\" -gt 100 ] && [ \"\$raw\" -le 1200 ] 2>/dev/null; then
+                        sk=\"\$((raw / 10)).\$((raw % 10))\"
+                    elif [ \"\$raw\" -gt 1200 ] 2>/dev/null; then
+                        sk=\"\$((raw / 1000)).\$(( (raw % 1000) / 100 ))\"
+                    elif [ \"\$raw\" -gt 100 ] 2>/dev/null; then
+                        sk=\"\$((raw / 10)).\$((raw % 10))\"
+                    elif [ \"\$raw\" -gt 0 ] 2>/dev/null; then
+                        sk=\"\$raw.0\"
+                    fi ;;
             esac
         fi
-        P=\$(pidof system_server 2>/dev/null)
-        P=\${P%% *}
+        if [ -z \"\$sk\" ]; then
+            tc=\$(timeout 2 logcat -d -t 80 -s thermal_core:I 2>/dev/null | sed -n 's/.* skin : \([1-9][0-9]*\).*/\1/p' | tail -n 1)
+            [ -n \"\$tc\" ] && sk=\"\$((tc / 10)).\$((tc % 10))\"
+        fi
+        P=''
+        if [ -z \"\$sk\" ] || [ $GUEST_THERMAL_MAP = 1 ]; then
+            P=\$(pidof system_server 2>/dev/null)
+            P=\${P%% *}
+        fi
         if [ -z \"\$sk\" ] && [ -n \"\$P\" ]; then
             sk=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys thermalservice 2>/dev/null | sed -n '/^Current temperatures from HAL/,/^[^[:space:]]/p' | sed -n 's/.*mValue=\([-0-9.]*\), mType=[0-9]*, mName=SKIN,.*/\1/p' | head -n 1)
         fi
