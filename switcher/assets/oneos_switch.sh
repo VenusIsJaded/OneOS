@@ -2629,6 +2629,10 @@ while true; do
                         ( i=0
                           while [ \$i -lt 600 ]; do
                               sleep 2; i=\$((i + 1))
+                              [ -r /sys/class/backlight/panel0-backlight/brightness ] && {
+                                  IFS= read -r _ib < /sys/class/backlight/panel0-backlight/brightness 2>/dev/null
+                                  [ \"\${_ib:-1}\" = 0 ] && continue
+                              }
                               $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/wm size -d 0 2>/dev/null | grep -q -x \"Physical size: \${W}x\${H}\" || continue
                               $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/wm density \$D -d 0 >/dev/null 2>&1
                               echo \$D > $STAGE/data/oneos_auto_density

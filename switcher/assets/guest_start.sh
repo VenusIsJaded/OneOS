@@ -724,14 +724,14 @@ NORM=$MAX
 echo "$(date +%T) brightness bridge: $BL (max $MAX, the guest's full slider = $NORM; scale $SCALE ${lo:-?}..${nm:-?}..${hi:-?}; useSurfaceControl=${usc:-not read}, force_anyway=${force:-not read})"
 last=""; pw=""
 while :; do
-    w=$(timeout 3 dumpsys power 2>/dev/null | sed -n 's/^ *mWakefulness=//p' | head -n 1)
+    w=$(timeout 3 dumpsys power 2>/dev/null | awk '/^ *mWakefulness=/ { sub(/^ *mWakefulness=/, ""); v = $0 } END { print v }')
     [ "$w" = "$pw" ] || last=""
     pw=$w
     case "$w" in
         Asleep) if [ "$LED" = 1 ]; then v=0; else v=""; fi ;;
         Dozing) v=$((NORM / 20 + 1)) ;;
         Awake)
-            f=$(timeout 3 cmd display get-brightness 0 2>/dev/null | head -n 1)
+            f=$(timeout 3 cmd display get-brightness 0 2>/dev/null | awk 'NR == 1 { v = $0 } END { print v }')
             v=$(echo "$f" | awk -v m="$MAX" -v n="$NORM" -v lo="$lo" -v nm="$nm" -v hi="$hi" -v s="$SCALE" '
                 {
                     # The first field that is a number (AOSP prints the bare value).
@@ -754,7 +754,7 @@ while :; do
         echo $v > $BL/brightness && echo "$(date +%T) $w: $v"
         last=$v
     fi
-    sleep 1
+    if [ "$w" = Asleep ] || [ "$w" = Dozing ]; then sleep 2; else sleep 1; fi
 done
 BLEOF
     $BB sh /data/oneos_bl_bridge.sh "$BL" "$BLMAX" "$BLON" "$LEDBL" </dev/null >> /data/backlight.log 2>&1 &
