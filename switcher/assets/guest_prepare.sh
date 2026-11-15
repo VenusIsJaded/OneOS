@@ -5505,7 +5505,18 @@ esac
 # use the IMS interface got its 401 at once. The same rules again at 14998, so
 # they win over 4242; a table without a matching route falls through to 14999
 # as before. Only mobile interfaces; kept in step with netd's.
-want=$(ip rule show 2>/dev/null | awk '$1 == "16000:" && / iif lo / && / fwmark / && $NF ~ /^rmnet_data/ { $1 = ""; sub(/^ +/, ""); print }')
+want=$(ip rule show 2>/dev/null | awk '
+    $1 == "11000:" && / oif rmnet_data/ { oif[$NF] = 1 }
+    $1 == "16000:" && / iif lo / && / fwmark / { r[++n] = $0; tbl[n] = $NF }
+    END {
+        for (i = 1; i <= n; i++) {
+            if (tbl[i] ~ /^rmnet_data/ || oif[tbl[i]]) {
+                line = r[i]
+                sub(/^16000:[ \t]+/, "", line)
+                print line
+            }
+        }
+    }')
 have=$(ip rule show 2>/dev/null | awk '$1 == "14998:" { $1 = ""; sub(/^ +/, ""); print }')
 echo "$have" | while read -r r; do
     [ -n "$r" ] || continue
@@ -5515,6 +5526,7 @@ echo "$want" | while read -r r; do
     [ -n "$r" ] || continue
     printf '%s\n' "$have" | grep -qxF "$r" || { ip rule add $r priority 14998 2>/dev/null && echo "net route: 14998: $r (bound sockets keep their network)"; }
 done
+date +%s > /data/local/tmp/net_fix.stamp 2>/dev/null || true
 exit 0
 NETFIX
 chmod 755 "$STAGE/data/local/tmp/net_fix.sh" 2>/dev/null || true
@@ -5532,8 +5544,14 @@ ticks=0
 while true; do
     sleep 10
     case "$(getprop sys.boot_completed)" in 1) ;; *) continue ;; esac
-    netout=$(/system/bin/sh /data/local/tmp/net_fix.sh 2>/dev/null)
-    [ -n "$netout" ] && echo "$(date) $netout" >> /data/app_storage.log
+    # Skip redundant net_fix.sh when host net_watch ran within the last 25 s.
+    now=$(date +%s 2>/dev/null); nstamp=0
+    [ -r /data/local/tmp/net_fix.stamp ] && IFS= read -r nstamp < /data/local/tmp/net_fix.stamp 2>/dev/null
+    case "$nstamp" in ''|*[!0-9]*) nstamp=0 ;; esac
+    if [ $(( ${now:-0} - nstamp )) -ge 25 ]; then
+        netout=$(/system/bin/sh /data/local/tmp/net_fix.sh 2>/dev/null)
+        [ -n "$netout" ] && echo "$(date) $netout" >> /data/app_storage.log
+    fi
     ticks=$((ticks + 1))
     sig=$(stat -c '%s:%Y:%i' /data/system/packages.list 2>/dev/null)
     if [ -n "$last" ] && [ -n "$sig" ] && [ "$sig" = "$last_sig" ] && [ $((ticks % 18)) -ne 0 ]; then

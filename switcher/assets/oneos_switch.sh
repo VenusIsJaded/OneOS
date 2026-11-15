@@ -1560,29 +1560,49 @@ fi
 # from the host side for the whole session, and log what the network looked
 # like, so a drop that routing cannot fix (wifi itself going away) shows up.
 NETFIX="$STAGE/data/local/tmp/net_fix.sh"
-$BB sh -c "
-    while [ -f $STAGE/rootfs/system/build.prop ]; do
-        /system/bin/sh $NETFIX 2>&1 | sed \"s/^/\$(date +%T) /\"
-        {
-            echo \"--- \$(date +%T)\"
-            ip -4 -o addr show wlan0 2>&1 | awk '{print \$4}'
-            ip rule show 2>&1 | awk 'NR <= 6 || /^14999:/ || / iif [^l][^ ]* lookup /'
+$BB sh -c '
+    STAGE=$1; NETFIX=$2
+    last_net=""; apex_tick=0
+    while [ -f "$STAGE/rootfs/system/build.prop" ]; do
+        nout=$(/system/bin/sh "$NETFIX" 2>&1)
+        if [ -n "$nout" ]; then
+            ts=$(date +%T)
+            printf "%s\n" "$nout" | sed "s/^/$ts /"
+        fi
+        snap=$(
+            ip -4 -o addr show wlan0 2>&1 | awk "{print \$4}"
+            ip rule show 2>&1 | awk "NR <= 6 || /^1499[89]:/ || / iif [^l][^ ]* lookup /"
             ip route show table 4242 2>&1
-            [ -d /sys/class/net/swlan0 ] && echo \"swlan0: \$(ip -4 -o addr show swlan0 2>/dev/null | awk '{print \$4}'), ip_forward \$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)\"
-            ping -c 1 -W 2 \$(ip route show table 4242 2>/dev/null | awk '/default/{print \$3; exit}') >/dev/null 2>&1 && echo gateway: ok || echo gateway: unreachable
-        } 2>&1
-        # Watch One UI's APEX backing files: after earlier sessions One UI's
-        # decompressed APEXes read back with dm-verity I/O errors.
-        {
-            echo \"--- \$(date +%T) apex\"
-            ls -l /data/apex/decompressed/ 2>&1 | awk '{print \$5, \$6, \$7, \$NF}'
-            for l in /sys/block/loop*/loop/backing_file; do
-                case \"\$(cat \$l 2>/dev/null)\" in /data/apex/*) echo \"\$(basename \$(dirname \$(dirname \$l))): \$(cat \$l)\";; esac
-            done
-        } >> $STAGE/apex_watch.log 2>&1
+            [ -d /sys/class/net/swlan0 ] && echo "swlan0: $(ip -4 -o addr show swlan0 2>/dev/null | awk "{print \$4}"), ip_forward $(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)"
+        )
+        if [ "$snap" != "$last_net" ]; then
+            echo "--- $(date +%T)"
+            printf "%s\n" "$snap"
+            last_net=$snap
+        fi
+        # Watch One UIs APEX backing files once a minute with zero per-loop forks
+        # instead of forking cat/basename/dirname on ~150 loop nodes every 10 s.
+        if [ $((apex_tick % 6)) = 0 ]; then
+            {
+                echo "--- $(date +%T) apex"
+                ls -l /data/apex/decompressed/ 2>&1 | awk "{print \$5, \$6, \$7, \$NF}"
+                for l in /sys/block/loop*/loop/backing_file; do
+                    [ -r "$l" ] || continue
+                    bf=""
+                    IFS= read -r bf < "$l" 2>/dev/null
+                    case "$bf" in
+                        /data/apex/*)
+                            lp=${l%/loop/backing_file}
+                            echo "${lp##*/}: $bf"
+                            ;;
+                    esac
+                done
+            } >> "$STAGE/apex_watch.log" 2>&1
+        fi
+        apex_tick=$((apex_tick + 1))
         sleep 10
     done
-" </dev/null >>"$STAGE/net_watch.log" 2>&1 &
+' net_watch "$STAGE" "$NETFIX" </dev/null >>"$STAGE/net_watch.log" 2>&1 &
 
 # The camera hole where the guest runs the panel at another size than its whole
 # one (0.4.90). guest_props.sh places ro.oplus.display.screenhole.positon for
