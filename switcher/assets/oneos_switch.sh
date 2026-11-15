@@ -1394,7 +1394,44 @@ kill -9 $(pidof system_server) 2>/dev/null || true
 # 47 s for the guest's permission service, and init rebooted the phone right after ("reboot,vold-failed",
 # 0.4.69 A15 c2da41ee: dumpstate pid 10916, "Check passed after 47063ms", shutdown 0.3 s later).
 rm -f "$STAGE/data/guest_audio.flag"
-nohup $BB sh -c "while true; do [ \"\$(getprop init.svc.zygote)\" = \"running\" ] && setprop ctl.stop zygote; [ \"\$(getprop init.svc.zygote_secondary)\" = \"running\" ] && setprop ctl.stop zygote_secondary; [ ! -f $STAGE/data/oneos_host_sf_frozen ] && [ \"\$(getprop init.svc.surfaceflinger)\" = \"running\" ] && setprop ctl.stop surfaceflinger; [ \"\$(getprop init.svc.bootanim)\" = \"running\" ] && setprop ctl.stop bootanim; [ -f $STAGE/data/guest_audio.flag ] && [ \"\$(getprop init.svc.audioserver)\" = \"running\" ] && setprop ctl.stop audioserver; for s in dumpstate dumpstatez bugreport bugreportd; do [ \"\$(getprop init.svc.\$s)\" = \"running\" ] && setprop ctl.stop \$s; done; sleep 0.2; done" </dev/null >/dev/null 2>&1 &
+nohup $BB sh -c '
+    echo $$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null
+    stop_host_svcs() {
+        for kv in $(getprop \
+            init.svc.zygote init.svc.zygote_secondary init.svc.surfaceflinger \
+            init.svc.bootanim init.svc.audioserver init.svc.dumpstate \
+            init.svc.dumpstatez init.svc.bugreport init.svc.bugreportd 2>/dev/null |
+            sed -n "s/^\\[init\\.svc\\.\\([^]]*\\)\\]: \\[running\\]\$/\\1/p"); do
+            case "$kv" in
+                zygote) setprop ctl.stop zygote ;;
+                zygote_secondary) setprop ctl.stop zygote_secondary ;;
+                surfaceflinger) [ ! -f '"$STAGE"'/data/oneos_host_sf_frozen ] && setprop ctl.stop surfaceflinger ;;
+                audioserver) [ -f '"$STAGE"'/data/guest_audio.flag ] && setprop ctl.stop audioserver ;;
+                *) setprop "ctl.stop" "$kv" ;;
+            esac
+        done
+    }
+    stop_host_svcs
+    if timeout 1 getprop -w >/dev/null 2>&1 || [ $? = 124 ]; then
+        getprop -w 2>/dev/null | while IFS= read -r l; do
+            case "$l" in
+                *"[init.svc.zygote]: [running]"*) setprop ctl.stop zygote ;;
+                *"[init.svc.zygote_secondary]: [running]"*) setprop ctl.stop zygote_secondary ;;
+                *"[init.svc.surfaceflinger]: [running]"*) [ ! -f '"$STAGE"'/data/oneos_host_sf_frozen ] && setprop ctl.stop surfaceflinger ;;
+                *"[init.svc.bootanim]: [running]"*) setprop ctl.stop bootanim ;;
+                *"[init.svc.audioserver]: [running]"*) [ -f '"$STAGE"'/data/guest_audio.flag ] && setprop ctl.stop audioserver ;;
+                *"[init.svc.dumpstate]: [running]"*) setprop ctl.stop dumpstate ;;
+                *"[init.svc.dumpstatez]: [running]"*) setprop ctl.stop dumpstatez ;;
+                *"[init.svc.bugreport]: [running]"*) setprop ctl.stop bugreport ;;
+                *"[init.svc.bugreportd]: [running]"*) setprop ctl.stop bugreportd ;;
+            esac
+        done
+    fi
+    while true; do
+        stop_host_svcs
+        sleep 2
+    done
+' </dev/null >/dev/null 2>&1 &
 sleep 1
 # The session's own copy of One UI's property store, now that One UI's
 # framework is down (guest_props.sh store-on): the guest's persist settings
