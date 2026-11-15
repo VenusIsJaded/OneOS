@@ -115,7 +115,7 @@ object Images {
     const val MIRROR_FILES_URL = "https://sourceforge.net/projects/oneos-mirror/files/images/"
 
     /** The gofile folder every image up to 0.4.40 was uploaded to; a manual mirror now, not linked from the app. */
-    const val GOFILE_FOLDER_URL = "https://github.com/fahadalijaved/OneOS#where-the-images-come-from"
+    const val GOFILE_FOLDER_URL = "https://github.com/VenusIsJaded/OneOS#where-the-images-come-from"
 
     /** What fixed texts say when no image is known: they never name a system. */
     const val OTHER_SYSTEM = "the other system"

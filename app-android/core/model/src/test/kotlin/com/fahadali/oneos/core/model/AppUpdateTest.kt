@@ -9,7 +9,7 @@ class AppUpdateTest {
     private fun json(
         code: String = "58",
         name: String = "\"0.4.42\"",
-        apk: String = "\"https://github.com/fahadalijaved/OneOS/releases/download/v0.4.42/OneOS-0.4.42.apk\"",
+        apk: String = "\"https://github.com/VenusIsJaded/OneOS/releases/download/v0.4.42/OneOS-0.4.42.apk\"",
         bytes: String = "52428800",
         sha256: String = "\"$sha\"",
     ) = """{"versionCode": $code, "versionName": $name, "apk": $apk, "bytes": $bytes, "sha256": $sha256}"""
@@ -17,7 +17,7 @@ class AppUpdateTest {
     @Test
     fun readsTheReleasesUpdate() {
         val u = AppUpdate.parse(json()).getOrThrow()
-        assertEquals(AppUpdate(58, "0.4.42", "https://github.com/fahadalijaved/OneOS/releases/download/v0.4.42/OneOS-0.4.42.apk", 52428800L, sha), u)
+        assertEquals(AppUpdate(58, "0.4.42", "https://github.com/VenusIsJaded/OneOS/releases/download/v0.4.42/OneOS-0.4.42.apk", 52428800L, sha), u)
         assertTrue(u.newerThan(57))
         assertTrue(!u.newerThan(58))
     }
@@ -50,7 +50,8 @@ class AppUpdateTest {
     fun refusesAnythingElse() {
         val bad = listOf(
             json(apk = "\"https://example.com/OneOS-0.4.42.apk\""),
-            json(apk = "\"https://github.com/fahadalijaved/OneOS/releases/download/v0.4.42/../../x.apk\""),
+            json(apk = "\"https://github.com/VenusIsJaded/OneOS/releases/download/v0.4.42/../../x.apk\""),
+            json(apk = "\"https://github.com/fahadalijaved/OneOS/releases/download/v0.4.42/OneOS-0.4.42.apk\""),
             json(apk = "\"https://github.com/someone/OneOS/releases/download/v0.4.42/OneOS-0.4.42.apk\""),
             json(code = "0"),
             json(code = "\"58\""),

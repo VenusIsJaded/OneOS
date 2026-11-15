@@ -37,7 +37,7 @@ import zipfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(ROOT, "app-android")
 GRADLE = os.path.join(APP, "app/build.gradle.kts")
-REPO = "fahadalijaved/OneOS"
+REPO = "VenusIsJaded/OneOS"
 RCLONE = os.environ.get("RCLONE", os.path.expanduser("~/bin/rclone"))
 # The test channel (0.4.56): the owner's own Drive folder OneOS-test, outside the shared OneOS folder,
 # each file shared by link only (rclone link). The app reads update.json by its id, a code the owner
