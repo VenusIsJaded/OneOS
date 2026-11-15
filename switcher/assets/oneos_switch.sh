@@ -1224,7 +1224,8 @@ for t in CaptureStateTracker libbinder.Parcel Parcel ResourcesManager MediaCodec
          UserAwareMgr OplusUIFirst_TS SDM \
          SettingsState SG QuickStartRUSHelper OplusGcSupressionHelper "[UAH_CLIENT]" \
          OplusDynamicFrameRateRUS DynamicFramerate FlexibleWindowManagerService \
-         Blur_WindowBlurSessionImpl Blur_ScreenCapture Blur_BlurServiceImpl; do
+         Blur_WindowBlurSessionImpl Blur_ScreenCapture Blur_BlurServiceImpl \
+         OplusBenchHelper OplusViewDebugManager MSP-LOG-SDK- MSP-LOG-APP-MSP-LOG-APP-ProcessBridge MSPAPK_DlCore-FileCall; do
     setprop "log.tag.$t" SILENT 2>/dev/null
 done
 if [ "${ONEOS_SOUND_VERBOSE:-0}" != 1 ]; then

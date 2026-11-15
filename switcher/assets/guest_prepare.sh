@@ -7116,8 +7116,7 @@ rm -f "$STAGE/tmp/softreboot.gen" "$STAGE/tmp/module_mounts"
 if [ -f "$STAGE/data/oneos_root/enabled" ]; then
     STAGE="$STAGE" /system/bin/sh "$STAGE/guest_runtime.sh" prepare || exit 3
     BB=$BB /system/bin/sh "$STAGE/tmp/guest_modules.sh" || exit 3
-fi
-if [ -d "$STAGE/data/oneos_ksu/modules" ]; then
+elif [ -d "$STAGE/data/oneos_ksu/modules" ]; then
     BB=$BB /system/bin/sh "$STAGE/tmp/guest_modules.sh" || echo "Modules: not applied (see above)"
 fi
 
