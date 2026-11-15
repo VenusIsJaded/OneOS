@@ -858,8 +858,9 @@ if [ "${ONEOS_LOGCAT:-1}" = 1 ]; then
     swp=$(cat "$STAGE/sound_watch.pid" 2>/dev/null)
     case "$swp" in
         ""|*[!0-9]*) ;;
-        *) tr '\0' ' ' < "/proc/$swp/cmdline" 2>/dev/null | grep -q "sound_watch.log" && { kill -TERM -"$swp" 2>/dev/null; kill "$swp" 2>/dev/null; } ;;
+        *) tr '\0' ' ' < "/proc/$swp/cmdline" 2>/dev/null | grep -q "sound_watch.log" && { kill -TERM -- -"$swp" 2>/dev/null; kill "$swp" 2>/dev/null; } ;;
     esac
+    pkill -f "^logcat .*$STAGE/sound_watch.log" 2>/dev/null || true
     [ -f "$STAGE/sound_watch.log" ] && mv -f "$STAGE/sound_watch.log" "$STAGE/sound_watch.prev"
     # Only enable verbose vibrator/Dolby/ringtone tracing when ONEOS_SOUND_VERBOSE=1
     # is explicitly requested (ONEOS_FULL_LOGS=1 is on by default in app sessions
@@ -895,7 +896,7 @@ fi
 stp=$(cat "$STAGE/store_watch.pid" 2>/dev/null)
 case "$stp" in
     ""|*[!0-9]*) ;;
-    *) tr '\0' ' ' < "/proc/$stp/cmdline" 2>/dev/null | grep -q "store_watch.log" && { kill -TERM -"$stp" 2>/dev/null; kill "$stp" 2>/dev/null; } ;;
+    *) tr '\0' ' ' < "/proc/$stp/cmdline" 2>/dev/null | grep -q "store_watch.log" && { kill -TERM -- -"$stp" 2>/dev/null; kill "$stp" 2>/dev/null; } ;;
 esac
 rm -f "$STAGE/store_watch.pid"
 # Charging (charge_watch.log, collected with the other stage logs): one line a
@@ -909,9 +910,11 @@ if [ -r "$CHB/current_now" ]; then
     chp=$(cat "$STAGE/charge_watch.pid" 2>/dev/null)
     case "$chp" in
         ""|*[!0-9]*) ;;
-        *) tr '\0' ' ' < "/proc/$chp/cmdline" 2>/dev/null | grep -q "charge_watch" && { kill -TERM -"$chp" 2>/dev/null; kill "$chp" 2>/dev/null; } ;;
+        *) tr '\0' ' ' < "/proc/$chp/cmdline" 2>/dev/null | grep -q "charge_watch" && { kill -TERM -- -"$chp" 2>/dev/null; kill "$chp" 2>/dev/null; } ;;
     esac
-    CHB="$CHB" $BB setsid $BB timeout 7200 $BB sh -c '
+    pkill -f "session \\(charge_watch\\)" 2>/dev/null || true
+    CHB="$CHB" STAGE="$STAGE" $BB setsid $BB timeout 7200 $BB sh -c '
+        echo $$ > "$STAGE/charge_watch.pid" 2>/dev/null
         rf() { local _v=""; [ -r "$1" ] && IFS= read -r _v < "$1" 2>/dev/null; printf "%s" "$_v"; }
         echo "=== $(date "+%F %T") session (charge_watch): status charging_type direct current(mA) voltage(mV) temp"
         while :; do
@@ -921,7 +924,6 @@ if [ -r "$CHB/current_now" ]; then
             echo "$(date +%T) $st ${ty:-?} direct=${dc:-?} $(( ${cu:-0} / 1000 )) $(( ${vo:-0} / 1000 )) ${te:-?}"
             sleep 60
         done' charge_watch </dev/null >> "$STAGE/charge_watch.log" 2>&1 &
-    echo $! > "$STAGE/charge_watch.pid"
     echo "Charge watch: $STAGE/charge_watch.log"
 fi
 
@@ -2404,7 +2406,7 @@ while true; do
                                   android.permission.WRITE_ALLOWLISTED_DEVICE_CONFIG; do
                             \$G_GMS /system/bin/pm grant com.google.android.gms \$gp >/dev/null 2>&1 && granted_gms=\$((granted_gms + 1))
                         done
-                        [ \$granted_gms -gt 0 ] && mkdir -p $STAGE/data/oneos_gms_devcfg_granted 2>/dev/null || true
+                        mkdir -p $STAGE/data/oneos_gms_devcfg_granted 2>/dev/null || true
                         echo \"[UI Activator] GMS device_config permissions granted: \$granted_gms/3\"
                     fi
                 ) </dev/null &

@@ -1274,9 +1274,12 @@ add)
     # large, must fit 32-bit integer", 371 errors + 768 SS_POWER_HINT_SESSION
     # create/HYPER-HAL boost/destroy round-trips in a 5 min LineageOS 24 session).
     # Disable HWUI's broken HintManager calls for the guest session unless opted in.
-    if [ "${ONEOS_GUEST_HWUI_ADPF:-0}" != 1 ] && ! grep -qxF "debug.hwui.use_hint_manager" "$HOST"; then
-        drop_new "debug.hwui.use_hint_manager"
-        echo "debug.hwui.use_hint_manager=false" >> "$NEW"
+    if [ "${ONEOS_GUEST_HWUI_ADPF:-0}" != 1 ]; then
+        for adpf_k in debug.hwui.use_hint_manager debug.sf.enable_adpf_cpu_hint; do
+            grep -qxF "$adpf_k" "$HOST" && continue
+            drop_new "$adpf_k"
+            echo "$adpf_k=false" >> "$NEW"
+        done
     fi
     echo "guest_props add: batch $(date +%T)"
     if "$RP" -n -f "$NEW" 2>/dev/null; then
