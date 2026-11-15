@@ -3649,7 +3649,33 @@ GUEST_THERMAL_MAP=0
 [ "${ONEOS_GUEST_THERMAL_MAP:-1}" = 1 ] && grep -q '^  "image": "pixel' "$STAGE/.oneos_stage" 2>/dev/null && GUEST_THERMAL_MAP=1
 if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
     [ $HEAT_CAP = 1 ] && : > "$STAGE/heat_cap.active"
-    rm -f "$STAGE/cpufreq_max_limit.released" "$STAGE/gpu_max_clock.capped"
+    rm -f "$STAGE/cpufreq_max_limit.released" "$STAGE/gpu_max_clock.capped" "$STAGE/bg_uclamp.saved"
+    # Clamp background / system-background cgroups so background syncs, dexopt,
+    # and keeper workers stay in efficient DVFS OPP states instead of triggering
+    # Prime-core voltage spikes; foreground and top-app stay completely uncapped.
+    if [ $HEAT_CAP = 1 ]; then
+        for cg in background system-background; do
+            for f in "/dev/cpuctl/$cg/cpu.uclamp.max" "/sys/fs/cgroup/cpuctl/$cg/cpu.uclamp.max"; do
+                [ -w "$f" ] || continue
+                old=$(cat "$f" 2>/dev/null | awk '{print $1}')
+                [ -n "$old" ] || continue
+                target=50.00; [ "$cg" = system-background ] && target=65.00
+                if echo "$target" > "$f" 2>/dev/null; then
+                    echo "$f $old" >> "$STAGE/bg_uclamp.saved"
+                    break
+                fi
+            done
+            for f in "/dev/cpuctl/$cg/cpu.uclamp.latency_sensitive" "/sys/fs/cgroup/cpuctl/$cg/cpu.uclamp.latency_sensitive"; do
+                [ -w "$f" ] || continue
+                old=$(cat "$f" 2>/dev/null | awk '{print $1}')
+                [ "$old" = 1 ] || continue
+                if echo 0 > "$f" 2>/dev/null; then
+                    echo "$f $old" >> "$STAGE/bg_uclamp.saved"
+                    break
+                fi
+            done
+        done
+    fi
     $BB sh -c "
     : oneos_heat_cap
     echo \$\$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null
@@ -3657,6 +3683,7 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
     CFL=/sys/devices/system/cpu/cpufreq_limit/cpufreq_max_limit
     GCLK=/sys/kernel/gpu/gpu_max_clock
     SKIN_NODE='$SKIN_NODE'
+    AP_NODES='$AP_NODES'
     GFREQS=''
     if [ -r /sys/class/kgsl/kgsl-3d0/gpu_available_frequencies ]; then
         GFREQS=\$(awk '{for(i=1;i<=NF;i++)if(\$i~/^[0-9]+\$/)printf \"%d \", int(\$i/1000000)}' /sys/class/kgsl/kgsl-3d0/gpu_available_frequencies 2>/dev/null)
@@ -3677,18 +3704,20 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
         }'
     }
     if [ $HEAT_CAP = 1 ]; then
-        echo \"# \$(date) OneOS heat cap: from 43, 45, 47, 50 C skin every CPU policy & GPU at 85, 75, 62, 48% of top clock (2 C hysteresis; sysfs: \${SKIN_NODE:-none})\" > \$F
+        echo \"# \$(date) OneOS heat cap: skin [39,42,45,48 C] / AP die [52,56,60,65 C] -> CPU+GPU at [88,78,65,50]% of top clock (2 C / 3 C hysteresis; skin: \${SKIN_NODE:-HAL}, ap: \${AP_NODES:-HAL})\" > \$F
     else
         echo \"# \$(date) OneOS heat cap off (Cool down when hot): the guest thermal status only\" > \$F
     fi
     [ $GUEST_THERMAL_MAP = 1 ] && echo \"# guest thermal status from skin: NONE, LIGHT 47, MODERATE 50, SEVERE 53, the HAL status from 56 C (1 C hysteresis)\" >> \$F
-    full() {
-        c=''
+    release_host_vote() {
         if [ \"$HOST_LOW_POWER\" = 0 ] && [ -w \$CFL ] && [ \"\$(cat \$CFL 2>/dev/null)\" != -1 ]; then
             v=\$(cat \$CFL 2>/dev/null)
             echo -1 > \$CFL 2>/dev/null && echo \"\$v\" > $STAGE/cpufreq_max_limit.released
-            c=\" cpufreq_max_limit=\$v->\$(cat \$CFL 2>/dev/null)\"
+            printf ' cpufreq_max_limit=%s->%s' \"\$v\" \"\$(cat \$CFL 2>/dev/null)\"
         fi
+    }
+    full() {
+        c=\$(release_host_vote)
         for p in /sys/devices/system/cpu/cpufreq/policy*; do
             hw=\$(cat \$p/cpuinfo_max_freq 2>/dev/null)
             case \"\$hw\" in ''|*[!0-9]*) continue ;; esac
@@ -3702,24 +3731,38 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
         fi
         echo \"\$(date +%T) \$1: full clock:\$c\" >> \$F
     }
-    lvl=0; first=1; tl=-1; lp=''
+    slvl=0; alvl=0; lvl=0; first=1; tl=-1; lp=''
     while true; do
         if [ -f $STAGE/data/oneos_rec_stop ] || [ ! -s $STAGE/guest_mntns ]; then
             [ \$lvl = 0 ] || full stopped
             echo \"# \$(date +%T) stopped (the return started, or no guest namespace record)\" >> \$F
             exit 0
         fi
-        sk=''
+        sk=''; ap=''
         if [ -n \"\$SKIN_NODE\" ] && [ -r \"\$SKIN_NODE\" ]; then
-            raw=\$(cat \"\$SKIN_NODE\" 2>/dev/null)
+            raw=''
+            IFS= read -r raw < \"\$SKIN_NODE\" 2>/dev/null
             case \"\$raw\" in
                 -*|'') ;;
                 *) sk=\$(awk -v v=\"\$raw\" 'BEGIN { if (v > 200) printf \"%.1f\", v / 1000.0; else if (v > 0) printf \"%.1f\", v }') ;;
             esac
         fi
+        if [ -n \"\$AP_NODES\" ]; then
+            ap_max=0
+            for an in \$AP_NODES; do
+                [ -r \"\$an\" ] || continue
+                ar=''
+                IFS= read -r ar < \"\$an\" 2>/dev/null
+                case \"\$ar\" in ''|*[!0-9]*) continue ;; esac
+                [ \"\$ar\" -gt \"\$ap_max\" ] && ap_max=\$ar
+            done
+            [ \"\$ap_max\" -gt 0 ] && ap=\$(awk -v v=\"\$ap_max\" 'BEGIN { if (v > 200) printf \"%.1f\", v / 1000.0; else if (v > 0) printf \"%.1f\", v }')
+        fi
         P=\$(pidof system_server | awk '{print \$1}')
-        if [ -z \"\$sk\" ] && [ -n \"\$P\" ]; then
-            sk=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys thermalservice 2>/dev/null | sed -n '/^Current temperatures from HAL/,/^[^[:space:]]/p' | sed -n 's/.*mValue=\([-0-9.]*\), mType=[0-9]*, mName=SKIN,.*/\1/p' | head -n 1)
+        if { [ -z \"\$sk\" ] || [ -z \"\$ap\" ]; } && [ -n \"\$P\" ]; then
+            TH=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys thermalservice 2>/dev/null | sed -n '/^Current temperatures from HAL/,/^[^[:space:]]/p')
+            [ -n \"\$sk\" ] || sk=\$(printf '%s\n' \"\$TH\" | sed -n 's/.*mValue=\([-0-9.]*\), mType=[0-9]*, mName=SKIN,.*/\1/p' | head -n 1)
+            [ -n \"\$ap\" ] || ap=\$(printf '%s\n' \"\$TH\" | sed -n 's/.*mValue=\([-0-9.]*\), mType=0,.*/\1/p' | awk '\$1 + 0 > m { m = \$1 + 0 } END { if (m > 0) printf \"%.1f\", m }')
         fi
         if [ -n \"\$sk\" ] && [ $GUEST_THERMAL_MAP = 1 ] && [ -n \"\$P\" ]; then
             [ \"\$P\" = \"\$lp\" ] || tl=-1
@@ -3732,21 +3775,25 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
                 tl=\$nt
             fi
         fi
-        if [ -n \"\$sk\" ] && [ $HEAT_CAP = 1 ]; then
-            new=\$(awk -v s=\"\$sk\" -v l=\$lvl 'BEGIN { t[1] = 43; t[2] = 45; t[3] = 47; t[4] = 50; while (l < 4 && s >= t[l + 1]) l++; while (l > 0 && s < t[l] - 2) l--; print l }')
+        if { [ -n \"\$sk\" ] || [ -n \"\$ap\" ]; } && [ $HEAT_CAP = 1 ]; then
+            [ -n \"\$sk\" ] && slvl=\$(awk -v s=\"\$sk\" -v l=\$slvl 'BEGIN { t[1] = 39; t[2] = 42; t[3] = 45; t[4] = 48; while (l < 4 && s >= t[l + 1]) l++; while (l > 0 && s < t[l] - 2) l--; print l }')
+            [ -n \"\$ap\" ] && alvl=\$(awk -v s=\"\$ap\" -v l=\$alvl 'BEGIN { t[1] = 52; t[2] = 56; t[3] = 60; t[4] = 65; while (l < 4 && s >= t[l + 1]) l++; while (l > 0 && s < t[l] - 3) l--; print l }')
+            new=\$slvl; [ \"\$alvl\" -gt \"\$new\" ] && new=\$alvl
+            tag=\"skin \${sk:--} C / AP \${ap:--} C\"
             if [ \"\$new\" = 0 ] && [ \$first = 1 ]; then
                 capped=''
+                [ \"$HOST_LOW_POWER\" = 0 ] && [ -r \$CFL ] && [ \"\$(cat \$CFL 2>/dev/null)\" != -1 ] && capped=1
                 for p in /sys/devices/system/cpu/cpufreq/policy*; do
                     [ \"\$(cat \$p/scaling_max_freq 2>/dev/null)\" = \"\$(cat \$p/cpuinfo_max_freq 2>/dev/null)\" ] || capped=1
                 done
                 [ \"\$GMAX\" -gt 0 ] && [ -r \$GCLK ] && [ \"\$(cat \$GCLK 2>/dev/null)\" != \"\$GMAX\" ] && capped=1
-                if [ -n \"\$capped\" ]; then full \"skin \$sk C, a cap from before the switch lifted\"
-                else echo \"\$(date +%T) skin \$sk C: no cap\" >> \$F; fi
+                if [ -n \"\$capped\" ]; then full \"\$tag, a cap from before the switch lifted\"
+                else echo \"\$(date +%T) \$tag: no cap\" >> \$F; fi
             elif [ \"\$new\" = 0 ] && [ \$lvl != 0 ]; then
-                full \"skin \$sk C, level \$lvl to 0\"
-            elif [ \"\$new\" != 0 ] && [ \"\$new\" != \$lvl ]; then
-                case \$new in 1) pct=85 ;; 2) pct=75 ;; 3) pct=62 ;; *) pct=48 ;; esac
-                c=''
+                full \"\$tag, level \$lvl to 0\"
+            elif [ \"\$new\" != 0 ] && { [ \"\$new\" != \$lvl ] || [ \$first = 1 ]; }; then
+                case \$new in 1) pct=88 ;; 2) pct=78 ;; 3) pct=65 ;; *) pct=50 ;; esac
+                c=\$(release_host_vote)
                 for p in /sys/devices/system/cpu/cpufreq/policy*; do
                     hw=\$(cat \$p/cpuinfo_max_freq 2>/dev/null)
                     case \"\$hw\" in ''|*[!0-9]*) continue ;; esac
@@ -3761,14 +3808,14 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
                         c=\"\$c gpu=\$(cat \$GCLK 2>/dev/null)/\$GMAX\"
                     fi
                 fi
-                echo \"\$(date +%T) skin \$sk C, level \$lvl to \$new: \$pct%:\$c\" >> \$F
+                echo \"\$(date +%T) \$tag, level \$lvl to \$new: \$pct%:\$c\" >> \$F
             fi
             lvl=\$new; first=0
         fi
         sleep 10
     done
 " </dev/null >/dev/null 2>&1 &
-    [ $HEAT_CAP = 1 ] && echo "Heat cap: on (from 43 C skin, CPU + GPU; every 10 s to $STAGE/heat_cap.log)" 
+    [ $HEAT_CAP = 1 ] && echo "Heat cap: on (from 39 C skin / 52 C AP die, CPU + GPU + bg uclamp; every 10 s to $STAGE/heat_cap.log)" 
     [ $HEAT_CAP = 1 ] || echo "Heat cap: off (ONEOS_HEAT_CAP=0, Cool down when hot off in Advanced)"
     [ $GUEST_THERMAL_MAP = 1 ] && echo "Guest thermal status: from the skin temperature, the HAL status from 56 C ($STAGE/heat_cap.log)"
 else

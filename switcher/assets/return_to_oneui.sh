@@ -299,6 +299,13 @@ if [ -f $S/heat_cap.active ]; then
         case "$gmax" in ''|*[!0-9]*) ;; *) echo "$gmax" > $GCLK 2>/dev/null; hc="$hc gpu=$(cat $GCLK 2>/dev/null)/$gmax" ;; esac
         rm -f $S/gpu_max_clock.capped
     fi
+    if [ -f $S/bg_uclamp.saved ]; then
+        while read -r uf uv; do
+            [ -n "$uf" ] && [ -n "$uv" ] && [ -w "$uf" ] && echo "$uv" > "$uf" 2>/dev/null
+        done < $S/bg_uclamp.saved
+        rm -f $S/bg_uclamp.saved
+        hc="$hc bg_uclamp=restored"
+    fi
     rm -f $S/heat_cap.active
     echo "Heat cap: stopped, CPU/GPU policies at full clock:$hc" 
 fi
