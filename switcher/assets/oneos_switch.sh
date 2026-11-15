@@ -1452,7 +1452,7 @@ nohup $BB sh -c '
         fi
     done
 ' host_svc_guard "$STAGE" </dev/null >/dev/null 2>&1 &
-sleep 1
+sleep 0.3
 # The session's own copy of One UI's property store, now that One UI's
 # framework is down (guest_props.sh store-on): the guest's persist settings
 # never reach One UI's /data/property, and the return reuses their slots.

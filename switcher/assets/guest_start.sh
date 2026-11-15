@@ -622,7 +622,7 @@ setprop service.bootanim.exit 0
 /system/bin/bootanimation > /data/anim.log 2>&1 &
 ANIM_PID=$!
 echo "[Pivoted Root] BootAnimation PID: $ANIM_PID"
-sleep 1
+sleep 0.2
 
 # Backlight. With the host framework stopped nothing drives the panel
 # brightness until the guest's system_server does, so the boot animation can
@@ -926,7 +926,10 @@ if [ -x /system/bin/wificond ]; then
     /system/bin/wificond > /data/wificond.log 2>&1 &
     WIFICOND_PID=$!
     echo "[Pivoted Root] wificond PID: $WIFICOND_PID"
-    sleep 1
+    n=0
+    while [ $n -lt 6 ] && ! service check wifinl80211 2>/dev/null | grep -q ": found"; do
+        n=$((n + 1)); sleep 0.1
+    done
 else
     echo "[Pivoted Root] No wificond in the image: the guest's wifi module drives nl80211 itself"
 fi
@@ -1547,7 +1550,6 @@ while [ $n -lt 50 ]; do
     n=$((n + 1)); sleep 0.2
 done
 echo "[Pivoted Root] netd: $(getprop init.svc.netd), dnsresolver: $(service check dnsresolver 2>/dev/null | cut -d: -f2) after $((n / 5))s"
-sleep 1
 
 
 # Fresh GNSS HAL for the guest. The One UI app com.qualcomm.location holds the
