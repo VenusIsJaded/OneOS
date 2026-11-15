@@ -85,9 +85,23 @@ $BB mount --bind /data/misc/profiles/cur /data_mirror/cur_profiles 2>/dev/null |
 $BB mount --bind /data/misc/profiles/ref /data_mirror/ref_profiles 2>/dev/null || true
 
 echo "[Pivoted Root] Setting up /data/media and emulated storage..."
-mkdir -p /data/media/0/Android /data/media/0/Pictures/Screenshots /data/media/0/Download /data/media/0/DCIM /data/media/0/Documents
-chown -R 1023:1023 /data/media 2>/dev/null || true
-chmod -R 777 /data/media 2>/dev/null || true
+mkdir -p /data/media/0/Android /data/media/0/Pictures/Screenshots \
+    /data/media/0/DCIM/Camera /data/media/0/DCIM/ScreenRecorder \
+    /data/media/0/Movies/ScreenRecordings /data/media/0/Music \
+    /data/media/0/Download /data/media/0/Documents
+chown -h 1023:1023 /data/media /data/media/0 /data/media/obb /data/media/0/Android 2>/dev/null || true
+chmod 0777 /data/media /data/media/0 /data/media/obb /data/media/0/Android 2>/dev/null || true
+for md in /data/media/0/* /data/media/0/.[!.]*; do
+    [ -e "$md" ] || [ -L "$md" ] || continue
+    case "${md##*/}" in Android) continue ;; esac
+    chown -h -R 1023:1023 "$md" 2>/dev/null || true
+    chmod -R 777 "$md" 2>/dev/null || true
+done
+for ak in data media obb; do
+    [ -d "/data/media/0/Android/$ak" ] || continue
+    chown -h 1023:1078 "/data/media/0/Android/$ak" 2>/dev/null || true
+    chmod 0777 "/data/media/0/Android/$ak" 2>/dev/null || true
+done
 $BB mount -t tmpfs tmpfs /storage 2>/dev/null || true
 mkdir -p /storage/emulated/0
 $BB mount --bind /data/media/0 /storage/emulated/0 2>/dev/null || true

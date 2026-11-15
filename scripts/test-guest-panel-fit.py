@@ -195,11 +195,18 @@ class GuestPanelFit(unittest.TestCase):
 
 
 class ActivatorScript(unittest.TestCase):
-    """The activator is one double-quoted string of the switch; a quote too many in it only shows on a phone."""
+    """The activator is written from a heredoc of the switch; a quote too many in it only shows on a phone."""
 
     def test_it_parses_for_every_kind_of_guest(self):
         anchor = SOURCE.index('\nGUEST_FOLD_FORM=')
-        if '\nprintf \'%s\\n\' "#!/system/bin/sh\n' in SOURCE[anchor:]:
+        is_heredoc = False
+        if '\n"$BB" cat > "$STAGE/tmp/ui_activator.sh" <<UIACT\n' in SOURCE[anchor:]:
+            hdr = '\n"$BB" cat > "$STAGE/tmp/ui_activator.sh" <<UIACT\n'
+            start = SOURCE.index(hdr, anchor) + len(hdr)
+            end = SOURCE.index('\nUIACT\n', start)
+            body = SOURCE[start:end]
+            is_heredoc = True
+        elif '\nprintf \'%s\\n\' "#!/system/bin/sh\n' in SOURCE[anchor:]:
             hdr = '\nprintf \'%s\\n\' "#!/system/bin/sh\n'
             start = SOURCE.index(hdr, anchor) + 1
             end = SOURCE.index('\n" > "$STAGE/tmp/ui_activator.sh"\n', start)
@@ -215,18 +222,24 @@ class ActivatorScript(unittest.TestCase):
                  {'GUEST_OPLUS': '0', 'GUEST_AOSP_SYSUI': '1', 'GUEST_MIUI': '0', 'GUEST_FOLD_FORM': '1', 'GUEST_OXYGEN': '0'},
                  {'GUEST_OPLUS': '0', 'GUEST_AOSP_SYSUI': '0', 'GUEST_MIUI': '1', 'GUEST_FOLD_FORM': '0', 'GUEST_OXYGEN': '0'})
         with tempfile.TemporaryDirectory() as d:
+            cat_bin = Path(d, 'cat')
+            cat_bin.symlink_to('/bin/cat')
             for kind in kinds:
-                # No command of the server runs while the string is put together: nothing is on the PATH.
+                # Only our isolated cat symlink is available: any unintended command substitution fails immediately.
                 env = {n: '1' if n.startswith('GUEST_') or n.endswith('_PID') else '/x/' + n.lower() for n in names}
-                env.update(kind, PATH='/nonexistent')
-                Path(d, 'gen.sh').write_text("printf '%s\\n' \"" + body + '"\n')
+                env.update(kind, PATH='/nonexistent', TMPDIR=d)
+                if is_heredoc:
+                    Path(d, 'gen.sh').write_text(f'"{cat_bin}" <<UIACT\n' + body + '\nUIACT\n')
+                else:
+                    Path(d, 'gen.sh').write_text("printf '%s\\n' \"" + body + '"\n')
                 made = subprocess.run(['/bin/sh', str(Path(d, 'gen.sh'))], env=env, capture_output=True, text=True, cwd=d, timeout=60)
                 self.assertEqual((0, ''), (made.returncode, made.stderr), kind)
                 self.assertIn("[UI Activator] guest display 0: ", made.stdout)
                 self.assertIn('[UI Activator] stable display size: ', made.stdout)
                 Path(d, 'activator.sh').write_text(made.stdout)
-                r = subprocess.run(['/bin/sh', '-n', str(Path(d, 'activator.sh'))], capture_output=True, text=True, timeout=60)
-                self.assertEqual((0, ''), (r.returncode, r.stderr), kind)
+                for sh in ('/bin/sh', 'dash', 'bash'):
+                    r = subprocess.run([sh, '-n', str(Path(d, 'activator.sh'))], capture_output=True, text=True, timeout=60)
+                    self.assertEqual((0, ''), (r.returncode, r.stderr), (sh, kind))
 
 
 if __name__ == '__main__':

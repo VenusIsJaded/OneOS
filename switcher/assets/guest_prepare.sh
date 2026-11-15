@@ -4819,7 +4819,20 @@ for d in "$STAGE/data/user/0" "$STAGE/data/user_de/0"; do
         fi
     fi
 done
-$BB chown -h -R 1023:1023 "$STAGE/data/media" 2>/dev/null || true
+# Shared storage (/data/media): preserve per-app owners (auid:1078) that
+# ensure_app_storage.sh assigned under /data/media/0/Android/{data,media,obb}/*
+# instead of resetting all ~1,440 package directories back to 1023:1023 on every
+# boot (which forced ensure_app_storage.sh to re-stat and chown -R 1,440 trees
+# every session).
+$BB chown -h 1023:1023 "$STAGE/data/media" "$STAGE/data/media/0" "$STAGE/data/media/obb" "$STAGE/data/media/0/Android" 2>/dev/null || true
+for md in "$STAGE/data/media/0"/* "$STAGE/data/media/0"/.[!.]*; do
+    [ -e "$md" ] || [ -L "$md" ] || continue
+    case "${md##*/}" in Android) continue ;; esac
+    $BB chown -h -R 1023:1023 "$md" 2>/dev/null || true
+done
+for ak in data media obb; do
+    [ -d "$STAGE/data/media/0/Android/$ak" ] && $BB chown -h 1023:1078 "$STAGE/data/media/0/Android/$ak" 2>/dev/null || true
+done
 $BB chmod 0770 "$STAGE/data/media" "$STAGE/data/media/0" 2>/dev/null || true
 $BB chcon -h -R u:object_r:media_rw_data_file:s0 "$STAGE/data/media" 2>/dev/null || true
 # data/apex (host /data/apex) and data/adb (host /data/adb) are left alone: they
@@ -5536,8 +5549,9 @@ done < /data/system/packages.list
 # /storage/emulated/0/Pictures/Screenshots and taking a screenshot crashes
 # SystemUI ("Failed to create directory: .../.pending-NNN"), and every save
 # dialog has nowhere to put its file.
-for d in Pictures Pictures/Screenshots DCIM DCIM/Camera Movies Music Documents \
-         Alarms Notifications Podcasts Ringtones Download; do
+for d in Pictures Pictures/Screenshots DCIM DCIM/Camera DCIM/ScreenRecorder \
+         Movies Movies/ScreenRecordings Music Documents Alarms Notifications \
+         Podcasts Ringtones Download; do
     p="/data/media/0/$d"
     [ -d "$p" ] && continue
     mkdir -p "$p" 2>/dev/null || continue
@@ -6338,7 +6352,11 @@ fi
 # OPPO-signed NetworkStack and CaptivePortalLogin, and hide ColorOS's own
 # CellBroadcastService.
 bind_host_app() {
-    [ -d "$1" ] && [ -d "$2" ] || { echo "!!! cannot replace $2 with $1"; return 0; }
+    # Global/IN OEM images (e.g. ColorOS IN) already ship NetworkStackGoogle /
+    # CaptivePortalLoginGoogle natively instead of OPPO-signed NetworkStack /
+    # CaptivePortalLogin; nothing needs replacing when $2 is absent and $4 exists.
+    [ -d "$2" ] || { [ -n "$4" ] && [ -d "$4" ] && return 0; echo "!!! cannot replace $2 with $1"; return 0; }
+    [ -d "$1" ] || { echo "!!! cannot replace $2 with $1"; return 0; }
     # 0.4.61: the APK must be a readable zip. A36 Infinity-X 607556f1 (0.4.60):
     # "Failed to open APK '/system/priv-app/NetworkStack/NetworkStackGoogle.apk':
     # Invalid file", no MAINLINE_NETWORK_STACK permission, Network Stack and
@@ -6365,8 +6383,8 @@ bind_host_app() {
     echo "!!! no readable $3 from One UI either; binding $1 as it is"
     $BB mount --bind "$1" "$2" && echo "Host $(basename "$1") -> $2"
 }
-bind_host_app /system/priv-app/NetworkStackGoogle "$ROOTFS/system/priv-app/NetworkStack" com.google.android.networkstack
-bind_host_app /system/app/CaptivePortalLoginGoogle "$ROOTFS/system/app/CaptivePortalLogin" com.google.android.captiveportallogin
+bind_host_app /system/priv-app/NetworkStackGoogle "$ROOTFS/system/priv-app/NetworkStack" com.google.android.networkstack "$ROOTFS/system/priv-app/NetworkStackGoogle"
+bind_host_app /system/app/CaptivePortalLoginGoogle "$ROOTFS/system/app/CaptivePortalLogin" com.google.android.captiveportallogin "$ROOTFS/system/app/CaptivePortalLoginGoogle"
 if [ -d "$GUEST_SYSTEM_EXT/priv-app/CellBroadcastService" ]; then
     $BB mount -t tmpfs -o ro,size=4k,mode=755 tmpfs "$GUEST_SYSTEM_EXT/priv-app/CellBroadcastService" && \
         echo "Hid guest system_ext/priv-app/CellBroadcastService"
