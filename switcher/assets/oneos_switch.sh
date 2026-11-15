@@ -817,8 +817,10 @@ if [ "${ONEOS_LOGCAT:-1}" = 1 ] && [ "${ONEOS_FULL_LOGS:-1}" != 1 ]; then
     if ! pgrep -f "^logcat .*$LOGS/boot.log" >/dev/null 2>&1; then
         rm -rf "$LOGS.prev"; [ -d "$LOGS" ] && mv "$LOGS" "$LOGS.prev"
     fi
+    rm -f "$STAGE/watches.stop"
     echo "Logcat capture: off (Full session logs off in the app)"
 elif [ "${ONEOS_LOGCAT:-1}" = 1 ]; then
+    rm -f "$STAGE/watches.stop"
     # pgrep -f matches the same "^logcat ... boot.log" command line in one
     # process. The loop it replaces forked tr and grep for each of ~1100 pids:
     # 1.6 s with One UI idle (measured 22 Oct, pgrep 49 ms), and it runs before
