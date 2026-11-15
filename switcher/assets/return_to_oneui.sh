@@ -334,15 +334,27 @@ if [ -n "$GUEST_NS" ] && [ "$GUEST_NS" != "$HOST_NS" ]; then
     # Repeated: a guest zygote or init-like parent can fork while the first
     # pass runs, and nothing of the guest may outlive the return.
     echo "Kill loop start $(date +%T)"
+    # Speed: per-PID readlink spawned ~1,500 subshells and cost 19 s in the
+    # ColorOS 17 return (72504af5c732f3dc: 02:04:42 -> 02:05:01). Pre-filter
+    # non-guest host processes in one bulk ls -l + stat + awk pass (same safe
+    # pattern proven in guest_softreboot.sh), while still verifying every
+    # remaining or newly spawned PID individually below.
+    not_guest_ret_awk='
+        NF >= 3 && $(NF - 1) == "->" && $NF ~ /^mnt:\[[0-9]+\]$/ && $(NF - 2) ~ /\/[0-9]+\/ns\/mnt$/ {
+            p = $(NF - 2); sub(/\/ns\/mnt$/, "", p); sub(/^.*\//, "", p); n[p] = $NF; next }
+        NF == 2 && $1 ~ /^[0-9]+$/ && $2 ~ /\/[0-9]+\/root$/ {
+            p = $2; sub(/\/root$/, "", p); sub(/^.*\//, "", p); r[p] = $1; next }
+        END { for (p in n) if ((n[p] "") != (ns "") && (dev == "" || ((p in r) && (r[p] "") != (dev "")))) printf "%s ", p }'
     seen=""
     pass=1
     while [ $pass -le 5 ]; do
         killed=""
+        other=" $( { timeout 10 ls -l /proc/[0-9]*/ns/mnt; [ -n "$GUEST_DEV" ] && timeout 10 stat -L -c '%d %n' /proc/[0-9]*/root; } 2>/dev/null |
+            awk -v ns="$GUEST_NS" -v dev="$GUEST_DEV" "$not_guest_ret_awk") "
         for p in /proc/[0-9]*; do
             pid=${p#/proc/}
-            # Speed: check the seen list before the namespace/mountinfo probe;
-            # this is what makes passes 2+ cheap.
-            case " $seen " in *" $pid "*) continue ;; esac
+            # Speed: check the seen and bulk-verified host lists before per-PID probes.
+            case " $seen $other" in *" $pid "*) continue ;; esac
             seen="$seen $pid"
             ns=$(readlink "$p/ns/mnt" 2>/dev/null)
             # A process in One UI's namespace is still checked by its root
@@ -368,7 +380,9 @@ if [ -n "$GUEST_NS" ] && [ "$GUEST_NS" != "$HOST_NS" ]; then
                     [ -n "$GUEST_DEV" ] && [ "$(timeout 1 stat -L -c %d "$p/root/" 2>/dev/null)" = "$GUEST_DEV" ] || continue
                 fi
             fi
-            killed="$killed $pid:$(cat "$p/comm" 2>/dev/null)"
+            comm=""
+            { IFS= read -r comm < "$p/comm"; } 2>/dev/null || true
+            killed="$killed $pid:$comm"
             # Speed: do not set a boot-status property for every killed process;
             # with ~100 guest processes that was most of the 34 s phase 1.
             kill -9 "$pid" 2>/dev/null
