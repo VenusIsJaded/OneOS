@@ -2371,6 +2371,24 @@ while true; do
                     echo \"[UI Activator] privacy/heat: disabled \$disabled_trk background tracker/adservices package(s) and set AdServices/ODP kill-switches\"
                 ) </dev/null &
             fi
+            # Grant GMS device_config development permissions so Phenotype's
+            # PlatformConfigurator does not retry-storm SettingsProvider with
+            # 170+ SecurityException binder stacks per session.
+            if [ '${ONEOS_GUEST_HIDE_GMS:-0}' != 1 ] && [ ! -e $STAGE/data/oneos_gms_devcfg_granted ] && [ ! -L $STAGE/data/oneos_gms_devcfg_granted ]; then
+                (
+                    G_GMS=\"timeout 10 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh\"
+                    if \$G_GMS /system/bin/pm list packages com.google.android.gms 2>/dev/null | grep -qxF 'package:com.google.android.gms'; then
+                        granted_gms=0
+                        for gp in android.permission.READ_DEVICE_CONFIG \
+                                  android.permission.WRITE_DEVICE_CONFIG \
+                                  android.permission.WRITE_ALLOWLISTED_DEVICE_CONFIG; do
+                            \$G_GMS /system/bin/pm grant com.google.android.gms \$gp >/dev/null 2>&1 && granted_gms=\$((granted_gms + 1))
+                        done
+                        [ \$granted_gms -gt 0 ] && mkdir -p $STAGE/data/oneos_gms_devcfg_granted 2>/dev/null || true
+                        echo \"[UI Activator] GMS device_config permissions granted: \$granted_gms/3\"
+                    fi
+                ) </dev/null &
+            fi
             # Fallback for a staged /data that had no settings files to seed, before
             # HOME: a fresh stage has none. Pixel's two setup wizards (ColorOS has
             # none) would take that first boot and wait for Google services.

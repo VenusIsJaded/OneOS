@@ -163,20 +163,33 @@ copy_config() {
     n=0
     for sub in $CONFIG_DIRS; do
         mkdir -p "$new/$sub"
-        for part in /system /product /system_ext; do
+        for part in /system /product /system_ext /apex/com.google.android.gmssystem; do
+            [ -d "$part/etc/$sub" ] || continue
+            p_tag=$(printf '%s' "${part#/}" | tr '/' '_')
             for f in "$part/etc/$sub"/*.xml; do
                 [ -f "$f" ] && [ ! -L "$f" ] || continue
                 case "${f##*/}" in
                     *google*|*Google*|*gms*|*GMS*|*vending*|*gsf*|*playstore*) ;;
                     *) continue ;;
                 esac
-                b="${part#/}-${f##*/}"
+                b="$p_tag-${f##*/}"
                 cp "$f" "$new/$sub/$b" || { WHY="cannot copy $f"; return 1; }
                 n=$((n + 1))
             done
         done
     done
     [ $n -gt 0 ] || { WHY="One UI has no Google permission files"; return 1; }
+    cat > "$new/permissions/oneos-privapp-permissions-gms.xml" <<'GMSPERM' || { WHY="cannot write GMS device_config permissions"; return 1; }
+<?xml version="1.0" encoding="utf-8"?>
+<permissions>
+    <privapp-permissions package="com.google.android.gms">
+        <permission name="android.permission.READ_DEVICE_CONFIG"/>
+        <permission name="android.permission.WRITE_DEVICE_CONFIG"/>
+        <permission name="android.permission.WRITE_ALLOWLISTED_DEVICE_CONFIG"/>
+    </privapp-permissions>
+</permissions>
+GMSPERM
+    n=$((n + 1))
     (cd "$new" && find . -type f -name '*.xml' -exec sha256sum {} + > config.sha256) || { WHY="cannot write checksums"; return 1; }
     chown -R 0:0 "$new"; find "$new" -type d -exec chmod 755 {} \;; find "$new" -type f -exec chmod 644 {} \;
     rm -rf "$dir"; mv "$new" "$dir" || { WHY="cannot keep the config copy"; return 1; }
