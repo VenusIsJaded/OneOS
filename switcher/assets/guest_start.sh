@@ -1936,7 +1936,7 @@ if [ "$DT2W" = 1 ] && command -v getevent >/dev/null 2>&1 && { [ -w /sys/class/s
         [ $FOLD = 1 ] && { if [ $L_tsp1 = 1 ]; then F=0; elif [ $L_tsp2 = 1 ]; then F=1; fi; }
         log "keeping:$IDS (fold $FOLD, folded ${F:-unknown}); panels lit:$(for t in $IDS; do eval echo -n \" $t=\$ON_$t\"; done)"
         in_call() {
-            timeout 3 dumpsys telephony.registry 2>/dev/null | $BB awk '/mCallState=[12]/ { f = 1 } END { exit !f }'
+            timeout 3 dumpsys telephony.registry 2>/dev/null | $BB awk "/mCallState=[12]/ { f = 1 } END { exit !f }"
         }
         # AOD (test build 9, 11-06 22:51-22:55: no double tap on AOD). Pixel
         # SystemUI here has doze_display_state_supported=false (Pixel sets it in
