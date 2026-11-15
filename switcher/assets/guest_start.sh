@@ -1088,7 +1088,7 @@ if [ -f /data/guest_audio.flag ]; then
                 now=$($bb date +%s)
                 [ $((now - last)) -ge 3 ] || continue
                 last=$now
-                cs=$(dumpsys telephony.registry 2>/dev/null | $bb awk -F= '/^ *mCallState=[0-9]+/ && c == "" { c = $2 } END { print c }')
+                cs=$(dumpsys telephony.registry 2>/dev/null | $bb awk -F= "/^ *mCallState=[0-9]+/ && c == \"\" { c = \$2 } END { print c }")
                 [ "${cs:-0}" = 0 ] || continue
                 if [ "$sent" = 1 ]; then
                     fails=$((fails + 1))
