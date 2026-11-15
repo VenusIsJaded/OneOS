@@ -873,10 +873,10 @@ if [ "${ONEOS_LOGCAT:-1}" = 1 ]; then
             AHAL_DlbSpatializerEffectImpl:V DlbDap2Process:V"
     else
         SW_TAGS="AndroidRuntime:E DEBUG:F Telecom:I Ringtone:W RingtoneManager:W \
-            VibratorManagerService:W SecVibrator-HAL-AIDL-CORE:E AHAL_StreamOut_QTI:W \
+            VibratorManagerService:W SecVibrator-HAL-AIDL-CORE:F AHAL_StreamOut_QTI:W \
             EffectOffloadImpl:W AHAL_EffectFactoryQti:W AHAL_DlbSpatializerEffectImpl:W DlbDap2Process:W"
     fi
-    $BB setsid $BB timeout 7200 logcat -b main,system,crash -v threadtime -f "$STAGE/sound_watch.log" -r 2048 -n 1 -s \
+    $BB setsid $BB timeout 7200 logcat -b main,system,crash -v threadtime -T "$(date +%s).000" -f "$STAGE/sound_watch.log" -r 2048 -n 1 -s \
         $SW_TAGS \
         AudioFlinger:W APM_AudioPolicyManager:W AHAL:W AHAL_ModulePrimary:W AHAL_StreamPrimary_exynos:W \
         audio_hw_primary:W audio_hw_proxy2:E bluetooth-a2dp:W A2dpStateMachine:I A2dpService:I \
@@ -985,7 +985,7 @@ fi
 ims_i=0
 ims_st=1
 while [ "$ims_i" -lt 45 ]; do
-    if dumpsys telephony.registry 2>/dev/null | grep -q 'mVoiceRegState=0'; then
+    if dumpsys telephony.registry 2>/dev/null | "$BB" awk '/mVoiceRegState=0/ { f = 1 } END { exit !f }'; then
         ims_st=0
         break
     fi
@@ -1224,6 +1224,9 @@ for t in CaptureStateTracker libbinder.Parcel Parcel ResourcesManager MediaCodec
          UserAwareMgr OplusUIFirst_TS SDM; do
     setprop "log.tag.$t" SILENT 2>/dev/null
 done
+if [ "${ONEOS_SOUND_VERBOSE:-0}" != 1 ]; then
+    setprop "log.tag.SecVibrator-HAL-AIDL-CORE" SILENT 2>/dev/null
+fi
 
 # Wifi handover, recorded while One UI still runs. The guest's WifiService gets
 # the supplicant (ISupplicant/default) from the shared servicemanager, which

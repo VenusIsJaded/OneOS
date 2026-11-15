@@ -1088,7 +1088,7 @@ if [ -f /data/guest_audio.flag ]; then
                 now=$($bb date +%s)
                 [ $((now - last)) -ge 3 ] || continue
                 last=$now
-                cs=$(dumpsys telephony.registry 2>/dev/null | $bb grep -m1 -o "mCallState=[0-9]*" | $bb grep -o "[0-9]*$")
+                cs=$(dumpsys telephony.registry 2>/dev/null | $bb awk -F= '/^ *mCallState=[0-9]+/ && c == "" { c = $2 } END { print c }')
                 [ "${cs:-0}" = 0 ] || continue
                 if [ "$sent" = 1 ]; then
                     fails=$((fails + 1))
@@ -1431,7 +1431,7 @@ if [ -f /data/guest_audio.flag ] && [ "${ONEOS_GUEST_CALL_SIM:-1}" != 0 ]; then
                 if [ -n "$last" ]; then setp 0x0$((last + 1)) "path check, last call was on SIM slot $last" && cur=$last
                 else setp 0x01 "path check, VSID_1 as the HAL starts"; fi
             }
-            st=$(dumpsys telephony.registry 2>/dev/null | $bb awk -F= "NR > 160 { exit } /^ *Phone Id=/ { p = \$2 } /^ *mCallState=/ { print p \":\" \$2 }")
+            st=$(dumpsys telephony.registry 2>/dev/null | $bb awk -F= "/^ *Phone Id=/ { p = \$2; seen_cs = 0 } /^ *mCallState=[0-9]+/ && !seen_cs { seen_cs = 1; out = out (out ? \" \" : \"\") p \":\" \$2 } END { print out }")
             [ -n "$st" ] || return 1
             ring=""; off=""
             for e in $st; do
@@ -1466,19 +1466,24 @@ if [ -f /data/guest_audio.flag ] && [ "${ONEOS_GUEST_CALL_SIM:-1}" != 0 ]; then
         while [ $i -lt 20 ] && [ -z "$probed" ]; do
             sleep 2; i=$((i + 1)); check_calls
         done
+        last_chk=0
         while true; do
             logcat -v brief -b main -b radio -T 1 -s \
-                AHAL_Telephony_QTI:D DeviceHalAidl:D GsmCdmaCallTracker:D \
+                AHAL_Telephony_QTI:D GsmCdmaCallTracker:D \
                 ImsPhoneCallTracker:D OplusGsmCdmaCallTrackerImpl:D \
                 OplusImsPhoneCallTrackerImpl:D CallStateTracker:D \
                 CallsManager:I TelephonyRegistry:D 2>/dev/null |
             while IFS= read -r l; do
                 case "$l" in
-                    *notifyDataConnection*|*notifyCell*|*notifySignal*|*onCapabilities*|*updateCarrier*) continue ;;
-                    *setParameters*"screen_state="*|*setParameters*"OPLUS_"*) continue ;;
+                    *notifyCallState*|*mCallState*|*CallState*|*updatePhoneState*|*processCallStateChange*|*RINGING*|*OFFHOOK*|*DIALING*|*INCOMING*|*DISCONNECTED*|*setCallState*|*onCall*|*VSID*|*call_state*) ;;
+                    *) continue ;;
                 esac
+                now=$($bb date +%s)
+                [ $((now - last_chk)) -ge 1 ] || continue
+                last_chk=$now
                 if check_calls; then
                     while check_calls; do sleep 1; done
+                    last_chk=$($bb date +%s)
                 fi
             done
             check_calls
@@ -1931,7 +1936,7 @@ if [ "$DT2W" = 1 ] && command -v getevent >/dev/null 2>&1 && { [ -w /sys/class/s
         [ $FOLD = 1 ] && { if [ $L_tsp1 = 1 ]; then F=0; elif [ $L_tsp2 = 1 ]; then F=1; fi; }
         log "keeping:$IDS (fold $FOLD, folded ${F:-unknown}); panels lit:$(for t in $IDS; do eval echo -n \" $t=\$ON_$t\"; done)"
         in_call() {
-            timeout 3 dumpsys telephony.registry 2>/dev/null | grep -q "mCallState=[12]"
+            timeout 3 dumpsys telephony.registry 2>/dev/null | $BB awk '/mCallState=[12]/ { f = 1 } END { exit !f }'
         }
         # AOD (test build 9, 11-06 22:51-22:55: no double tap on AOD). Pixel
         # SystemUI here has doze_display_state_supported=false (Pixel sets it in
