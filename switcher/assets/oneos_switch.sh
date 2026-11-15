@@ -4405,4 +4405,3 @@ if [ "$RETURN_MAX" -gt 0 ]; then
 fi
 
 echo "=== TAKEOVER LAUNCHED SUCCESSFULLY ==="
-CESSFULLY ==="
