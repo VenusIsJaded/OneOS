@@ -155,6 +155,16 @@ baseline)
     fi
     : > "$B/host-frameworks"
     for proc in /proc/[0-9]*; do
+        # Pre-filter via zero-fork /proc/<pid>/comm read before spawning tr on cmdline.
+        # Scanning ~1,500 PIDs via subshell+tr while One UI was live previously stalled
+        # preflight for ~16s; comm matches both native daemons (vectord/lspd) and
+        # app_process-hosted frameworks (main/app_process64/org.lsposed.lspd/org.matrix.*).
+        comm=''
+        { IFS= read -r comm < "$proc/comm"; } 2>/dev/null || continue
+        case "$comm" in
+            vectord*|lspd*|org.lsposed*|org.matrix*|main*|app_process*) ;;
+            *) continue ;;
+        esac
         name=$({ tr '\000' ' ' < "$proc/cmdline"; } 2>/dev/null || true)
         case "$name" in vectord|vectord' '*|lspd|lspd' '*|org.lsposed.lspd|org.lsposed.lspd' '*|org.matrix.vector.daemon|org.matrix.vector.daemon' '*)
             pid=${proc##*/}
@@ -179,7 +189,10 @@ verify-return)
     [ "$(cat "$B/boot")" = "$(cat /proc/sys/kernel/random/boot_id)" ] || exit 1
     "$S/guest_root" --host-audit > "$B/return.unsorted" || exit 1
     sort "$B/return.unsorted" > "$B/return.root"
-    cmp -s "$B/root" "$B/return.root" || { echo 'Guest runtime: host root grants or manager changed'; exit 1; }
+    cmp -s "$B/root" "$B/return.root" || {
+        echo "Guest runtime: host root grants or manager changed (baseline=$(wc -l < "$B/root" | tr -d ' ') return=$(wc -l < "$B/return.root" | tr -d ' ') entries; clean reboot will reload protected allowlist)"
+        exit 1
+    }
     sha256sum -c "$B/selinux" || { echo 'Guest runtime: shared SELinux policy changed'; exit 1; }
     [ ! -f "$B/allowlist" ] || sha256sum -c "$B/allowlist" || exit 1
     awk '{print $1, $2, $6}' /proc/modules | sort > "$B/return.kernel-modules"
