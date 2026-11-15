@@ -748,18 +748,29 @@ fi
 NODES=/dev/oneos_nodes
 "$BB" rm -rf $NODES; "$BB" mkdir -p $NODES || failsafe "no $NODES"
 node() { # <sysfs block name>: prints a node for it
-    mm=$("$BB" cat /sys/block/$1/dev 2>/dev/null) && [ -n "$mm" ] &&
-        { [ -b $NODES/$1 ] || "$BB" mknod $NODES/$1 b ${mm%%:*} ${mm#*:} 2>/dev/null; } && echo $NODES/$1
+    mm=""
+    [ -r "/sys/block/$1/dev" ] && IFS= read -r mm < "/sys/block/$1/dev" 2>/dev/null
+    [ -n "$mm" ] &&
+        { [ -b "$NODES/$1" ] || "$BB" mknod "$NODES/$1" b "${mm%%:*}" "${mm#*:}" 2>/dev/null; } && echo "$NODES/$1"
 }
 # The stage's own loop devices (system.raw and the APEX payloads,
 # guest_prepare.sh), now that nothing has them mounted. Only loops whose
 # backing file is in the stage and that nothing holds; never One UI's.
-freed=0
+# Detached in parallel so kernel __loop_clr_fd() -> synchronize_rcu() batches
+# all ~21 stage loops into one RCU grace period (<1 s instead of ~12 s serial).
+freed=0; lpids=""
 for b in /sys/block/loop*; do
-    f=$("$BB" cat $b/loop/backing_file 2>/dev/null) || continue
+    [ -r "$b/loop/backing_file" ] || continue
+    f=""
+    IFS= read -r f < "$b/loop/backing_file" 2>/dev/null || continue
     case "$f" in "$S/"*) ;; *) continue ;; esac
-    [ -z "$("$BB" ls $b/holders 2>/dev/null)" ] || continue
-    nd=$(node ${b##*/}) && "$BB" losetup -d $nd 2>/dev/null && freed=$((freed + 1))
+    [ -z "$("$BB" ls "$b/holders" 2>/dev/null)" ] || continue
+    nd=$(node "${b##*/}") || continue
+    "$BB" losetup -d "$nd" 2>/dev/null &
+    lpids="$lpids $!"
+done
+for lp in $lpids; do
+    wait "$lp" && freed=$((freed + 1))
 done
 say "stage loop devices detached: $freed"
 
@@ -1098,8 +1109,12 @@ while :; do
     [ $up = 0 ] && [ $t -ge 180 ] && failsafe "user 0 not unlocked within 180 s"
 done
 
-"$BB" sort -t: -k1,1n -k2 "$BASE/iprule" > "$S/inplace_iprule.base" 2>/dev/null
-ip rule show 2>/dev/null | "$BB" sort -t: -k1,1n -k2 > "$S/inplace_iprule.now" 2>/dev/null
+norm_iprule() {
+    "$BB" sed -E 's/(fwmark 0x[0-9a-f]*)[0-9a-f][0-9a-f](\/0x[0-9a-f]+ .* lookup rmnet_data)/\1NN\2/' |
+        "$BB" sort -t: -k1,1n -k2
+}
+norm_iprule < "$BASE/iprule" > "$S/inplace_iprule.base" 2>/dev/null
+ip rule show 2>/dev/null | norm_iprule > "$S/inplace_iprule.now" 2>/dev/null
 "$BB" diff "$S/inplace_iprule.base" "$S/inplace_iprule.now" >> "$IPLOG" 2>&1 || say "!!! ip rules differ from the switch (diff in return_inplace.log)"
 rm -f "$S/inplace_iprule.base" "$S/inplace_iprule.now" 2>/dev/null
 # One UI is up. RescueParty back to the stored value, the modules read through
