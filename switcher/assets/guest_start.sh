@@ -2181,7 +2181,8 @@ if [ "$DT2W" = 1 ] && command -v getevent >/dev/null 2>&1 && { [ -w /sys/class/s
                 for t in $IDS; do
                     eval s=\$ON_$t
                     [ "$s" = 1 ] && [ ! -f /data/oneos_dt2w_armed.$t ] || continue
-                    [ "$(cat /sys/class/sec/$t/enabled 2>/dev/null)" = 0 ] || { eval HO_$t=; continue; }
+                    et=1; [ -r /sys/class/sec/$t/enabled ] && read -r et < /sys/class/sec/$t/enabled 2>/dev/null
+                    [ "$et" = 0 ] || { eval HO_$t=; continue; }
                     tsp_on /sys/class/sec/$t
                     tsp_read $t
                     eval ho=\$HO_$t
@@ -2208,7 +2209,17 @@ if [ "$DT2W" = 1 ] && command -v getevent >/dev/null 2>&1 && { [ -w /sys/class/s
                     echo $v > "$b" && log "$t: vivo AOD at backlight $l: set to $v ($VAOD% of $m)"
                 done
             fi
-            sleep 0.1
+            # Adaptive cadence: 0.1 s only during sleep/AOD or active panel/lid transitions;
+            # 0.5 s while the panel is steadily awake and no countdown is pending (5x fewer forks).
+            slp=0.5
+            [ $D = 1 ] || [ -n "$CH" ] || [ -n "$LC" ] && slp=0.1
+            if [ "$slp" = 0.5 ]; then
+                for t in $IDS; do
+                    eval s=\$ON_$t p=\$PA_$t
+                    if [ "$s" = 0 ] || [ "${p:-0}" -gt 0 ]; then slp=0.1; break; fi
+                done
+            fi
+            sleep $slp
         done
     ' </dev/null >> /data/dt2w.log 2>&1 &
     echo "[Pivoted Root] Double tap to wake: kept from the end of the boot animation (/data/dt2w.log)"

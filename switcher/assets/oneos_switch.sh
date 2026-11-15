@@ -859,11 +859,22 @@ if [ "${ONEOS_LOGCAT:-1}" = 1 ]; then
         *) tr '\0' ' ' < "/proc/$swp/cmdline" 2>/dev/null | grep -q "sound_watch.log" && kill "$swp" 2>/dev/null ;;
     esac
     [ -f "$STAGE/sound_watch.log" ] && mv -f "$STAGE/sound_watch.log" "$STAGE/sound_watch.prev"
+    # Only enable verbose vibrator/Dolby/ringtone tracing when full diagnostic
+    # logging is explicitly requested; otherwise keep warnings/errors + key call
+    # and A2DP state transitions so every touch haptic and media buffer does not
+    # wake logd and flush sound_watch.log continuously.
+    if [ "${ONEOS_FULL_LOGS:-0}" = 1 ]; then
+        SW_TAGS="AndroidRuntime:E DEBUG:F Telecom:I Telecom_INCOMING_RINGING:V Ringtone:V RingtoneManager:V \
+            VibratorManagerService:V VibratorManagerServiceExtImpl:V VibrationThread:V VibrationScaler:V \
+            SecVibrator-HAL-AIDL-CORE:V AHAL_StreamOut_QTI:D EffectOffloadImpl:V AHAL_EffectFactoryQti:V \
+            AHAL_DlbSpatializerEffectImpl:V DlbDap2Process:V"
+    else
+        SW_TAGS="AndroidRuntime:E DEBUG:F Telecom:I Ringtone:W RingtoneManager:W \
+            VibratorManagerService:W SecVibrator-HAL-AIDL-CORE:E AHAL_StreamOut_QTI:W \
+            EffectOffloadImpl:W AHAL_EffectFactoryQti:W AHAL_DlbSpatializerEffectImpl:W DlbDap2Process:W"
+    fi
     $BB setsid $BB timeout 7200 logcat -b main,system,crash -v threadtime -f "$STAGE/sound_watch.log" -r 2048 -n 1 -s \
-        AndroidRuntime:E DEBUG:F Telecom:I Telecom_INCOMING_RINGING:V Ringtone:V RingtoneManager:V \
-        VibratorManagerService:V VibratorManagerServiceExtImpl:V VibrationThread:V VibrationScaler:V \
-        SecVibrator-HAL-AIDL-CORE:V AHAL_StreamOut_QTI:D EffectOffloadImpl:V AHAL_EffectFactoryQti:V \
-        AHAL_DlbSpatializerEffectImpl:V DlbDap2Process:V \
+        $SW_TAGS \
         AudioFlinger:W APM_AudioPolicyManager:W AHAL:W AHAL_ModulePrimary:W AHAL_StreamPrimary_exynos:W \
         audio_hw_primary:W audio_hw_proxy2:E bluetooth-a2dp:W A2dpStateMachine:I A2dpService:I \
         BTAudioProviderStub_2_1:I BTAudioProviderA2dpSoftware:W </dev/null >/dev/null 2>&1 &
@@ -3828,7 +3839,7 @@ if [ "$RETURN_MAX" -gt 0 ]; then
     $BB sh -c "
         echo \$\$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null
         echo -1000 > /proc/\$\$/oom_score_adj 2>/dev/null
-        t=0; total=0; dead=0; sfgone=0; prev_failed=0; homebase=0; wmbase=0; wmseen=0
+        t=0; total=0; dead=0; sfgone=0; prev_failed=0; homebase=0; wmbase=0; wmseen=0; sf_ts=\$(date +%s)
         while [ \$t -lt $RETURN_MAX ]; do
             # The 10 s wait ends early on a request. Run 34: Volume Up + Volume
             # Down were held 3 s from 16:43:56, but the request was handled only
@@ -3840,19 +3851,25 @@ if [ "$RETURN_MAX" -gt 0 ]; then
             # checked every second here: taken once (deleted) and turned into
             # the same request as the keys, app:app or app:tile. Only a plain
             # file is read, 16 bytes at most; nothing in it but the reason is used.
-            i=0
-            while [ \$i -lt 10 ] && [ -z \"\$(getprop oneos.guest.powerctl)\" ]; do
+            i=0; req=''
+            while [ \$i -lt 10 ]; do
                 if [ -f $GUEST_RETURN_REQ ] && [ ! -L $GUEST_RETURN_REQ ]; then
                     case \"\$(timeout 2 head -c 16 $GUEST_RETURN_REQ 2>/dev/null)\" in tile*) r=tile ;; *) r=app ;; esac
                     rm -f $GUEST_RETURN_REQ
                     echo \"\$(date) Back to One UI asked in the guest's OneOS app (\$r)\"
                     setprop oneos.guest.powerctl \"app:\$r\"
-                    continue
+                    req=\"app:\$r\"
+                    break
                 fi
                 if [ -f $GUEST_RESTART_REQ ] && [ ! -L $GUEST_RESTART_REQ ]; then
                     rm -f $GUEST_RESTART_REQ
                     setprop oneos.guest.powerctl ksud:soft-reboot
+                    req=ksud:soft-reboot
                     break
+                fi
+                if [ \$((i % 2)) -eq 0 ]; then
+                    req=\$(getprop oneos.guest.powerctl)
+                    [ -n \"\$req\" ] && break
                 fi
                 sleep 1; i=\$((i + 1))
             done
@@ -3860,7 +3877,7 @@ if [ "$RETURN_MAX" -gt 0 ]; then
             # A guest reboot/shutdown request (recorded by the guarded ShutdownThread
             # / PowerManagerService), the return keys or the guest's OneOS app end
             # the session from the host side, before the slow checks below.
-            req=\$(getprop oneos.guest.powerctl)
+            [ -n \"\$req\" ] || req=\$(getprop oneos.guest.powerctl)
             # KernelSU's soft reboot inside the guest (its ksud wrapper, 0.4.39):
             # this system alone starts again (guest_softreboot.sh); the timers
             # start over, with grace for the new boot's zygote and surfaceflinger,
@@ -3869,7 +3886,7 @@ if [ "$RETURN_MAX" -gt 0 ]; then
                 setprop oneos.guest.powerctl ''
                 echo \"\$(date) guest requested a soft reboot (\$req) after \${t}s\"
                 if BB=$BB timeout 120 /system/bin/sh $STAGE/tmp/guest_softreboot.sh \"\$req\"; then
-                    t=0; dead=-60; sfgone=-30; prev_failed=0; wmseen=0; hwcarm=0; rm -f $STAGE/data/oneos_hwc_forced
+                    t=0; dead=-60; sfgone=-30; prev_failed=0; wmseen=0; hwcarm=0; sf_ts=\$(date +%s); rm -f $STAGE/data/oneos_hwc_forced
                     homebase=\$(grep -c 'Home activated' /data/local/tmp/ui_activator.log 2>/dev/null)
                     wmbase=\$(grep -c 'Dismissing bootanim' /data/local/tmp/ui_activator.log 2>/dev/null)
                     continue
@@ -4161,10 +4178,18 @@ if [ "$RETURN_MAX" -gt 0 ]; then
                     exec /system/bin/sh $STAGE/return_to_oneui.sh
                 fi
             fi
-            failed=\$(timeout 10 logcat -d -b main -s SurfaceFlinger 2>/dev/null | grep -c 'presentOrValidate failed\|executeCommands failed')
-            # Only failures since the last check: a burst early in the boot must
-            # not end a session that recovered.
-            new_failed=\$((failed - prev_failed)); [ \$new_failed -lt 0 ] && new_failed=\$failed; prev_failed=\$failed
+            # Once the home screen is reached AND HW overlays have either settled
+            # or already been forced to GPU composition, skip scanning logd's entire
+            # main ring buffer every 10 s; while still watching, query only lines
+            # since the previous timestamp (-T \"\$sf_ts.000\") instead of -d full dump.
+            new_failed=0
+            if [ \$home = 0 ] || { [ -f $STAGE/data/oneos_hwc ] && [ ! -e $STAGE/data/oneos_hwc_forced ] && [ \$total -lt 300 ]; }; then
+                now_ts=\$(date +%s)
+                if [ \"\${hwcarm:-0}\" = 1 ] && [ -n \"\$sf_ts\" ]; then
+                    new_failed=\$(timeout 5 logcat -d -b main -T \"\${sf_ts}.000\" -s SurfaceFlinger:E 2>/dev/null | grep -c 'presentOrValidate failed\|executeCommands failed')
+                fi
+                sf_ts=\$now_ts
+            fi
             # HW overlays are on for every guest since 0.4.76 (guest_prepare.sh).
             # guest_start.sh forces GPU composition when the composer rejects
             # frames in the first 30 s; the same here for the rest of the session
