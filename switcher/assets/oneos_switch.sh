@@ -1021,20 +1021,24 @@ if [ "$HOST_ADB" = 1 ] && ! ps -ef 2>/dev/null | grep -v grep | grep -q "adb_wat
 #      no-op in that state, so the gadget has to be re-applied by toggling it.
 LOG=/data/local/tmp/adb_watchdog.log
 last_toggle=0
+ticks=0
 while true; do
-    sleep 10
+    if [ "$ticks" -lt 18 ]; then sleep 10; else sleep 30; fi
+    ticks=$((ticks + 1))
     st=$(getprop init.svc.adbd)
     usb=$(getprop sys.usb.state)
     cfg=$(getprop sys.usb.config)
     if [ "$st" != "running" ]; then
         setprop ctl.start adbd 2>/dev/null
         echo "$(date) restarted adbd (was: $st, usb.state=$usb, usb.config=$cfg)" >> "$LOG"
+        ticks=0
     fi
     case "$cfg" in
         *adb*) ;;
         *)
             setprop sys.usb.config "$cfg,adb" 2>/dev/null
             echo "$(date) added adb to usb.config (was: $cfg)" >> "$LOG"
+            ticks=0
             ;;
     esac
     case "$usb" in
@@ -1045,6 +1049,7 @@ while true; do
             now=$(date +%s 2>/dev/null || echo 0)
             if [ $((now - last_toggle)) -gt 300 ]; then
                 last_toggle=$now
+                ticks=0
                 echo "$(date) gadget lost adb, toggling (state: $usb, config: $cfg)" >> "$LOG"
                 setprop sys.usb.config none 2>/dev/null
                 sleep 1
@@ -1074,9 +1079,15 @@ if ! ps -ef 2>/dev/null | grep -v grep | grep -q "ims_watchdog.sh"; then
     cat > /data/local/tmp/ims_watchdog.sh <<'IMSW'
 #!/system/bin/sh
 LOG=/data/local/tmp/ims_watchdog.log
+ipid=""
 while true; do
     sleep 60
-    if ! pidof imsd >/dev/null 2>&1; then
+    if [ -n "$ipid" ] && [ -d "/proc/$ipid" ]; then
+        continue
+    fi
+    ipid=$(pidof imsd 2>/dev/null)
+    ipid=${ipid%% *}
+    if [ -z "$ipid" ]; then
         setprop ctl.start imsd 2>/dev/null
         echo "$(date) restarted imsd (was missing)" >> "$LOG"
     fi
