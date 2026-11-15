@@ -756,9 +756,12 @@ node() { # <sysfs block name>: prints a node for it
 # The stage's own loop devices (system.raw and the APEX payloads,
 # guest_prepare.sh), now that nothing has them mounted. Only loops whose
 # backing file is in the stage and that nothing holds; never One UI's.
-# Detached in parallel so kernel __loop_clr_fd() -> synchronize_rcu() batches
-# all ~21 stage loops into one RCU grace period (<1 s instead of ~12 s serial).
-freed=0; lpids=""
+# Kernel __loop_clr_fd() -> blk_mq_freeze_queue() -> synchronize_rcu() serializes
+# ~21 stage loop detaches under lock (~11 s total). Pre-create their device nodes
+# now and detach them in a background job overlapped with Gate A and One UI's
+# startup, waiting before return_inplace.done so the stage is completely idle
+# before a subsequent session can launch.
+stage_lnodes=""
 for b in /sys/block/loop*; do
     [ -r "$b/loop/backing_file" ] || continue
     f=""
@@ -766,13 +769,16 @@ for b in /sys/block/loop*; do
     case "$f" in "$S/"*) ;; *) continue ;; esac
     [ -z "$("$BB" ls "$b/holders" 2>/dev/null)" ] || continue
     nd=$(node "${b##*/}") || continue
-    "$BB" losetup -d "$nd" 2>/dev/null &
-    lpids="$lpids $!"
+    stage_lnodes="$stage_lnodes $nd"
 done
-for lp in $lpids; do
-    wait "$lp" && freed=$((freed + 1))
-done
-say "stage loop devices detached: $freed"
+(
+    freed=0
+    for nd in $stage_lnodes; do
+        "$BB" losetup -d "$nd" 2>/dev/null && freed=$((freed + 1))
+    done
+    say "stage loop devices detached: $freed"
+) &
+STAGE_LOOP_DETACH_PID=$!
 
 # Gate A, part 1: One UI's APEX devices, without reading through any module's
 # filesystem and with busybox only (every dynamically linked program maps
@@ -1110,7 +1116,7 @@ while :; do
 done
 
 norm_iprule() {
-    "$BB" sed -E 's/(fwmark 0x[0-9a-f]*)[0-9a-f][0-9a-f](\/0x[0-9a-f]+ .* lookup rmnet_data)/\1NN\2/' |
+    "$BB" sed -E 's/(fwmark 0x[0-9a-f]*)[0-9a-f][0-9a-f](\/0x[0-9a-f]+ .* lookup (rmnet_data|wlan)[0-9]*)/\1NN\2/' |
         "$BB" sort -t: -k1,1n -k2
 }
 norm_iprule < "$BASE/iprule" > "$S/inplace_iprule.base" 2>/dev/null
@@ -1159,6 +1165,7 @@ else
     echo "$STOP_TOKEN" > "$S/watches.stop" 2>/dev/null
     "$BB" sh -c "sleep 600; [ \"\$(cat $S/watches.stop 2>/dev/null)\" = $STOP_TOKEN ] || exit 0; rm -f $S/watches.stop; pkill -f '^logcat .*$S/sound_watch.log' 2>/dev/null; pkill -f 'session \\(charge_watch\\)' 2>/dev/null; swp=\$(cat $S/sound_watch.pid 2>/dev/null); case \"\$swp\" in ''|*[!0-9]*) ;; *) tr '\\0' ' ' < \"/proc/\$swp/cmdline\" 2>/dev/null | grep -q 'sound_watch.log' && { kill -TERM -- -\"\$swp\" 2>/dev/null; kill \"\$swp\" 2>/dev/null; } ;; esac; chp=\$(cat $S/charge_watch.pid 2>/dev/null); case \"\$chp\" in ''|*[!0-9]*) ;; *) tr '\\0' ' ' < \"/proc/\$chp/cmdline\" 2>/dev/null | grep -q 'charge_watch' && { kill -TERM -- -\"\$chp\" 2>/dev/null; kill \"\$chp\" 2>/dev/null; } ;; esac" </dev/null >/dev/null 2>&1 &
 fi
+[ -z "${STAGE_LOOP_DETACH_PID:-}" ] || wait "$STAGE_LOOP_DETACH_PID" 2>/dev/null
 "$BB" rm -rf $NODES
 echo "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) $(date +%s)" > $S/return_inplace.done
 echo oneos_return > /sys/power/wake_unlock 2>/dev/null
