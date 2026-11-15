@@ -87,19 +87,34 @@ fi
 # vold_patched and service.incremental_patched.so (the guest vold as "gvld"),
 # HyperOS's miui-services_patched.jar and apprecovery.proinstaller_patched.jar,
 # and the Pixel camera client libraries.
-for need in services_patched.jar $(awk '$2 == "oplus-services_patched.jar" || $2 == "vold_patched" || $2 == "service.incremental_patched.so" ||
+GUARD_NEEDS="services_patched.jar $(awk '$2 == "oplus-services_patched.jar" || $2 == "vold_patched" || $2 == "service.incremental_patched.so" ||
                                         $2 == "miui-services_patched.jar" || $2 == "apprecovery.proinstaller_patched.jar" ||
                                         $2 == "framework_patched.jar" || $2 == "miui-wifi-service_patched.jar" || $2 == "miui-telephony-common_patched.jar" ||
                                         $2 == "libcamera_client_patched.so" || $2 == "libcameracompatbilityinfo_patched.so" ||
                                         $2 == "libsurfaceflinger_patched.so" || $2 == "telephony-common_patched.jar" ||
                                         $2 == "vivo-services_patched.jar" || $2 == "vivo-telephony-common-platform-ex_patched.jar" ||
-                                        $2 == "oplus-framework_patched.jar" { print $2 }' "$STAGE/guards.txt"); do
-    sum=$(awk -v n="$need" '$2 == n {print $1}' "$STAGE/guards.txt")
-    if [ -z "$sum" ] || [ "$(sha256sum "$STAGE/$need" 2>/dev/null | cut -d' ' -f1)" != "$sum" ]; then
+                                        $2 == "oplus-framework_patched.jar" { print $2 }' "$STAGE/guards.txt")"
+rm -rf "$STAGE/.guard_chk" && mkdir -p "$STAGE/.guard_chk"
+guard_pids=""
+for need in $GUARD_NEEDS; do
+    (
+        sum=$(awk -v n="$need" '$2 == n {print $1}' "$STAGE/guards.txt")
+        if [ -z "$sum" ] || [ "$(sha256sum "$STAGE/$need" 2>/dev/null | cut -d' ' -f1)" != "$sum" ]; then
+            echo "$need" > "$STAGE/.guard_chk/fail.$need"
+        fi
+    ) &
+    guard_pids="$guard_pids $!"
+done
+for gp in $guard_pids; do wait "$gp" 2>/dev/null || true; done
+for gf in "$STAGE/.guard_chk"/fail.*; do
+    if [ -f "$gf" ]; then
+        need=$(cat "$gf" 2>/dev/null)
+        rm -rf "$STAGE/.guard_chk"
         echo "ERROR: $STAGE/$need missing or not the guarded build in guards.txt; not starting the guest"
         exit 3
     fi
 done
+rm -rf "$STAGE/.guard_chk"
 echo "Guarded overlays verified: $(grep -v '^#' "$STAGE/guards.txt" | awk '{print $2}' | tr '\n' ' ')"
 # Google Play services in a Pixel guest (docs/pixel-guest.md, "Google services"):
 # GmsCore from the image's own gmssystem APEX payload (make-overlays.sh stages
@@ -258,15 +273,37 @@ echo "=== 2. $(date +%T) Creating Loop Device Nodes ==="
 # tree once, let awk list the exceptions, mknod those. Recreating all 202 nodes
 # cost 7 s on the S25 Ultra; running the missing-node mknod commands in one
 # subshell avoids ~400 sequential rm/mknod forks (~3 s on a cold boot).
-LOOP_NEED=$(stat -c '%n %t %T' /dev/block/loop* /dev/loop* 2>/dev/null | awk '
-    $1 ~ /^\/dev\/block\/loop[0-9]+$/ { b[$1] = $2 " " $3 }
-    $1 ~ /^\/dev\/loop[0-9]+$/       { d[$1] = $2 " " $3 }
-    END {
-        for (i = 50; i <= 150; i++) {
-            m = sprintf("%x", i * 8)
-            if (b["/dev/block/loop" i] != "7 " m || d["/dev/loop" i] != "7 " m) print i
-        }
-    }')
+# Android toybox `stat -c '%T'` masks minor numbers with `& 0xff`, printing `90`
+# instead of `190` for loop50 (minor 400 = 0x190) and falsely recreating all 202
+# loop50..150 nodes (~3 s) on every warm switch. Read full 64-bit st_rdev (`%Lr`
+# = MKDEV(7, m) = 7*256 + (m%256) + int(m/256)*1048576), falling back to `%t %T`
+# accepting both full and low-byte hex if `%Lr` is unsupported.
+if stat -c '%Lr' /dev/null >/dev/null 2>&1; then
+    LOOP_NEED=$(stat -c '%n %F %Lr' /dev/block/loop* /dev/loop* 2>/dev/null | awk '
+        $2 == "block" && $3 == "special" && $4 == "file" { n = $1; r = $5 + 0 }
+        $2 == "block" && $3 == "device"                  { n = $1; r = $4 + 0 }
+        n ~ /^\/dev\/block\/loop[0-9]+$/ { b[n] = r; n = "" }
+        n ~ /^\/dev\/loop[0-9]+$/        { d[n] = r; n = "" }
+        END {
+            for (i = 50; i <= 150; i++) {
+                m = i * 8
+                want = 7 * 256 + (m % 256) + int(m / 256) * 1048576
+                if (b["/dev/block/loop" i] != want || d["/dev/loop" i] != want) print i
+            }
+        }')
+else
+    LOOP_NEED=$(stat -c '%n %t %T' /dev/block/loop* /dev/loop* 2>/dev/null | awk '
+        $1 ~ /^\/dev\/block\/loop[0-9]+$/ { b[$1] = $2 " " $3 }
+        $1 ~ /^\/dev\/loop[0-9]+$/       { d[$1] = $2 " " $3 }
+        END {
+            for (i = 50; i <= 150; i++) {
+                m = sprintf("%x", i * 8)
+                ml = sprintf("%x", (i * 8) % 256)
+                bn = b["/dev/block/loop" i]; dn = d["/dev/loop" i]
+                if ((bn != "7 " m && bn != "7 " ml) || (dn != "7 " m && dn != "7 " ml)) print i
+            }
+        }')
+fi
 if [ -n "$LOOP_NEED" ]; then
     set -- $LOOP_NEED
     while [ $# -gt 0 ]; do
@@ -285,8 +322,16 @@ fi
 
 echo "=== 3. $(date +%T) Mounting system.raw if needed ==="
 # Read-only flag of a loop device, by its device number (the node names made
-# above need not match the kernel's loopN).
+# above need not match the kernel's loopN). Decode full st_rdev (`%Lr`) first so
+# loop minors >= 256 (loop32+) resolve the right /sys/dev/block/7:N/ro on toybox.
 loop_ro() {
+    if rdev=$(stat -L -c '%Lr' "$1" 2>/dev/null); then
+        case "$rdev" in ''|*[!0-9]*) ;; *)
+            maj=$(( (rdev / 256) % 4096 ))
+            min=$(( (rdev % 256) + (rdev / 1048576) * 256 ))
+            [ "$(cat "/sys/dev/block/$maj:$min/ro" 2>/dev/null)" = 1 ] && return 0 ;;
+        esac
+    fi
     d=$(stat -L -c '%t %T' "$1" 2>/dev/null) || return 1
     set -- $d
     [ "$(cat "/sys/dev/block/$(printf '%d:%d' "0x$1" "0x$2")/ro" 2>/dev/null)" = 1 ]
@@ -3372,11 +3417,16 @@ SEAPP_FILES="$GUEST_SYSTEM_EXT/etc/selinux/system_ext_seapp_contexts $GUEST_PROD
 for f in $SEAPP_FILES; do $BB umount -l "$f" 2>/dev/null; done
 if [ "${ONEOS_GUEST_SEAPP:-1}" = 1 ]; then
     HOST_TYPES="$STAGE/host_sepolicy_types.txt"
-    for c in /system/etc/selinux/*.cil /system_ext/etc/selinux/*.cil /product/etc/selinux/*.cil \
-        /vendor/etc/selinux/*.cil /odm/etc/selinux/*.cil; do
-        case "$c" in *debug*) continue ;; esac
-        [ -f "$c" ] && cat "$c"
-    done | awk '$1 == "(type" || $1 == "(typealias" { t = $2; sub(/\).*$/, "", t); print t }' | sort -u > "$HOST_TYPES"
+    HOST_TYPES_BID="$STAGE/host_sepolicy_types.boot_id"
+    CUR_BID=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+    if [ -z "$CUR_BID" ] || [ ! -s "$HOST_TYPES" ] || [ "$(cat "$HOST_TYPES_BID" 2>/dev/null)" != "$CUR_BID" ]; then
+        for c in /system/etc/selinux/*.cil /system_ext/etc/selinux/*.cil /product/etc/selinux/*.cil \
+            /vendor/etc/selinux/*.cil /odm/etc/selinux/*.cil; do
+            case "$c" in *debug*) continue ;; esac
+            [ -f "$c" ] && cat "$c"
+        done | awk '$1 == "(type" || $1 == "(typealias" { t = $2; sub(/\).*$/, "", t); print t }' | sort -u > "$HOST_TYPES"
+        [ -n "$CUR_BID" ] && [ -s "$HOST_TYPES" ] && printf '%s\n' "$CUR_BID" > "$HOST_TYPES_BID"
+    fi
     SEAPP_OK=1
     for t in untrusted_app priv_app platform_app system_app app_data_file privapp_data_file system_app_data_file; do
         grep -qx "$t" "$HOST_TYPES" || SEAPP_OK=0
@@ -3873,7 +3923,9 @@ if [ "${ONEOS_GUEST_RINGTONES:-1}" = 1 ]; then
     RSRC="$HR/output${LRA:-166}HZ"
     [ -d "$RSRC/ringtones" ] || RSRC=$(ls -d "$HR"/output*HZ 2>/dev/null | head -n 1)
     if [ -n "$RSRC" ] && [ -d "$RSRC/ringtones" ]; then
+        RTONE_FRESH=0
         if [ "$(cat "$STAGE/guest_ringtones.src" 2>/dev/null)" != "$RSRC" ] || [ ! -d "$MM/ringtones" ]; then
+            RTONE_FRESH=1
             rm -f "$STAGE/guest_ringtones.src"
             mkdir -p "$MM"
             ok=1
@@ -3883,17 +3935,17 @@ if [ "${ONEOS_GUEST_RINGTONES:-1}" = 1 ]; then
             done
             [ "$ok" = 1 ] && echo "$RSRC" > "$STAGE/guest_ringtones.src"
         fi
-        for d in "$STAGE/data/oplus" "$MM" "$MM/ringtones" "$MM/notifications" "$MM/ui"; do
-            mkdir -p "$d"
-            $BB chown 1000:1000 "$d" 2>/dev/null || true
-            $BB chmod 0775 "$d" 2>/dev/null || true
-        done
-        for k in ringtones notifications ui; do
-            $BB chown -h -R 1000:1000 "$MM/$k" 2>/dev/null || true
-            for f in "$MM/$k"/*; do [ -f "$f" ] && $BB chmod 0644 "$f"; done
-        done
-        $BB chcon u:object_r:system_data_file:s0 "$STAGE/data/oplus" 2>/dev/null || true
-        $BB chcon -h -R u:object_r:system_data_file:s0 "$MM" 2>/dev/null || true
+        mkdir -p "$STAGE/data/oplus" "$MM" "$MM/ringtones" "$MM/notifications" "$MM/ui"
+        $BB chown 1000:1000 "$STAGE/data/oplus" "$MM" "$MM/ringtones" "$MM/notifications" "$MM/ui" 2>/dev/null || true
+        $BB chmod 0775 "$STAGE/data/oplus" "$MM" "$MM/ringtones" "$MM/notifications" "$MM/ui" 2>/dev/null || true
+        if [ "$RTONE_FRESH" = 1 ]; then
+            $BB chown -h -R 1000:1000 "$MM/ringtones" "$MM/notifications" "$MM/ui" 2>/dev/null || true
+            find "$MM/ringtones" "$MM/notifications" "$MM/ui" -type f -exec chmod 0644 {} + 2>/dev/null || true
+            $BB chcon u:object_r:system_data_file:s0 "$STAGE/data/oplus" 2>/dev/null || true
+            $BB chcon -h -R u:object_r:system_data_file:s0 "$MM" 2>/dev/null || true
+        else
+            $BB chcon u:object_r:system_data_file:s0 "$STAGE/data/oplus" "$MM" 2>/dev/null || true
+        fi
         echo "Guest ringtones: $(ls "$MM/ringtones" | wc -l) ringtones, $(ls "$MM/notifications" | wc -l) notifications from ${RSRC#$ROOTFS}"
     else
         echo "WARNING: no ColorOS haptic ringtone set in my_product; guest ringtones not staged"
@@ -4013,6 +4065,7 @@ fi
 # Osense-BufferQueue emits am_wtf events on /data/persist_log/osense/*.
 if [ "${ONEOS_GUEST_THEME_DIRS:-1}" = 1 ] && [ -e "$ROOTFS/system/framework/oplus-services.jar" ]; then
     pl_made=0
+    pl_dirs=""
     for pl in /data/persist_log /data/persist_log/stamp /data/persist_log/DCS \
               /data/persist_log/DCS/de /data/persist_log/DCS/de/modemdump \
               /data/persist_log/sf /data/persist_log/osense \
@@ -4020,17 +4073,26 @@ if [ "${ONEOS_GUEST_THEME_DIRS:-1}" = 1 ] && [ -e "$ROOTFS/system/framework/oplu
               /data/persist_log/osense/cpnres /data/persist_log/osense/appquota \
               /data/persist_log/osense/criticalLowMem; do
         pq="$STAGE/data"; pl_ok=1
-        for part in $(echo "${pl#/data/}" | tr '/' ' '); do
+        _pl_ifs=$IFS; IFS=/
+        for part in ${pl#/data/}; do
             pq="$pq/$part"; [ -L "$pq" ] && { pl_ok=0; break; }
         done
+        IFS=$_pl_ifs
         [ $pl_ok = 1 ] || continue
         pd="$STAGE$pl"
-        if [ ! -d "$pd" ]; then
-            mkdir -p "$pd" && pl_made=$((pl_made + 1))
-        fi
-        $BB chown 1000:1000 "$pd" 2>/dev/null; $BB chmod 0775 "$pd" 2>/dev/null
-        $BB chcon u:object_r:system_data_file:s0 "$pd" 2>/dev/null || true
+        [ -d "$pd" ] || pl_made=$((pl_made + 1))
+        pl_dirs="$pl_dirs $pd"
     done
+    if [ -n "$pl_dirs" ]; then
+        # shellcheck disable=SC2086
+        mkdir -p $pl_dirs 2>/dev/null || true
+        # shellcheck disable=SC2086
+        $BB chown 1000:1000 $pl_dirs 2>/dev/null || true
+        # shellcheck disable=SC2086
+        $BB chmod 0775 $pl_dirs 2>/dev/null || true
+        # shellcheck disable=SC2086
+        $BB chcon u:object_r:system_data_file:s0 $pl_dirs 2>/dev/null || true
+    fi
     echo "ColorOS /data/persist_log folders: $pl_made made"
 fi
 
@@ -4159,11 +4221,14 @@ mkdir -p "$STAGE/data/misc_ce/0/apexdata/com.android.wifi" "$STAGE/data/misc_de/
 # step had made /data/misc/apexdata root's 755. Every module name, One UI's (the
 # guest takes some of One UI's modules) and the image's own, in all three places,
 # before the chmod/chown pass below.
+apex_dirs=""
 for n in $(ls /apex 2>/dev/null | grep -v '@'; ls "$ROOTFS/system/apex" 2>/dev/null |
            sed -e 's/\.c\{0,1\}apex$//' -e 's/_tplus_compressed$//' -e 's/_compressed$//' -e 's/^com\.google\.android\./com.android./'); do
     case "$n" in *[!A-Za-z0-9._]*|.*|"") continue ;; esac
-    mkdir -p "$STAGE/data/misc/apexdata/$n" "$STAGE/data/misc_ce/0/apexdata/$n" "$STAGE/data/misc_de/0/apexdata/$n"
+    apex_dirs="$apex_dirs $STAGE/data/misc/apexdata/$n $STAGE/data/misc_ce/0/apexdata/$n $STAGE/data/misc_de/0/apexdata/$n"
 done
+# shellcheck disable=SC2086
+[ -n "$apex_dirs" ] && mkdir -p $apex_dirs
 # vivo's feature list for system_server (patches/vivo_guards.py framework reads
 # /data/system/oneos_vivo_features; make-overlays.sh builds it from the vendor's
 # vivo_config.ini without the hardware features): without vivo's config store HAL
@@ -4247,23 +4312,15 @@ done
 # OneOS: without OneLineage's LineageOS packages (Launcher3, LatinIME,
 # LineageSettings; ColorOS has none of them) and with the OneOS app in place
 # of the OneLineage switcher.
-for pkg in com.android.providers.settings \
-           com.android.providers.telephony \
-           com.android.phone \
-           com.android.systemui \
-           com.android.settings \
-           com.android.providers.media \
-           com.android.providers.downloads \
-           com.android.providers.contacts \
-           com.android.providers.calendar \
-           com.fahadali.oneos; do
-    mkdir -p "$STAGE/data/user_de/0/$pkg/databases" \
-             "$STAGE/data/user_de/0/$pkg/shared_prefs" \
-             "$STAGE/data/user_de/0/$pkg/files/datastore/education" \
-             "$STAGE/data/user/0/$pkg/databases" \
-             "$STAGE/data/user/0/$pkg/shared_prefs" \
-             "$STAGE/data/user/0/$pkg/files"
+PRE_PKGS="com.android.providers.settings com.android.providers.telephony com.android.phone com.android.systemui com.android.settings com.android.providers.media com.android.providers.downloads com.android.providers.contacts com.android.providers.calendar com.fahadali.oneos"
+pre_mkdirs=""
+pre_roots=""
+for pkg in $PRE_PKGS; do
+    pre_mkdirs="$pre_mkdirs $STAGE/data/user_de/0/$pkg/databases $STAGE/data/user_de/0/$pkg/shared_prefs $STAGE/data/user_de/0/$pkg/files/datastore/education $STAGE/data/user/0/$pkg/databases $STAGE/data/user/0/$pkg/shared_prefs $STAGE/data/user/0/$pkg/files"
+    pre_roots="$pre_roots $STAGE/data/user_de/0/$pkg $STAGE/data/user/0/$pkg"
 done
+# shellcheck disable=SC2086
+mkdir -p $pre_mkdirs
 
 mkdir -p "$STAGE/data/resource-cache"
 chmod 771 "$STAGE/data/resource-cache"
@@ -4291,19 +4348,17 @@ echo "=== 5.9 $(date +%T) perms ==="
 # The package dirs pre-created above are root-owned until something sets an
 # owner: give them system's, as before; the realign below corrects the ones the
 # guest gave another uid.
-for pkg in com.android.providers.settings com.android.providers.telephony com.android.phone \
-           com.android.systemui com.android.settings \
-           com.android.providers.media com.android.providers.downloads com.android.providers.contacts \
-           com.android.providers.calendar com.fahadali.oneos; do
-    chown -h -R 1000:1000 "$STAGE/data/user_de/0/$pkg" "$STAGE/data/user/0/$pkg" 2>/dev/null
-    chmod -R 777 "$STAGE/data/user_de/0/$pkg" "$STAGE/data/user/0/$pkg" 2>/dev/null
-    # Code an app saved there (vivo SystemUI's plugin APKs) read-only again: since Android 14
-    # ART refuses to load a writable dex file, and the sweep above made the one vivo's
-    # SystemUI kept from the session before writable (eighth OriginOS run: SystemUI died
-    # 17 times, "Writable dex file ... MagazinePlugin.apk is not allowed").
-    find "$STAGE/data/user_de/0/$pkg" "$STAGE/data/user/0/$pkg" -type f \( -name '*.apk' -o -name '*.dex' -o -name '*.jar' \) \
-        -exec chmod a-w {} + 2>/dev/null
-done
+# shellcheck disable=SC2086
+chown -h -R 1000:1000 $pre_roots 2>/dev/null || true
+# shellcheck disable=SC2086
+chmod -R 777 $pre_roots 2>/dev/null || true
+# Code an app saved there (vivo SystemUI's plugin APKs) read-only again: since Android 14
+# ART refuses to load a writable dex file, and the sweep above made the one vivo's
+# SystemUI kept from the session before writable (eighth OriginOS run: SystemUI died
+# 17 times, "Writable dex file ... MagazinePlugin.apk is not allowed").
+# shellcheck disable=SC2086
+find $pre_roots -type f \( -name '*.apk' -o -name '*.dex' -o -name '*.jar' \) \
+    -exec chmod a-w {} + 2>/dev/null || true
 # OneOS: not the app data trees. Resetting every app dir to 1000:1000 on each
 # switch made the host installd refuse to prepare 353 packages ("Expected path
 # ... with owner NNNNN but found 1000:1000"). Only the top levels, then every
@@ -6740,12 +6795,18 @@ fi
 # none of its additions reached a session (pull request #1, Z Fold8).
 SPLIT_DIRS="$ROOTFS/system/etc/permissions $GUEST_PRODUCT/etc/permissions $GUEST_SYSTEM_EXT/etc/permissions $ROOTFS/my_product/etc/permissions"
 for d in $SPLIT_DIRS; do
-    for f in "$d"/*.xml; do
+    [ -d "$d" ] || continue
+    # Remove only this filter's bind, not ColorOS feature or other XML
+    # overrides mounted earlier in prepare. On /data's filesystem the
+    # mount root omits the /data prefix; retain support for both forms.
+    # Scan mountinfo once per directory instead of ~150 per-XML awk forks.
+    awk -v dir="$d/" '$5 ~ /\.xml$/ && index($5, dir) == 1 && index(substr($5, length(dir) + 1), "/") == 0 {
+        src[$5] = $4
+    }
+    END {
+        for (t in src) print src[t] "|" t
+    }' /proc/self/mountinfo 2>/dev/null | while IFS='|' read -r split_source f; do
         [ -f "$f" ] || continue
-        # Remove only this filter's bind, not ColorOS feature or other XML
-        # overrides mounted earlier in prepare. On /data's filesystem the
-        # mount root omits the /data prefix; retain support for both forms.
-        split_source=$(awk -v target="$f" '$5 == target { source = $4 } END { print source }' /proc/self/mountinfo)
         case "$split_source" in
             "$STAGE"/oneos_split_*.xml|"${STAGE#/data}"/oneos_split_*.xml)
                 split_id=${split_source##*/oneos_split_}; split_id=${split_id%.xml}

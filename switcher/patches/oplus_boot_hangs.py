@@ -25,6 +25,12 @@
    itself 10 s later (run 33, 14:59:19.710 -> 14:59:29.749). Drop the set; the
    window dumps after it stay.
 
+5. CriticalConfigUpdater.onConfigUpdate (called synchronously on system_server's
+   main thread by OplusAdditionalService during boot) invokes native
+   CriticalLogServiceManager, which blocks 5.0 s waiting for OPPO's
+   "critical.log" binder service that does not exist on Samsung vendor. Make it
+   return at entry when present.
+
 Usage: oplus_boot_hangs.py <smali root dir>
 Prints the smali_* directories (dex files) it changed, one per line.
 """
@@ -155,8 +161,47 @@ def fix_tp_info(root):
     return dirs
 
 
+def fix_critical_config_updater(root):
+    """Short-circuit CriticalConfigUpdater.onConfigUpdate(...)V when present so
+    OplusAdditionalService does not stall system_server 5 s on critical.log."""
+    dirs = set()
+    for dirpath, _, files in os.walk(root):
+        if "CriticalConfigUpdater.smali" not in files:
+            continue
+        path = os.path.join(dirpath, "CriticalConfigUpdater.smali")
+        lines = open(path).read().split("\n")
+        changed = False
+        i = 0
+        while i < len(lines):
+            if lines[i].startswith(".method ") and " onConfigUpdate(" in lines[i] and lines[i].endswith(")V"):
+                end = lines.index(".end method", i)
+                body = "\n".join(lines[i:end])
+                if "OneOS: no OPPO critical.log daemon" not in body:
+                    lines[i + 1:end] = [
+                        "    .locals 0",
+                        "",
+                        "    # OneOS: no OPPO critical.log daemon; native lookup blocked system_server 5 s.",
+                        "    return-void",
+                    ]
+                    changed = True
+                    end = i + 5
+                i = end + 1
+            else:
+                i += 1
+        if changed:
+            open(path, "w").write("\n".join(lines))
+            dirs.add(top_dir(root, path))
+            print("CriticalConfigUpdater.onConfigUpdate: critical.log wait skipped", file=sys.stderr)
+    return dirs
+
+
 def main(root):
-    for d in sorted({fix_game_gpu(root), fix_alt_zygote(root)} | fix_dump_environment(root) | fix_tp_info(root)):
+    for d in sorted(
+        {fix_game_gpu(root), fix_alt_zygote(root)}
+        | fix_dump_environment(root)
+        | fix_tp_info(root)
+        | fix_critical_config_updater(root)
+    ):
         print(d)
 
 

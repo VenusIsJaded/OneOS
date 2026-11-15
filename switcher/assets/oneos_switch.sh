@@ -1202,10 +1202,17 @@ rm -f "$STAGE/guest_mntns" "$STAGE/guest_rootdev"
 # composer).
 rm -rf "$STAGE/return_keys"
 
-# OneOS: ColorOS components (the launcher among them) only log their info and
-# debug lines with this set. guest_props.sh restore-persist removes it again on
-# return (it is added after the persist snapshot).
-setprop persist.sys.assert.panic true 2>/dev/null
+# OneOS: ColorOS components (the launcher, SurfaceControl, SystemUI,
+# ConnectivityManager, DigitalClock) check persist.sys.assert.panic to set
+# DEBUG_PANIC. Setting it to true flooded ~1,500 lines/s (118 MB in 7 minutes)
+# with per-frame new Throwable() stack formatting; setting it here also put it
+# into guest_props.sh's $HOST snapshot so guest_props.sh skipped its own false
+# default. Keep false unless ONEOS_GUEST_LOG_INFO=1 explicitly asks for it.
+if [ "${ONEOS_GUEST_LOG_INFO:-0}" = 1 ]; then
+    setprop persist.sys.assert.panic true 2>/dev/null
+else
+    setprop persist.sys.assert.panic false 2>/dev/null
+fi
 # An app that crashes three times is moved to OPPO's zygote_ocomp, which nothing
 # starts in the container: system_server then polled its socket for 62 s and no
 # app could start (run 28, black home). oplus_boot_hangs.py blocks it as well.
@@ -1256,12 +1263,14 @@ fi
 for t in CaptureStateTracker libbinder.Parcel Parcel ResourcesManager MediaCodecList AString BOOTPROF GED \
          PerformanceManager ProjectManager SchedAssist GestureLog_OplusPenGestureManager HoraeHelper OsenseResManagerService postman \
          UserAwareMgr OplusUIFirst_TS SDM \
-         SettingsState SG QuickStartRUSHelper OplusGcSupressionHelper "[UAH_CLIENT]" \
+         SettingsState SG QuickStartRUSHelper OplusGcSupressionHelper UAH_CLIENT \
          OplusDynamicFrameRateRUS DynamicFramerate FlexibleWindowManagerService \
          Blur_WindowBlurSessionImpl Blur_ScreenCapture Blur_BlurServiceImpl \
          OplusBenchHelper OplusViewDebugManager MSP-LOG-SDK- MSP-LOG-APP-MSP-LOG-APP-ProcessBridge MSPAPK_DlCore-FileCall \
          qcc_file_aidl QCC minksocket PluginSeedling--Origin PluginSeedling--Capsule PluginSeedling--Template \
-         OplusStartingWindowManager OplusAppStartupManager ULELite "COSA->DefaultPackageInfo" Athena; do
+         PluginSeedling--CapsuleCard PluginSeedling--Base DigitalClock OplusSecurePayManager COUIVerticalSeekBar \
+         GSLog.AppNameCutter metis_v2_AppConfigUtil OplusRequestedLayerState \
+         OplusStartingWindowManager OplusAppStartupManager ULELite Athena; do
     setprop "log.tag.$t" SILENT 2>/dev/null
 done
 if [ "${ONEOS_SOUND_VERBOSE:-0}" != 1 ]; then
@@ -1322,9 +1331,12 @@ cpu_caps() {
     echo "${caps# }"
 }
 skin_temp() {
-    ts=$(timeout 5 dumpsys thermalservice 2>/dev/null | sed -n '/^Current temperatures from HAL/,/^[^[:space:]]/p' |
-        sed -n 's/.*mValue=\([-0-9.]*\), mType=[0-9]*, mName=SKIN,.*/\1/p' | head -n 1)
-    tc=$(timeout 5 logcat -d -t 4000 -s thermal_core 2>/dev/null | sed -n 's/.* skin : \([0-9][0-9]*\).*/\1/p' | tail -n 1)
+    ts=""
+    if [ "${1:-}" != stopped ]; then
+        ts=$(timeout 5 dumpsys thermalservice 2>/dev/null | sed -n '/^Current temperatures from HAL/,/^[^[:space:]]/p' |
+            sed -n 's/.*mValue=\([-0-9.]*\), mType=[0-9]*, mName=SKIN,.*/\1/p' | head -n 1)
+    fi
+    tc=$(timeout 3 logcat -d -t 400 -s thermal_core:I 2>/dev/null | sed -n 's/.* skin : \([0-9][0-9]*\).*/\1/p' | tail -n 1)
     if [ -n "$ts" ]; then ts="$ts C"; else ts="none"; fi
     if [ -n "$tc" ]; then tc="$((tc / 10)).$((tc % 10)) C"; else tc="none logged"; fi
     echo "thermal service $ts, thermal_core $tc"
@@ -1340,7 +1352,8 @@ STAGE="$STAGE" BB="$BB" /system/bin/sh "$STAGE/fold8_coloros.sh" performance-sna
 HOST_LOW_POWER=$(timeout 3 settings get global low_power 2>/dev/null)
 echo "Before the stop: power saving ${HOST_LOW_POWER:-unknown}, cpufreq_max_limit $(cat /sys/devices/system/cpu/cpufreq_limit/cpufreq_max_limit 2>/dev/null || echo none)"
 echo "=== [4b/6] $(date +%T) Stopping the One UI framework ==="
-echo "Before the stop: CPU max/hw kHz: $(cpu_caps); skin: $(skin_temp)"
+PRE_STOP_SKIN=$(skin_temp)
+echo "Before the stop: CPU max/hw kHz: $(cpu_caps); skin: $PRE_STOP_SKIN"
 pkill -f "while true; do [ \"\$(getprop init.svc.zygote)\"" 2>/dev/null || true
 pkill -f "while true; do for p in \\\$(pidof audioserver cameraserver)" 2>/dev/null || true
 # Gap splash (see the top): once SplashActivity is on screen, freeze One UI's
@@ -1551,7 +1564,44 @@ if { [ "$SOFTDOG_V" = 0 ] || [ "$SOFTDOG_DEV" = 1 ]; } && grep -q '^on property:
         echo "Softdog: persist.vendor.softdog off for the session (was ${sd:-unset}): Samsung's init disables its software watchdog"
     fi
 fi
-echo "After the stop: CPU max/hw kHz: $(cpu_caps); skin: $(skin_temp)"
+# Lift stale One UI SSRM CPU caps right after One UI's system_server is stopped
+# (and after performance-snapshot saved cpu.before), instead of waiting ~100 s
+# for [6/6] oneos_heat_cap: on SM-S931U1 (e913391e4a228108) SSRM left
+# cpufreq_max_limit=1958400 kHz (43% of 4.47 GHz) at 39.7 C skin, throttling all
+# of guest_prepare.sh (+15 s), guest_props.sh, guest_start.sh, ZygoteInit and
+# SystemServer's 538-package scan. Only when Cool down when hot is on, power
+# saving was off, and pre-stop SKIN < 43 C.
+rm -f "$STAGE/cpufreq_max_limit.released"
+if [ "${ONEOS_HEAT_CAP:-1}" = 1 ] && [ "$HOST_LOW_POWER" = 0 ]; then
+    pre_sk=$(printf '%s\n' "$PRE_STOP_SKIN" | awk '{
+        for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+(\.[0-9]+)?$/ && ($(i + 1) == "C" || $(i + 1) == "C,")) { print $i; exit }
+    }')
+    if [ -z "$pre_sk" ] || awk -v s="$pre_sk" 'BEGIN { exit !(s + 0 < 43) }'; then
+        CFL_EARLY=/sys/devices/system/cpu/cpufreq_limit/cpufreq_max_limit
+        early_lifted=""
+        if [ -w "$CFL_EARLY" ]; then
+            cfl_v=$(cat "$CFL_EARLY" 2>/dev/null)
+            if [ -n "$cfl_v" ] && [ "$cfl_v" != -1 ]; then
+                echo -1 > "$CFL_EARLY" 2>/dev/null && echo "$cfl_v" > "$STAGE/cpufreq_max_limit.released"
+                early_lifted=" cpufreq_max_limit=$cfl_v->$(cat "$CFL_EARLY" 2>/dev/null)"
+            fi
+        fi
+        for p in /sys/devices/system/cpu/cpufreq/policy*; do
+            hw=$(cat "$p/cpuinfo_max_freq" 2>/dev/null)
+            cur=$(cat "$p/scaling_max_freq" 2>/dev/null)
+            case "$hw:$cur" in ''|:*|*:|*[!0-9:]*) continue ;; esac
+            if [ "$cur" -lt "$hw" ]; then
+                echo "$hw" > "$p/scaling_max_freq" 2>/dev/null
+                early_lifted="$early_lifted ${p##*/}=$cur->$(cat "$p/scaling_max_freq" 2>/dev/null)/$hw"
+            fi
+        done
+        if [ -n "$early_lifted" ]; then
+            : > "$STAGE/heat_cap.active"
+            echo "Early CPU uncap for switch and boot (skin ${pre_sk:-<43} C, power saving off):$early_lifted"
+        fi
+    fi
+fi
+echo "After the stop: CPU max/hw kHz: $(cpu_caps); skin: $(skin_temp stopped)"
 
 # --- MOUNT PREPARATION ---
 # OneOS safeguards: One UI's /apex mounts must look the same after the
@@ -1585,7 +1635,7 @@ ls -l /vendor/etc/displayconfig /vendor/odm/etc/displayconfig /vendor/odm/etc/de
   for b in /vendor/bin/hw/*sysinput*; do
       echo "== $b"; strings -a "$b" 2>/dev/null | grep -E '^/sys/|enabled|fold_state' | head -40
   done
-} > "$STAGE/diag_host/touch_nodes.txt" 2>&1
+} > "$STAGE/diag_host/touch_nodes.txt" 2>&1 &
 echo "=== [5/6] $(date +%T) Executing Mount Hierarchy Preparation ==="
 /system/bin/sh "$STAGE/guest_prepare.sh"
 PREP_RET=$?
@@ -1872,8 +1922,13 @@ if [ "${ONEOS_GUEST_AUDIO:-1}" = "1" ]; then
     # the session (put back on the return with the other overrides).
     AVX=ro.audio.ihaladaptervendorextension_enabled
     if [ "$(getprop $AVX)" = true ] && [ -n "$RP" ]; then
-        n=0
-        while [ $n -lt 10 ] && ! timeout 5 service check android.media.audio.IHalAdapterVendorExtension/default 2>/dev/null | grep -q ": found"; do n=$((n + 1)); sleep 0.5; done
+        # Only One UI's audioserver registers android.media.audio.IHalAdapterVendorExtension
+        # unless a vendor VINTF manifest declares a standalone vendor service for it.
+        # Skip the 5 s poll when no vendor manifest names IHalAdapterVendorExtension.
+        if grep -rqs 'IHalAdapterVendorExtension' /vendor/etc/vintf/ /odm/etc/vintf/ 2>/dev/null; then
+            n=0
+            while [ $n -lt 25 ] && ! timeout 5 service check android.media.audio.IHalAdapterVendorExtension/default 2>/dev/null | grep -q ": found"; do n=$((n + 1)); sleep 0.2; done
+        fi
         if ! timeout 5 service check android.media.audio.IHalAdapterVendorExtension/default 2>/dev/null | grep -q ": found"; then
             grep -q "^$AVX=" "$STAGE/guest_props.overridden" 2>/dev/null || echo "$AVX=true" >> "$STAGE/guest_props.overridden"
             "$RP" -n "$AVX" false 2>/dev/null &&
@@ -1981,7 +2036,8 @@ fi
 # vendor HAL.
 setprop ctl.stop wificond 2>/dev/null || true
 kill -9 $(pidof wificond) 2>/dev/null || true
-sleep 1
+n=0
+while [ $n -lt 10 ] && { pidof wificond >/dev/null || [ "$(getprop init.svc.wificond)" = running ]; }; do n=$((n + 1)); sleep 0.1; done
 # Pixel 17 has no wificond (only AOSP's /system/bin/wificond link to a
 # system_ext binary its system_ext lacks) and needs none: its wifi module
 # (config_wificondMigrationEnabled=true) drives nl80211 itself ("Nl80211Native:
@@ -2088,7 +2144,13 @@ TAKEOVER_PID=$!
 # the processes in it. Guest daemons share names and even command lines with
 # the host's (the guest vold is launched with the same flags as One UI's), so
 # killing by name took down the host vold and init rebooted ("vold-failed").
-sleep 0.5
+host_mntns=$(readlink /proc/1/ns/mnt 2>/dev/null)
+n=0
+while [ $n -lt 10 ]; do
+    gm=$(readlink "/proc/$TAKEOVER_PID/ns/mnt" 2>/dev/null)
+    [ -n "$gm" ] && [ "$gm" != "$host_mntns" ] && break
+    n=$((n + 1)); sleep 0.05
+done
 readlink "/proc/$TAKEOVER_PID/ns/mnt" > "$STAGE/guest_mntns" 2>/dev/null
 # And the device of the guest's root filesystem: zygote gives every app its own
 # mount namespace, but all of them share this root (return_to_oneui.sh).
@@ -2263,6 +2325,7 @@ while true; do
         fi
         if $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys window 2>/dev/null | grep -q 'mStatusBar'; then
             echo '[UI Activator] WindowManager is ready! Dismissing bootanim and unlocking...'
+            gsh() { $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/sh -c "\$1"; }
             # The camera hole for the size the guest runs the panel at
             # (guest_panel_fit.sh, see where the switch writes it): the switch
             # placed it when the window manager first answered. This is the check
@@ -2275,7 +2338,7 @@ while true; do
             fi
             setprop service.bootanim.exit 1
             kill -9 \$(pidof bootanimation) 2>/dev/null
-            sleep 1
+            sleep 0.2
             # The screen's own timeout and the user's stay-awake choice: up to
             # 0.4.34 every boot forced stay awake on any charger (svc power stayon,
             # stay_on_while_plugged_in 7) and a timeout of 2^31-1 ms, left from
@@ -2286,19 +2349,25 @@ while true; do
             if [ -L $STAGE/data/oneos_screen_timeout ]; then
                 echo '[UI Activator] screen timeout: data/oneos_screen_timeout is a link, not made by OneOS; left alone'
             elif [ ! -e $STAGE/data/oneos_screen_timeout ]; then
-                SOP=\$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings get global stay_on_while_plugged_in 2>/dev/null)
-                SOT=\$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings get system screen_off_timeout 2>/dev/null)
-                [ "\$SOP" = 7 ] && $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings put global stay_on_while_plugged_in 0
-                [ "\$SOT" = 2147483647 ] && $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings put system screen_off_timeout 60000
+                ST_OUT=\$(gsh '
+                    sop=\$(/system/bin/settings get global stay_on_while_plugged_in 2>/dev/null)
+                    sot=\$(/system/bin/settings get system screen_off_timeout 2>/dev/null)
+                    [ "\$sop" = 7 ] && /system/bin/settings put global stay_on_while_plugged_in 0
+                    [ "\$sot" = 2147483647 ] && /system/bin/settings put system screen_off_timeout 60000
+                    printf "%s|%s\n" "\$sop" "\$sot"
+                ' 2>/dev/null)
+                SOP=\${ST_OUT%%|*}; SOT=\${ST_OUT#*|}
                 mkdir $STAGE/data/oneos_screen_timeout 2>/dev/null
                 echo "[UI Activator] screen timeout: was stay_on_while_plugged_in=\${SOP:-?} screen_off_timeout=\${SOT:-?}; the forced values reset once (0, 60000)"
             fi
-            $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings put system haptic_feedback_enabled 1
-            $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings put system peak_refresh_rate 120.0
-            $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings put system min_refresh_rate 120.0
             # ColorOS's touch idle (OTI) pushes SurfaceFlinger to 240/60 Hz over the
             # 120 Hz policy on this panel (run 29); also staged off by guest_prepare.sh.
-            $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys oplus_vrr_service oti false >/dev/null 2>&1 && echo '[UI Activator] refresh rate: ColorOS touch idle off'
+            gsh '
+                /system/bin/settings put system haptic_feedback_enabled 1
+                /system/bin/settings put system peak_refresh_rate 120.0
+                /system/bin/settings put system min_refresh_rate 120.0
+                /system/bin/dumpsys oplus_vrr_service oti false >/dev/null 2>&1 && echo oti_off
+            ' 2>/dev/null | grep -q '^oti_off$' && echo '[UI Activator] refresh rate: ColorOS touch idle off'
             # Samsung Camera's working folder (guest_prepare.sh makes it when the
             # camera already has a uid): on a phone's first session with the
             # camera the package is only installed by this boot, the folder was
@@ -2349,7 +2418,7 @@ while true; do
                     HCM=\$(cat $STAGE/host_color_mode 2>/dev/null)
                     case "\$HCM" in [1-9]|[1-9][0-9]) ;; *) HCM="" ;; esac
                     timeout 10 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/service call SurfaceFlinger 1023 i32 \$HRI \${HCM:+i32 \$HCM} >/dev/null 2>&1
-                    sleep 1
+                    sleep 0.2
                     AF=\$(timeout 10 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys SurfaceFlinger 2>/dev/null | grep -o 'renderIntent=[A-Z0-9x_]*' | tr '\n' ' ')
                     echo "[UI Activator] Screen mode: One UI's render intent \$HRI asked (color mode \${HCM:-guest default}); panels before: \$B4, after: \$AF" ;;
             esac
@@ -2681,21 +2750,26 @@ while true; do
                 # (uid system) it was gone 45 s after HOME on the Fold8 Ultra and
                 # every open waited the 5 s again (run 22), while the worker in the
                 # guest stayed. It also registers itself again if the name goes.
+                # Launch both helpers concurrently and poll for binder registration
+                # instead of burning fixed 2 s + 2 s sleeps before HOME.
                 ($BB nohup $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/env CLASSPATH=/data/oneos_edm_stub.dex /system/bin/app_process /system/bin OneOSEdmStub \$PID > $STAGE/edm_stub.log 2>&1 </dev/null &)
-                sleep 2
-                echo "[UI Activator] Knox edm stub: \$(head -n 1 $STAGE/edm_stub.log 2>/dev/null | tr -d '\n' || true); \$(timeout 10 service check edmnativehelper 2>&1 | tr -d '\n')"
-                # The Samsung camera service worker (patches/OneOSCameraWorker.java, in
-                # the same dex), which the One UI cameraserver also asks on every open:
-                # on the S25 Ultra firmware each connect waited 5 s for it and then
-                # refused the guest app (has been restricted, report 04857daa).
-                # Inside the guest, which knows the packages of its own apps; only
-                # while nothing serves the name. The fold posture it sends the HAL
-                # only on a fold (ONEOS_CAMERA_POSTURE=1): a bar phone's one device
-                # state is 0, which would read as folded.
-                if ! timeout 10 service check media.camera.worker 2>/dev/null | grep -q ': found'; then
+                NEED_CAMW=0
+                if ! timeout 5 service check media.camera.worker 2>/dev/null | grep -q ': found'; then
+                    NEED_CAMW=1
                     ($BB nohup $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/env CLASSPATH=/data/oneos_edm_stub.dex ONEOS_CAMERA_POSTURE=$GUEST_FOLD_FORM /system/bin/app_process /system/bin OneOSCameraWorker \$PID > $STAGE/camera_worker.log 2>&1 </dev/null &)
-                    sleep 2
                 fi
+                w=0
+                while [ \$w -lt 10 ]; do
+                    edm_up=0; cam_up=1
+                    service check edmnativehelper 2>/dev/null | grep -q ': found' && edm_up=1
+                    if [ "\$NEED_CAMW" = 1 ]; then
+                        cam_up=0
+                        service check media.camera.worker 2>/dev/null | grep -q ': found' && cam_up=1
+                    fi
+                    [ "\$edm_up" = 1 ] && [ "\$cam_up" = 1 ] && break
+                    w=\$((w + 1)); sleep 0.2
+                done
+                echo "[UI Activator] Knox edm stub: \$(head -n 1 $STAGE/edm_stub.log 2>/dev/null | tr -d '\n' || true); \$(timeout 10 service check edmnativehelper 2>&1 | tr -d '\n')"
                 echo "[UI Activator] camera worker: \$(head -n 1 $STAGE/camera_worker.log 2>/dev/null | tr -d '\n' || true); \$(timeout 10 service check media.camera.worker 2>&1 | tr -d '\n')"
             fi
             # Samsung's speaker tuning (experiment, 0.4.58). One UI's audioserver
@@ -2712,7 +2786,8 @@ while true; do
             # whose effect HAL has no Dolby: it gives up after a minute, logged.
             if [ "${ONEOS_GUEST_DOLBY:-1}" = 1 ] && [ -f $STAGE/OneOSEdmStub.dex ] && [ ! -L $STAGE/OneOSEdmStub.dex ]; then
                 ($BB nohup $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/env CLASSPATH=/data/oneos_edm_stub.dex /system/bin/app_process /system/bin OneOSSoundFx \$PID "" "${ONEOS_GUEST_DOLBY_PROFILE:-0}" > $STAGE/sound_fx.log 2>&1 </dev/null &)
-                sleep 3
+                w=0
+                while [ \$w -lt 15 ] && [ ! -s $STAGE/sound_fx.log ]; do w=\$((w + 1)); sleep 0.2; done
                 echo "[UI Activator] sound fx: \$(head -n 3 $STAGE/sound_fx.log 2>/dev/null | tr '\n' ' ' || true)"
             fi
             # Screen watch (0.5.15), Nothing OS only: it writes no power_screen_state events after boot, so the
@@ -2721,7 +2796,8 @@ while true; do
             # clicks for the launcher's double tap to sleep. ColorOS and vivo keep the keeper's own reader.
             if [ -e $STAGE/rootfs/system_ext/framework/nt-telephony-common.jar ] && [ "${ONEOS_GUEST_SCREEN_WATCH:-1}" = 1 ] && [ -f $STAGE/OneOSEdmStub.dex ] && [ ! -L $STAGE/OneOSEdmStub.dex ]; then
                 ($BB nohup $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/env CLASSPATH=/data/oneos_edm_stub.dex /system/bin/app_process /system/bin OneOSScreenWatch \$PID > $STAGE/screen_watch.log 2>&1 </dev/null &)
-                sleep 1
+                w=0
+                while [ \$w -lt 5 ] && [ ! -s $STAGE/screen_watch.log ]; do w=\$((w + 1)); sleep 0.2; done
                 echo "[UI Activator] screen watch: \$(head -n 1 $STAGE/screen_watch.log 2>/dev/null || true)"
             fi
             # Density and fold line of the inner panel (run 43), before HOME so the
@@ -2922,19 +2998,26 @@ while true; do
                         fi ;;
                 esac
             fi
-            $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/input keyevent 224
-            $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/input keyevent 82
-            $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/am unlock-user 0
-            $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/am start -a android.intent.action.MAIN -c android.intent.category.HOME
             # Setup is marked done before boot (guest_prepare.sh), so ColorOS shows
-            # its swipe keyguard; there is no credential in the guest.
-            $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/wm dismiss-keyguard 2>/dev/null || true
+            # its swipe keyguard; there is no credential in the guest. Batch wake,
+            # unlock, HOME launch, and keyguard dismissal into one guest namespace entry.
+            gsh '
+                /system/bin/input keyevent 224
+                /system/bin/input keyevent 82
+                /system/bin/am unlock-user 0
+                /system/bin/am start -a android.intent.action.MAIN -c android.intent.category.HOME
+                /system/bin/wm dismiss-keyguard 2>/dev/null || true
+            '
             # The guest's updaters could hand an OTA to the phone's own
-            # update_engine: ColorOS's, Pixel's factory OTA and Infinity-X's
-            # Updater.
-            for p in com.oplus.ota com.google.android.factoryota com.infinity.updater; do
-                $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/pm disable-user --user 0 \$p >/dev/null 2>&1 || true
-            done
+            # update_engine (already stopped on host): disable them asynchronously
+            # right after HOME so they do not delay brightness or Home activated!.
+            (
+                gsh '
+                    for p in com.oplus.ota com.google.android.factoryota com.infinity.updater; do
+                        /system/bin/pm disable-user --user 0 "$p" >/dev/null 2>&1 || true
+                    done
+                '
+            ) </dev/null >/dev/null 2>&1 &
             # Cover panel. With the fold layout (guest_start.sh wrote
             # data/oneos_fold_mode) ColorOS's DisplayManager switches the panels
             # on the lid switch and keeps the cover off while unfolded: only log
@@ -3914,7 +3997,10 @@ GUEST_THERMAL_MAP=0
 [ "${ONEOS_GUEST_THERMAL_MAP:-1}" = 1 ] && grep -q '^  "image": "pixel' "$STAGE/.oneos_stage" 2>/dev/null && GUEST_THERMAL_MAP=1
 if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
     [ $HEAT_CAP = 1 ] && : > "$STAGE/heat_cap.active"
-    rm -f "$STAGE/cpufreq_max_limit.released" "$STAGE/gpu_max_clock.capped" "$STAGE/bg_uclamp.saved"
+    # Preserve cpufreq_max_limit.released if [4b/6] already released a stale
+    # One UI SSRM vote for switch & boot; otherwise ensure no stale marker stays.
+    [ $HEAT_CAP = 1 ] || rm -f "$STAGE/cpufreq_max_limit.released"
+    rm -f "$STAGE/gpu_max_clock.capped" "$STAGE/bg_uclamp.saved"
     # Clamp background / system-background cgroups so background syncs, dexopt,
     # and keeper workers stay in efficient DVFS OPP states instead of triggering
     # Prime-core voltage spikes; foreground and top-app stay completely uncapped.

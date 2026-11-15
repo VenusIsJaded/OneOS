@@ -315,16 +315,11 @@ CD=/data/oneos_composer_before_sf.log
     echo
     echo "== the composer's own dump"
     # An AIDL composer (every phone OneOS knows) answers dumpsys, not lshal
-    # debug (HIDL only); one named service, bounded.
+    # debug (HIDL only); one named service, bounded. Run in the background so
+    # dumpsys never extends the black-screen gap before SurfaceFlinger starts.
     timeout 5 dumpsys android.hardware.graphics.composer3.IComposer/default 2>&1 | head -n 400 ||
         echo "dumpsys of the composer: no answer in 5 s"
-    if command -v lshal >/dev/null 2>&1; then
-        timeout 5 lshal debug android.hardware.graphics.composer3.IComposer/default 2>&1 ||
-            echo "lshal debug: no answer in 5 s"
-    else
-        echo "no lshal in this image"
-    fi
-} > "$CD" 2>&1
+} > "$CD" 2>&1 &
 
 # Shader caches. init.rc makes /data/misc/surfaceflinger (0700 system system)
 # and sets service.sf.cache_dir_available; the container has no init, so the
@@ -348,7 +343,7 @@ echo "[Pivoted Root] SurfaceFlinger PID: $SF_PID"
 # composer client). Run 33's guest surfaceflinger was up 0.2 s after it started
 # (14:41:25.337 -> power mode set 14:41:25.55), the fixed 2 s only delayed the
 # boot animation (see the composer restart above).
-if [ -f /data/oneos_gap_slow ]; then sleep 2; else sleep 0.5; fi
+if [ -f /data/oneos_gap_slow ]; then sleep 2; fi
 
 # Samsung's composer rejected ColorOS's surfaceflinger's command batches
 # (executeCommands BAD_VALUE, presentOrValidate NO_RESOURCES on every frame:
@@ -356,8 +351,8 @@ if [ -f /data/oneos_gap_slow ]; then sleep 2; else sleep 0.5; fi
 # overlays", SurfaceFlinger transaction 1008) so everything is GPU-composed
 # and the composer only gets the client target buffer.
 n=0
-while [ $n -lt 25 ] && ! service check SurfaceFlinger 2>/dev/null | grep -q ": found"; do
-    n=$((n + 1)); sleep 0.2
+while [ $n -lt 50 ] && ! service check SurfaceFlinger 2>/dev/null | grep -q ": found"; do
+    n=$((n + 1)); sleep 0.1
 done
 # /data/oneos_hwc (guest_prepare.sh) leaves the overlays on: the default since
 # run 44 for guests without oplus-services.jar and since 0.4.76 for ColorOS
@@ -910,9 +905,9 @@ fi
 VOLD_PID=$!
 echo "[Pivoted Root] Vold PID: $VOLD_PID"
 n=0
-while [ $n -lt 50 ]; do
+while [ $n -lt 100 ]; do
     [ "$(svc_pid $VOLD_NAME)" = "$VOLD_PID" ] && break
-    n=$((n + 1)); sleep 0.2
+    n=$((n + 1)); sleep 0.1
 done
 if [ "$(svc_pid $VOLD_NAME)" != "$VOLD_PID" ]; then
     echo "[Pivoted Root] FATAL: servicemanager's $VOLD_NAME is pid '$(dumpsys --pid $VOLD_NAME 2>&1 | head -n 1)', not the guest's $VOLD_PID. Not starting the guest."
@@ -963,8 +958,8 @@ for d in "/system_ext/bin/mmlistservice" "/system_ext/bin/atlasservice"; do
 done
 if [ "$MMLIST" = 1 ]; then
     n=0
-    while [ $n -lt 25 ] && ! service check MMListService 2>/dev/null | grep -q ": found"; do n=$((n + 1)); sleep 0.2; done
-    echo "[Pivoted Root] MMListService:$(service check MMListService 2>/dev/null | cut -d: -f2), AtlasService:$(service check AtlasService 2>/dev/null | cut -d: -f2) after $((n / 5))s"
+    while [ $n -lt 50 ] && ! service check MMListService 2>/dev/null | grep -q ": found"; do n=$((n + 1)); sleep 0.1; done
+    echo "[Pivoted Root] MMListService:$(service check MMListService 2>/dev/null | cut -d: -f2), AtlasService:$(service check AtlasService 2>/dev/null | cut -d: -f2) after $((n / 10)).$((n % 10))s"
 fi
 
 # Guest media stack (see oneos_switch.sh: the host's copies are stopped).
@@ -1200,7 +1195,7 @@ if [ -f /data/guest_audio.flag ]; then
         # the guest's audioserver.
         setprop ctl.stop audioserver 2>/dev/null || true
         i=0
-        while [ $i -lt 50 ]; do
+        while [ $i -lt 100 ]; do
             [ "$(getprop init.svc.audioserver)" = "stopped" ] || setprop ctl.stop audioserver 2>/dev/null || true
             if service check android.hardware.audio.core.IModule/default 2>/dev/null | grep -q ": found"; then
                 setprop ctl.stop audioserver 2>/dev/null || true
@@ -1208,7 +1203,7 @@ if [ -f /data/guest_audio.flag ]; then
                 [ -n "$ha" ] && kill -9 $ha 2>/dev/null || true
                 return 0
             fi
-            i=$((i + 1)); sleep 0.2
+            i=$((i + 1)); sleep 0.1
         done
         return 1
     }
@@ -1626,34 +1621,44 @@ else
     while [ $n -lt 30 ] && [ "$(getprop init.svc.netd)" != stopped ]; do n=$((n + 1)); sleep 0.1; done
     setprop ctl.start netd
 fi
-n=0
-while [ $n -lt 50 ]; do
-    [ "$(getprop init.svc.netd)" = running ] && service check dnsresolver 2>/dev/null | grep -q ": found" && break
-    n=$((n + 1)); sleep 0.2
-done
-echo "[Pivoted Root] netd: $(getprop init.svc.netd), dnsresolver: $(service check dnsresolver 2>/dev/null | cut -d: -f2) after $((n / 5))s"
 
-
-# Fresh GNSS HAL for the guest. The One UI app com.qualcomm.location holds the
-# HAL A-GPS callback (vendor.qti.gnss ILocAidlAGnss.setCallbackExt), and libgnss
-# keeps the callback with the higher priority (GnssAdapter::initAgpsCommand,
-# cbPriority), so the IAGnss callback the guest sets at boot was ignored. That
-# app died with One UI (run 34 16:28:34.332 IAGnssCallback died) and the guest
-# image has none (IZatManager: IzatService not installed), so every SUPL data
-# request went nowhere: 16:34:19.116 requestATL, Peer has gone, 15 s later
-# LocSvc_Agps timeout. GPS ran without assistance and Weather gave up after
-# 57 s four times. A restarted HAL has no callbacks until the guest sets its
-# own. gnss_service has no onrestart actions and the return reboots anyway.
-# ONEOS_GUEST_GNSS_RESTART=0 leaves the HAL alone.
+# Start GNSS restart, guest idmap2d, and guest artd concurrently with netd's
+# bring-up so all four settle in parallel before zygote launches.
+GNSS_RESTARTED=0
 if [ "${ONEOS_GUEST_GNSS_RESTART:-1}" != 0 ] && [ -n "$(getprop init.svc.gnss_service)" ]; then
     echo "[Pivoted Root] Restarting the vendor GNSS HAL (A-GPS callback for the guest)..."
     setprop ctl.restart gnss_service
+    GNSS_RESTARTED=1
+fi
+
+/system/bin/idmap2d > /data/idmap2d.log 2>&1 &
+IDMAP_PID=$!
+
+GUEST_ARTD_STARTED=0
+if [ -f /data/oneos_guest_artd ] && [ -x /apex/com.android.art/bin/artd ]; then
+    rm -f /data/oneos_artd_stop
+    $BB sh -c '
+        while [ ! -f /data/oneos_artd_stop ]; do
+            /apex/com.android.art/bin/artd
+            sleep 1
+        done' </dev/null >> /data/artd.log 2>&1 &
+    GUEST_ARTD_STARTED=1
+fi
+
+n=0
+while [ $n -lt 100 ]; do
+    [ "$(getprop init.svc.netd)" = running ] && service check dnsresolver 2>/dev/null | grep -q ": found" && break
+    n=$((n + 1)); sleep 0.1
+done
+echo "[Pivoted Root] netd: $(getprop init.svc.netd), dnsresolver: $(service check dnsresolver 2>/dev/null | cut -d: -f2) after $((n / 10)).$((n % 10))s"
+
+if [ "$GNSS_RESTARTED" = 1 ]; then
     n=0
-    while [ $n -lt 25 ]; do
-        sleep 0.2; n=$((n + 1))
+    while [ $n -lt 50 ]; do
         [ "$(getprop init.svc.gnss_service)" = running ] && service check android.hardware.gnss.IGnss/default 2>/dev/null | grep -q ": found" && break
+        sleep 0.1; n=$((n + 1))
     done
-    echo "[Pivoted Root] gnss_service: $(getprop init.svc.gnss_service), pid $(getprop init.svc_debug_pid.gnss_service) after $((n / 5))s"
+    echo "[Pivoted Root] gnss_service: $(getprop init.svc.gnss_service), pid $(getprop init.svc_debug_pid.gnss_service) after $((n / 10)).$((n % 10))s"
 else
     # Exynos phones (S.LSI: gpsd and an AIDL HAL, Galaxy Z Flip7 report 16e735f2)
     # have no gnss_service, so nothing above ran and the takeover log said
@@ -1665,27 +1670,19 @@ fi
 # OneOS: the guest's own idmap2d for the whole session (its overlay manager no
 # longer asks host init to start One UI's, which cannot see the guest's
 # partitions; switcher/patches/guest_own_idmap.py).
-/system/bin/idmap2d > /data/idmap2d.log 2>&1 &
-IDMAP_PID=$!
 n=0
-while [ $n -lt 25 ] && [ "$(dumpsys --pid idmap 2>/dev/null | tr -dc 0-9)" != "$IDMAP_PID" ]; do
-    n=$((n + 1)); sleep 0.2
+while [ $n -lt 50 ] && [ "$(dumpsys --pid idmap 2>/dev/null | tr -dc 0-9)" != "$IDMAP_PID" ]; do
+    n=$((n + 1)); sleep 0.1
 done
 echo "[Pivoted Root] idmap2d PID: $IDMAP_PID, servicemanager's idmap: $(dumpsys --pid idmap 2>/dev/null | tr -dc 0-9)"
 # The guest's own artd (guest_prepare.sh: whenever the guest's ART payload is mounted).
 # artd is lazy: it exits when nothing holds it, so it runs again 0.2 s later,
 # before servicemanager would ask init for One UI's. The loop ends with the guest
 # (return_to_oneui.sh kills this namespace) or at /data/oneos_artd_stop.
-if [ -f /data/oneos_guest_artd ] && [ -x /apex/com.android.art/bin/artd ]; then
-    rm -f /data/oneos_artd_stop
-    $BB sh -c '
-        while [ ! -f /data/oneos_artd_stop ]; do
-            /apex/com.android.art/bin/artd
-            sleep 1
-        done' </dev/null >> /data/artd.log 2>&1 &
+if [ "$GUEST_ARTD_STARTED" = 1 ]; then
     n=0
-    while [ $n -lt 25 ] && [ -z "$(dumpsys --pid artd 2>/dev/null | tr -dc 0-9)" ]; do
-        n=$((n + 1)); sleep 0.2
+    while [ $n -lt 50 ] && [ -z "$(dumpsys --pid artd 2>/dev/null | tr -dc 0-9)" ]; do
+        n=$((n + 1)); sleep 0.1
     done
     ARTD_PID=$(dumpsys --pid artd 2>/dev/null | tr -dc 0-9)
     echo "[Pivoted Root] artd: the guest's (servicemanager's artd: ${ARTD_PID:-none yet}, $(readlink /proc/${ARTD_PID:-0}/exe 2>/dev/null || echo 'exe unknown'))"
