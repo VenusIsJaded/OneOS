@@ -1020,6 +1020,10 @@ if [ -f /data/guest_audio.flag ]; then
             seen() { logcat -d --pid="$h" -s AHAL_SecModulePrimary 2>/dev/null | $bb grep -F "configured l_a2dp_format" | tail -n 1; }
             hp=""; n=0
             while :; do
+                if [ -n "$hp" ] && [ -d "/proc/$hp" ]; then
+                    sleep 30
+                    continue
+                fi
                 h=$(dumpsys --pid android.hardware.audio.core.IModule/default 2>/dev/null | head -n 1 | tr -dc 0-9)
                 if [ -n "$h" ] && [ "$h" != "$hp" ]; then
                     b=$(seen)
@@ -1206,8 +1210,10 @@ if [ -f /data/guest_audio.flag ]; then
         # Invalid usage 1005 and system_server died).
         miss=0; r=0; last=0
         while [ -f /data/guest_audio.flag ]; do
-            sleep 3
+            sleep 5
             if ! kill -0 $as 2>/dev/null; then why="died"
+            elif { set -- $(pidof audioserver 2>/dev/null); [ $# -le 1 ] && [ "${1:-$as}" = "$as" ]; }; then
+                miss=0; continue
             elif [ "$(owner)" != "$as" ]; then why="media.audio_policy taken"
             else miss=0; continue; fi
             miss=$((miss + 1)); [ $miss -lt 2 ] && continue
@@ -1404,14 +1410,15 @@ if [ -f /data/guest_audio.flag ] && [ "${ONEOS_GUEST_CALL_SIM:-1}" != 0 ]; then
         }
         cur=""; last=$(cat /data/oneos_call_slot 2>/dev/null); call=""; n=0; hp=""; on=""
         echo "$(date +%T) started, last call on SIM slot ${last:-none}"
-        while true; do
-            sleep 2
+        check_calls() {
             if [ -f /data/guest_audio.flag ]; then f=1; else f=0; fi
             [ "$f" = "$on" ] || { on=$f; echo "$(date +%T) guest_audio.flag $([ $f = 1 ] && echo present, watching calls || echo gone, idle)"; }
-            [ $f = 1 ] || continue
-            # A restarted HAL starts over on VSID_1.
-            h=$(dumpsys --pid android.hardware.audio.core.IModule/default 2>/dev/null | tr -dc 0-9)
-            [ "$h" = "$hp" ] || { echo "$(date +%T) audio HAL pid ${h:-none}"; hp=$h; cur=""; }
+            [ $f = 1 ] || return 1
+            # A restarted HAL starts over on VSID_1; skip dumpsys while the known HAL pid lives.
+            if [ -z "$hp" ] || [ ! -d "/proc/$hp" ]; then
+                h=$(dumpsys --pid android.hardware.audio.core.IModule/default 2>/dev/null | tr -dc 0-9)
+                [ "$h" = "$hp" ] || { echo "$(date +%T) audio HAL pid ${h:-none}"; hp=$h; cur=""; }
+            fi
             # The path check (run 43), once, as soon as the HAL is known and
             # before any call: the SIM of the last call (the idle send below
             # would come first anyway), else 0x01, which a restarted HAL is on.
@@ -1420,8 +1427,8 @@ if [ -f /data/guest_audio.flag ] && [ "${ONEOS_GUEST_CALL_SIM:-1}" != 0 ]; then
                 if [ -n "$last" ]; then setp 0x0$((last + 1)) "path check, last call was on SIM slot $last" && cur=$last
                 else setp 0x01 "path check, VSID_1 as the HAL starts"; fi
             }
-            st=$(dumpsys telephony.registry 2>/dev/null | $bb awk -F= "/^ *Phone Id=/ { p = \$2 } /^ *mCallState=/ { print p \":\" \$2 }")
-            [ -n "$st" ] || continue
+            st=$(dumpsys telephony.registry 2>/dev/null | $bb awk -F= "NR > 160 { exit } /^ *Phone Id=/ { p = \$2 } /^ *mCallState=/ { print p \":\" \$2 }")
+            [ -n "$st" ] || return 1
             ring=""; off=""
             for e in $st; do
                 case ${e#*:} in 1) ring=${e%:*} ;; 2) off=${e%:*} ;; esac
@@ -1431,10 +1438,11 @@ if [ -f /data/guest_audio.flag ] && [ "${ONEOS_GUEST_CALL_SIM:-1}" != 0 ]; then
                 if [ -n "$t" ] && [ "$t" != "$cur" ]; then
                     if [ -n "$ring" ]; then setp 0x0$((t + 1)) "SIM slot $t ringing"; else setp 0x0$((t + 1)) "last call was on SIM slot $t"; fi && cur=$t
                 fi
-                continue
+                [ -n "$ring" ] && return 0
+                return 1
             fi
             [ "$call" = "$off" ] || { call=$off; n=0; }
-            [ $n -ge 3 ] && continue
+            [ $n -ge 3 ] && return 0
             n=$((n + 1)); want=$((off + 1)); s=$(hal)
             case $s in
                 ?$want) ;;
@@ -1443,16 +1451,43 @@ if [ -f /data/guest_audio.flag ] && [ "${ONEOS_GUEST_CALL_SIM:-1}" != 0 ]; then
             esac
             echo "$(date +%T) call on SIM slot $off: HAL ${s:-?}"
             [ "${s#?}" = "$want" ] && n=3
-            [ $n -ge 3 ] || continue
+            [ $n -ge 3 ] || return 0
             last=$off; echo "$off" > /data/oneos_call_slot
             if [ "${s#?}" = "$want" ]; then cur=$off; else cur=""; fi
+            return 0
+        }
+        # Settle initial HAL path check, then wake immediately on call/HAL logcat
+        # events instead of dumping a 150 KB telephony.registry every 2 s at idle.
+        i=0
+        while [ $i -lt 20 ] && [ -z "$probed" ]; do
+            sleep 2; i=$((i + 1)); check_calls
+        done
+        while true; do
+            logcat -v brief -b main -b radio -T 1 -s \
+                AHAL_Telephony_QTI:D DeviceHalAidl:D GsmCdmaCallTracker:D \
+                ImsPhoneCallTracker:D OplusGsmCdmaCallTrackerImpl:D \
+                OplusImsPhoneCallTrackerImpl:D CallStateTracker:D \
+                CallsManager:I TelephonyRegistry:D 2>/dev/null |
+            while IFS= read -r l; do
+                case "$l" in
+                    *notifyDataConnection*|*notifyCell*|*notifySignal*|*onCapabilities*|*updateCarrier*) continue ;;
+                    *setParameters*"screen_state="*|*setParameters*"OPLUS_"*) continue ;;
+                esac
+                if check_calls; then
+                    while check_calls; do sleep 1; done
+                fi
+            done
+            check_calls
+            sleep 5
         done' sh "$BB" "${ONEOS_GUEST_CALL_SIM:-1}" "${ONEOS_GUEST_CALL_SIM_VIA:-}" </dev/null >> /data/call_audio.log 2>&1 &
 fi
 
 # ColorOS system daemons that its init would start on demand ("interface aidl"
-# in cotad.rc / defrag.rc). The host's init refuses ctl.interface_start for
-# services it does not know, and oplus-services waits for them.
-for d in "/system_ext/bin/cotad" "/system_ext/bin/oplus_defrag"; do
+# in cotad.rc). The host's init refuses ctl.interface_start for services it
+# does not know, and oplus-services waits for cotad. oplus_defrag is omitted:
+# its init always fails in the container ("failed to read current user") and
+# DefragService is already patched to checkService with a null guard.
+for d in "/system_ext/bin/cotad"; do
     [ -x "$d" ] || continue
     "$d" > /dev/null 2>&1 &
     echo "[Pivoted Root] $(basename "$d") PID: $!"
@@ -1553,7 +1588,7 @@ if [ -f /data/oneos_guest_artd ] && [ -x /apex/com.android.art/bin/artd ]; then
     $BB sh -c '
         while [ ! -f /data/oneos_artd_stop ]; do
             /apex/com.android.art/bin/artd
-            sleep 0.2
+            sleep 1
         done' </dev/null >> /data/artd.log 2>&1 &
     n=0
     while [ $n -lt 25 ] && [ -z "$(dumpsys --pid artd 2>/dev/null | tr -dc 0-9)" ]; do
