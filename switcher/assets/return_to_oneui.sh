@@ -1098,7 +1098,10 @@ while :; do
     [ $up = 0 ] && [ $t -ge 180 ] && failsafe "user 0 not unlocked within 180 s"
 done
 
-ip rule show 2>/dev/null | "$BB" diff "$BASE/iprule" - >> "$IPLOG" 2>&1 || say "!!! ip rules differ from the switch (diff in return_inplace.log)"
+"$BB" sort -t: -k1,1n -k2 "$BASE/iprule" > "$S/inplace_iprule.base" 2>/dev/null
+ip rule show 2>/dev/null | "$BB" sort -t: -k1,1n -k2 > "$S/inplace_iprule.now" 2>/dev/null
+"$BB" diff "$S/inplace_iprule.base" "$S/inplace_iprule.now" >> "$IPLOG" 2>&1 || say "!!! ip rules differ from the switch (diff in return_inplace.log)"
+rm -f "$S/inplace_iprule.base" "$S/inplace_iprule.now" 2>/dev/null
 # One UI is up. RescueParty back to the stored value, the modules read through
 # their filesystems (safe now: Gate A read them below), the session's logcat
 # capture and the wakelock end.

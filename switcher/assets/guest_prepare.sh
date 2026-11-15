@@ -5507,17 +5507,20 @@ esac
 # as before. Only mobile interfaces; kept in step with netd's.
 want=$(ip rule show 2>/dev/null | awk '
     $1 == "11000:" && / oif rmnet_data/ { oif[$NF] = 1 }
-    $1 == "16000:" && / iif lo / && / fwmark / { r[++n] = $0; tbl[n] = $NF }
+    $1 == "16000:" && / iif lo / && / fwmark / {
+        tbl = $NF
+        $1 = ""
+        sub(/^[ \t]+/, "")
+        sub(/[ \t]+$/, "")
+        r[++n] = $0
+        t[n] = tbl
+    }
     END {
         for (i = 1; i <= n; i++) {
-            if (tbl[i] ~ /^rmnet_data/ || oif[tbl[i]]) {
-                line = r[i]
-                sub(/^16000:[ \t]+/, "", line)
-                print line
-            }
+            if (t[i] ~ /^rmnet_data/ || oif[t[i]]) print r[i]
         }
     }')
-have=$(ip rule show 2>/dev/null | awk '$1 == "14998:" { $1 = ""; sub(/^ +/, ""); print }')
+have=$(ip rule show 2>/dev/null | awk '$1 == "14998:" { $1 = ""; sub(/^[ \t]+/, ""); sub(/[ \t]+$/, ""); print }')
 echo "$have" | while read -r r; do
     [ -n "$r" ] || continue
     printf '%s\n' "$want" | grep -qxF "$r" || { ip rule del $r priority 14998 2>/dev/null && echo "net route: dropped 14998: $r"; }
@@ -5526,7 +5529,12 @@ echo "$want" | while read -r r; do
     [ -n "$r" ] || continue
     printf '%s\n' "$have" | grep -qxF "$r" || { ip rule add $r priority 14998 2>/dev/null && echo "net route: 14998: $r (bound sockets keep their network)"; }
 done
-date +%s > /data/local/tmp/net_fix.stamp 2>/dev/null || true
+now_s=$(date +%s 2>/dev/null || true)
+if [ -n "$now_s" ]; then
+    for sf in /data/local/tmp/oneos/data/local/tmp/net_fix.stamp /data/local/tmp/net_fix.stamp; do
+        [ -d "${sf%/*}" ] && printf '%s\n' "$now_s" > "$sf" 2>/dev/null || true
+    done
+fi
 exit 0
 NETFIX
 chmod 755 "$STAGE/data/local/tmp/net_fix.sh" 2>/dev/null || true
