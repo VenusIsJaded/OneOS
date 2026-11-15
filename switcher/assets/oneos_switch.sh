@@ -1410,42 +1410,37 @@ kill -9 $(pidof system_server) 2>/dev/null || true
 rm -f "$STAGE/data/guest_audio.flag"
 nohup $BB sh -c '
     echo $$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null
+    STAGE=$1
     stop_host_svcs() {
-        for kv in $(getprop \
-            init.svc.zygote init.svc.zygote_secondary init.svc.surfaceflinger \
-            init.svc.bootanim init.svc.audioserver init.svc.dumpstate \
-            init.svc.dumpstatez init.svc.bugreport init.svc.bugreportd 2>/dev/null |
-            sed -n "s/^\\[init\\.svc\\.\\([^]]*\\)\\]: \\[running\\]\$/\\1/p"); do
-            case "$kv" in
-                zygote) setprop ctl.stop zygote ;;
-                zygote_secondary) setprop ctl.stop zygote_secondary ;;
-                surfaceflinger) [ ! -f '"$STAGE"'/data/oneos_host_sf_frozen ] && setprop ctl.stop surfaceflinger ;;
-                audioserver) [ -f '"$STAGE"'/data/guest_audio.flag ] && setprop ctl.stop audioserver ;;
-                *) setprop "ctl.stop" "$kv" ;;
-            esac
-        done
+        acted=0
+        p=$(getprop 2>/dev/null)
+        case "$p" in *"[init.svc.zygote]: [running]"*) setprop ctl.stop zygote; acted=1 ;; esac
+        case "$p" in *"[init.svc.zygote_secondary]: [running]"*) setprop ctl.stop zygote_secondary; acted=1 ;; esac
+        case "$p" in *"[init.svc.bootchecker]: [running]"*) setprop ctl.stop bootchecker; acted=1 ;; esac
+        case "$p" in *"[init.svc.surfaceflinger]: [running]"*)
+            [ ! -f "$STAGE/data/oneos_host_sf_frozen" ] && { setprop ctl.stop surfaceflinger; acted=1; } ;;
+        esac
+        case "$p" in *"[init.svc.bootanim]: [running]"*) setprop ctl.stop bootanim; acted=1 ;; esac
+        case "$p" in *"[init.svc.audioserver]: [running]"*)
+            [ -f "$STAGE/data/guest_audio.flag" ] && { setprop ctl.stop audioserver; acted=1; } ;;
+        esac
+        case "$p" in *"[init.svc.dumpstate]: [running]"*) setprop ctl.stop dumpstate; acted=1 ;; esac
+        case "$p" in *"[init.svc.dumpstatez]: [running]"*) setprop ctl.stop dumpstatez; acted=1 ;; esac
+        case "$p" in *"[init.svc.bugreport]: [running]"*) setprop ctl.stop bugreport; acted=1 ;; esac
+        case "$p" in *"[init.svc.bugreportd]: [running]"*) setprop ctl.stop bugreportd; acted=1 ;; esac
     }
-    stop_host_svcs
-    if timeout 1 getprop -w >/dev/null 2>&1 || [ $? = 124 ]; then
-        getprop -w 2>/dev/null | while IFS= read -r l; do
-            case "$l" in
-                *"[init.svc.zygote]: [running]"*) setprop ctl.stop zygote ;;
-                *"[init.svc.zygote_secondary]: [running]"*) setprop ctl.stop zygote_secondary ;;
-                *"[init.svc.surfaceflinger]: [running]"*) [ ! -f '"$STAGE"'/data/oneos_host_sf_frozen ] && setprop ctl.stop surfaceflinger ;;
-                *"[init.svc.bootanim]: [running]"*) setprop ctl.stop bootanim ;;
-                *"[init.svc.audioserver]: [running]"*) [ -f '"$STAGE"'/data/guest_audio.flag ] && setprop ctl.stop audioserver ;;
-                *"[init.svc.dumpstate]: [running]"*) setprop ctl.stop dumpstate ;;
-                *"[init.svc.dumpstatez]: [running]"*) setprop ctl.stop dumpstatez ;;
-                *"[init.svc.bugreport]: [running]"*) setprop ctl.stop bugreport ;;
-                *"[init.svc.bugreportd]: [running]"*) setprop ctl.stop bugreportd ;;
-            esac
-        done
-    fi
+    ticks=0; fast_until=600
     while true; do
         stop_host_svcs
-        sleep 2
+        ticks=$((ticks + 1))
+        [ "$acted" = 1 ] && fast_until=$((ticks + 25))
+        if [ "$ticks" -lt "$fast_until" ]; then
+            sleep 0.2
+        else
+            sleep 1
+        fi
     done
-' </dev/null >/dev/null 2>&1 &
+' host_svc_guard "$STAGE" </dev/null >/dev/null 2>&1 &
 sleep 1
 # The session's own copy of One UI's property store, now that One UI's
 # framework is down (guest_props.sh store-on): the guest's persist settings

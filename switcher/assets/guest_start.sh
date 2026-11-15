@@ -1526,12 +1526,20 @@ echo "[Pivoted Root] App storage sweeper started..."
 # Fresh netd for the guest. The DNS resolver lives in the host's netd and
 # hands IDnsResolver.getUnstableInterface() to AID_SYSTEM only once; One UI's
 # system_server took it at boot, so the guest's ConnectivityService died with
-# "Already called by AID_SYSTEM". netd's rc has "onrestart restart zygote":
-# oneos_switch.sh's loop stops the host zygote again, and the stale
-# zygote sockets are removed just below, before the guest's launcher binds
-# its own. Wifi is already down while the guest boots.
+# "Already called by AID_SYSTEM". Stop then start netd (same pattern as the
+# display composer above) so init skips netd's "onrestart restart zygote"
+# chain instead of waking One UI's zygote/audioserver/bootchecker mid-boot;
+# oneos_switch.sh's loop also stops any revived host service, and stale zygote
+# sockets are removed just below before the guest's launcher binds its own.
 echo "[Pivoted Root] Restarting the host netd for a fresh DNS resolver..."
-setprop ctl.restart netd
+if [ "${ONEOS_NETD_RESTART:-stopstart}" = restart ]; then
+    setprop ctl.restart netd
+else
+    setprop ctl.stop netd
+    n=0
+    while [ $n -lt 30 ] && [ "$(getprop init.svc.netd)" != stopped ]; do n=$((n + 1)); sleep 0.1; done
+    setprop ctl.start netd
+fi
 n=0
 while [ $n -lt 50 ]; do
     [ "$(getprop init.svc.netd)" = running ] && service check dnsresolver 2>/dev/null | grep -q ": found" && break
