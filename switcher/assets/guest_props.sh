@@ -1235,7 +1235,19 @@ add)
     # Suppress OEM background analytics, statistics daemons, and log uploaders
     # in memory for the session (never overwriting a property One UI itself owns).
     if [ "${ONEOS_GUEST_KEEP_TELEMETRY:-0}" != 1 ]; then
-        for kv in             persist.sys.oplus.heimdall=false             persist.sys.assert.panic=false             persist.sys.oem.statistics=0             ro.miui.has_gmscore_telemetry=0             persist.sys.miui_optimization_upload=false             logd.statistics=0             ro.logd.kernel=false; do
+        for kv in \
+            persist.sys.oplus.heimdall=false \
+            persist.sys.assert.panic=false \
+            persist.sys.oem.statistics=0 \
+            sys.olc.service.on=false \
+            sys.oplus.boot_completed.obrain_start=0 \
+            sys.theia.event_enable_mask=0 \
+            sys.theia.panic_enable_mask=0 \
+            persist.sys.oplus.onetrace.enable=false \
+            ro.miui.has_gmscore_telemetry=0 \
+            persist.sys.miui_optimization_upload=false \
+            logd.statistics=0 \
+            ro.logd.kernel=false; do
             k=${kv%%=*}
             grep -qxF "$k" "$HOST" && continue
             drop_new "$k"

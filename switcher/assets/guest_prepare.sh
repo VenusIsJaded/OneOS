@@ -6349,8 +6349,20 @@ fi
 # background jobs disabled post-boot in UI Activator instead.
 if [ "${ONEOS_GUEST_KEEP_TELEMETRY:-0}" != 1 ]; then
     hid_tel=0
-    for tname in         AnalyticsCore MSA MsaGlobal MiuiDaemon Joyose HybridAccessory CatchLog         NearmeStatisticsRom OplusStatisticsRom Heimdall Olc         OplusQualityProtect OplusLogKit HeytapLog         Vivoabe PemUsageStatistics VivoLog VivoCloudDiag         DiagnosticsPrivacy DiagnosticsTool NTDiagnostics StabilityMonitor         Traceur BetterBug Bug2GoRamdump; do
-        for d in             "$ROOTFS/system/app/$tname" "$ROOTFS/system/priv-app/$tname"             "$GUEST_PRODUCT/app/$tname" "$GUEST_PRODUCT/priv-app/$tname"             "$GUEST_SYSTEM_EXT/app/$tname" "$GUEST_SYSTEM_EXT/priv-app/$tname"             "$ROOTFS"/my_*/app/"$tname" "$ROOTFS"/my_*/priv-app/"$tname"             "$ROOTFS/mi_ext/product/app/$tname" "$ROOTFS/mi_ext/product/priv-app/$tname"; do
+    for tname in \
+        AnalyticsCore MSA MsaGlobal MiuiDaemon Joyose HybridAccessory CatchLog \
+        NearmeStatisticsRom OplusStatisticsRom DCS Heimdall Olc OTrace OBrain PowerMonitor \
+        OplusQualityProtect OplusLogKit HeytapLog \
+        Vivoabe PemUsageStatistics VivoLog VivoCloudDiag \
+        DiagnosticsPrivacy DiagnosticsTool NTDiagnostics StabilityMonitor \
+        Traceur BetterBug Bug2GoRamdump; do
+        for d in \
+            "$ROOTFS/system/app/$tname" "$ROOTFS/system/priv-app/$tname" \
+            "$GUEST_PRODUCT/app/$tname" "$GUEST_PRODUCT/priv-app/$tname" \
+            "$GUEST_SYSTEM_EXT/app/$tname" "$GUEST_SYSTEM_EXT/priv-app/$tname" \
+            "$ROOTFS"/my_*/app/"$tname" "$ROOTFS"/my_*/priv-app/"$tname" \
+            "$ROOTFS"/my_*/non_overlay/app/"$tname" "$ROOTFS"/my_*/non_overlay/priv-app/"$tname" \
+            "$ROOTFS/mi_ext/product/app/$tname" "$ROOTFS/mi_ext/product/priv-app/$tname"; do
             [ -d "$d" ] && [ ! -L "$d" ] || continue
             mount | grep -qF " on $d " && continue
             if $BB mount -t tmpfs -o ro,size=4k,mode=755 tmpfs "$d" 2>/dev/null; then

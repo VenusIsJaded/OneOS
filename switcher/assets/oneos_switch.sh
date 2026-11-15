@@ -910,11 +910,12 @@ if [ -r "$CHB/current_now" ]; then
         *) tr '\0' ' ' < "/proc/$chp/cmdline" 2>/dev/null | grep -q "charge_watch" && kill "$chp" 2>/dev/null ;;
     esac
     CHB="$CHB" $BB setsid $BB timeout 7200 $BB sh -c '
+        rf() { local _v=""; [ -r "$1" ] && IFS= read -r _v < "$1" 2>/dev/null; printf "%s" "$_v"; }
         echo "=== $(date "+%F %T") session (charge_watch): status charging_type direct current(mA) voltage(mV) temp"
         while :; do
-            st=$(cat "$CHB/status" 2>/dev/null); ty=$(cat "$CHB/charging_type" 2>/dev/null)
-            dc=$(cat "$CHB/direct_charging_status" 2>/dev/null); cu=$(cat "$CHB/current_now" 2>/dev/null)
-            vo=$(cat "$CHB/voltage_now" 2>/dev/null); te=$(cat "$CHB/temp" 2>/dev/null)
+            st=$(rf "$CHB/status"); ty=$(rf "$CHB/charging_type")
+            dc=$(rf "$CHB/direct_charging_status"); cu=$(rf "$CHB/current_now")
+            vo=$(rf "$CHB/voltage_now"); te=$(rf "$CHB/temp")
             echo "$(date +%T) $st ${ty:-?} direct=${dc:-?} $(( ${cu:-0} / 1000 )) $(( ${vo:-0} / 1000 )) ${te:-?}"
             sleep 60
         done' charge_watch </dev/null >> "$STAGE/charge_watch.log" 2>&1 &
@@ -2344,7 +2345,10 @@ while true; do
             # Once per stage, disable background advertising/personalization sandboxes
             # and any remaining OEM analytics/telemetry packages (keeping APEX jars
             # mounted so BOOTCLASSPATH and framework callers never throw).
-            if [ '${ONEOS_GUEST_KEEP_TELEMETRY:-0}' != 1 ] && [ ! -e $STAGE/data/oneos_trackers_off ] && [ ! -L $STAGE/data/oneos_trackers_off ]; then
+            # Once per stage (versioned marker so upgraded lists apply to existing stages),
+            # disable background advertising/personalization sandboxes and remaining OEM
+            # analytics/telemetry/trace daemons (keeping APEX jars mounted for BOOTCLASSPATH).
+            if [ '${ONEOS_GUEST_KEEP_TELEMETRY:-0}' != 1 ] && [ ! -e $STAGE/data/oneos_trackers_off_v2 ] && [ ! -L $STAGE/data/oneos_trackers_off_v2 ]; then
                 (
                     G_TRK=\"timeout 10 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh\"
                     \$G_TRK /system/bin/device_config put adservices global_kill_switch true >/dev/null 2>&1 || true
@@ -2359,13 +2363,14 @@ while true; do
                               com.google.android.ondevicepersonalization.services com.android.ondevicepersonalization.services \
                               com.miui.analytics com.miui.msa.global com.miui.daemon com.xiaomi.joyose \
                               com.nearme.statistics.rom com.oplus.statistics.rom com.oplus.olc com.oplus.logkit \
+                              com.oplus.onetrace com.oplus.obrain com.oplus.powermonitor \
                               com.heytap.habit.analysis com.coloros.oshare.statistics com.vivo.epm \
                               com.nothing.proxy com.android.traceur; do
                         if \$G_TRK /system/bin/pm list packages \$tp 2>/dev/null | grep -qxF \"package:\$tp\"; then
                             \$G_TRK /system/bin/pm disable-user --user 0 \$tp >/dev/null 2>&1 && disabled_trk=\$((disabled_trk + 1))
                         fi
                     done
-                    mkdir $STAGE/data/oneos_trackers_off 2>/dev/null || true
+                    mkdir -p $STAGE/data/oneos_trackers_off $STAGE/data/oneos_trackers_off_v2 2>/dev/null || true
                     echo \"[UI Activator] privacy/heat: disabled \$disabled_trk background tracker/adservices package(s) and set AdServices/ODP kill-switches\"
                 ) </dev/null &
             fi
@@ -3847,11 +3852,15 @@ if [ "$GUEST_OPLUS" != 1 ] && [ "${ONEOS_GUEST_SF_PIN:-1}" != 0 ] && [ -r /sys/c
             echo \"# \$(date +%T) stopped (the return started, or no guest namespace record) after \$kicks kicks\" >> \$F
             exit 0
         fi
-        hz=\$(cut -d' ' -f1 /sys/class/lcd/panel/vrr 2>/dev/null)
+        hz=''
+        [ -r /sys/class/lcd/panel/vrr ] && IFS=' ' read -r hz _ < /sys/class/lcd/panel/vrr 2>/dev/null
         case \"\$hz\" in ''|*[!0-9]*) hz=0 ;; esac
         on=0
         for b in /sys/class/backlight/*/brightness; do
-            v=\$(cat \$b 2>/dev/null); case \"\$v\" in ''|*[!0-9]*) ;; 0) ;; *) on=1 ;; esac
+            [ -r \"\$b\" ] || continue
+            v=''
+            IFS= read -r v < \"\$b\" 2>/dev/null
+            case \"\$v\" in ''|*[!0-9]*) ;; 0) ;; *) on=1 ;; esac
         done
         if [ \$on = 1 ] && [ \$hz -gt 0 ] && [ \$hz -lt 48 ]; then low=\$((low + 1)); else low=0; fi
         if [ \$low -ge 2 ] && [ \$kicks -lt 40 ] && [ -f $STAGE/data/oneos_sf_kick.sh ]; then
