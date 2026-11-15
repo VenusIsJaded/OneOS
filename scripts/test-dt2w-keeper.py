@@ -163,9 +163,10 @@ command echo "NO=$NO_tsp"
 
     def test_a_double_tap_wakes_the_guest(self):
         got = self.run_keeper('arm tsp "panel off"\n: > $R/tap\ni=0; while [ ! -e $R/woke ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i + 1)); done\n'
-                              'wake_tsp tsp "panel on"\n')
+                              'sleep 0.05\nwake_tsp tsp "panel on"\n')
         self.assertIn('tsp: double tap: waking the guest', got['out'])
-        self.assertEqual(['input', 'keyevent', 'KEYCODE_WAKEUP'], got['woke'])
+        self.assertEqual(['input', 'keyevent', 'KEYCODE_WAKEUP',
+                          'vibrator_manager', 'synced', '-f', '-d', 'oneos_dt2w', 'prebaked', '0'], got['woke'])
 
     def test_the_return_switches_a_sleeping_ic_on_without_an_error(self):
         code = ': > $S/data/oneos_dt2w_armed.tsp\n' + RETURN.replace('/sys/class/', '$R/sys/class/')
