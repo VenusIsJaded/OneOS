@@ -1208,7 +1208,7 @@ fi
 # OplusUIFirst_TS "Failed to connect bpf bin" (396).
 for t in CaptureStateTracker libbinder.Parcel Parcel ResourcesManager MediaCodecList AString BOOTPROF GED \
          PerformanceManager ProjectManager SchedAssist GestureLog_OplusPenGestureManager HoraeHelper OsenseResManagerService postman \
-         UserAwareMgr OplusUIFirst_TS; do
+         UserAwareMgr OplusUIFirst_TS SDM; do
     setprop "log.tag.$t" SILENT 2>/dev/null
 done
 
