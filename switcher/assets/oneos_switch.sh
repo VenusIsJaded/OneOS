@@ -3549,14 +3549,24 @@ fi
 # processes over one second and the CPU totals (HyperOS run 11: 42-44 C skin
 # all session and nothing said which process kept the CPU busy).
 SKIN_NODE=''
+AP_NODES=''
 for tz in /sys/class/thermal/thermal_zone*; do
     [ -r "$tz/type" ] && [ -r "$tz/temp" ] || continue
-    case "$(cat "$tz/type" 2>/dev/null)" in
+    tzt=''
+    IFS= read -r tzt < "$tz/type" 2>/dev/null
+    case "$tzt" in
         skin-therm|skin_therm|sec-skin-therm|sec_skin_therm|surface_therm|surface-therm|quiet-therm|quiet_therm|ap_ntc)
-            tv=$(cat "$tz/temp" 2>/dev/null)
-            case "$tv" in -*[0-9]*|[1-9][0-9]*) SKIN_NODE="$tz/temp"; break ;; esac ;;
+            [ -n "$SKIN_NODE" ] && continue
+            tv=''
+            IFS= read -r tv < "$tz/temp" 2>/dev/null
+            case "$tv" in -*[0-9]*|[1-9][0-9]*) SKIN_NODE="$tz/temp" ;; esac ;;
+        cpu-*-usr|cpuss-*-usr|cpu_therm|cpu-therm|soc_therm|soc-therm|big-therm|big_therm|little-therm|little_therm|mid-therm|mid_therm|prime-therm|prime_therm|ns-cpu-*-step|ap_therm|ap-therm)
+            tv=''
+            IFS= read -r tv < "$tz/temp" 2>/dev/null
+            case "$tv" in [1-9][0-9]*) AP_NODES="$AP_NODES $tz/temp" ;; esac ;;
     esac
 done
+AP_NODES=${AP_NODES# }
 
 $BB nice -n 19 $BB sh -c "
     echo \$\$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null
