@@ -942,16 +942,40 @@ check_table() { # <file> <image id>
 # Every staged file of the profile, root's and matching files.sha256; no file
 # the session scripts would bind or run that the list does not name.
 check_files() { # <names>
+    expected_names=$1
     s="$STAGE/files.sha256"
     [ -f "$s" ] && mine "$s" || refuse "files.sha256 is missing or not root's"
-    want=0
-    for n in $1; do
+    want=0; batch=""; bnames=""
+    for n in $expected_names; do
         want=$((want + 1))
         sum=$(awk -v n="$n" 'NF == 2 && $2 == n { print $1 }' "$s")
         is_hex64 "$sum" || refuse "files.sha256 does not list $n once"
         [ -f "$STAGE/$n" ] && mine "$STAGE/$n" || refuse "$n is missing, a link, or not root's"
-        [ "$(sha "$STAGE/$n")" = "$sum" ] || refuse "$n changed since it was prepared"
+        ( [ "$(sha "$STAGE/$n")" = "$sum" ] ) &
+        batch="$batch $!"
+        bnames="$bnames $n"
+        if [ $((want % 8)) -eq 0 ]; then
+            set -- $bnames
+            for bp in $batch; do
+                if ! wait "$bp"; then
+                    for rp in $batch; do wait "$rp" 2>/dev/null || true; done
+                    refuse "$1 changed since it was prepared"
+                fi
+                shift
+            done
+            batch=""; bnames=""
+        fi
     done
+    if [ -n "$batch" ]; then
+        set -- $bnames
+        for bp in $batch; do
+            if ! wait "$bp"; then
+                for rp in $batch; do wait "$rp" 2>/dev/null || true; done
+                refuse "$1 changed since it was prepared"
+            fi
+            shift
+        done
+    fi
     [ "$(grep -c . "$s")" -eq "$want" ] || refuse "files.sha256 lists other files"
     for f in "$STAGE"/* "$STAGE"/.[!.]*; do
         [ -e "$f" ] || [ -L "$f" ] || continue
@@ -964,7 +988,7 @@ check_files() { # <names>
             # for an update after every session (A36 LineageOS, 11-15).
             oneos_wdog_feeder.sh|bring_watch.sh) ;;
             *_patched*|*_payload.img|*.apk|*.jar|*.so|*.sh|*.tar|Fold8AngleRelay.dex|zygote_exec|oneos_btaudio|socket_exec|clean_apex_info_list.xml|oneos-*)
-                in_list "$n" "$1" || refuse "$n is in the stage but was not prepared (left from an older stage)" ;;
+                in_list "$n" "$expected_names" || refuse "$n is in the stage but was not prepared (left from an older stage)" ;;
         esac
     done
 }
