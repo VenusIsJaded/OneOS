@@ -65,11 +65,22 @@ plain_tree() {
 verify() { # <dir>: every APK and library as the snapshot recorded it
     dir=$1
     [ -d "$dir" ] && plain_tree "$dir" || return 1
-    (cd "$dir" && [ -s apk.sha256 ] && sha256sum -c apk.sha256 && [ -f native.sha256 ] &&
-        { [ ! -s native.sha256 ] || sha256sum -c native.sha256; }) >/dev/null 2>&1
+    (cd "$dir" && [ -s apk.sha256 ] && [ -f native.sha256 ] || exit 1
+     sha256sum -c apk.sha256 >/dev/null 2>&1 &
+     p1=$!; p2=""
+     [ -s native.sha256 ] && { sha256sum -c native.sha256 >/dev/null 2>&1 & p2=$!; }
+     if ! wait "$p1"; then [ -z "$p2" ] || wait "$p2" 2>/dev/null; exit 1; fi
+     [ -z "$p2" ] || wait "$p2")
 }
 # Copy <package>'s APKs from One UI into $CACHE/<name>, unless the copy there
 # still matches One UI's files (path, size and time).
+session_stamp() {
+    [ -s "$STAGE/session/current.json" ] || return 1
+    stat -c '%d:%i:%s:%Y' "$STAGE/session/current.json" "$1"/*.apk "$1"/lib/*.so "$1"/lib/arm64/*.so 2>/dev/null | sha256sum | cut -d' ' -f1
+}
+mark_verified() {
+    vs=$(session_stamp "$1") && [ -n "$vs" ] && printf '%s\n' "$vs" > "$1/.verified_session" 2>/dev/null || true
+}
 copy_app() { # <package> <name>
     pkg=$1; name=$2; dir="$CACHE/$name"; new="$CACHE/.$name-$$"
     plain_tree "$dir" || { WHY="a link below $dir"; return 1; }
@@ -86,6 +97,7 @@ copy_app() { # <package> <name>
         stat -c '%n %s %Y' "$source" >> "$CACHE/.$name.stat" || { WHY="cannot stat $source"; return 1; }
     done < "$CACHE/.$name.paths"
     if verify "$dir" && cmp -s "$dir/source.stat" "$CACHE/.$name.stat"; then
+        mark_verified "$dir"
         say "$name: One UI's copy is unchanged"
         return 0
     fi
@@ -123,6 +135,7 @@ copy_app() { # <package> <name>
     # Only our own binary copy, replaced; no guest data.
     rm -rf "$dir"
     mv "$new" "$dir" && verify "$dir" || { WHY="the new copy of $name does not verify"; return 1; }
+    mark_verified "$dir"
     say "$name: copied from One UI ($(wc -l < "$dir/apk.sha256") APK(s), $(wc -l < "$dir/native.sha256") library file(s))"
 }
 # The guest's own installed copy of <package> (an earlier session's, or an app
@@ -159,6 +172,26 @@ remove_installed() { # <package>
 CONFIG_DIRS="permissions sysconfig default-permissions"
 copy_config() {
     dir="$CACHE/etc"; new="$CACHE/.etc-$$"
+    plain_tree "$dir" || { WHY="a link below $dir"; return 1; }
+    : > "$CACHE/.etc.stat"
+    for sub in $CONFIG_DIRS; do
+        for part in /system /product /system_ext /apex/com.google.android.gmssystem; do
+            [ -d "$part/etc/$sub" ] || continue
+            for f in "$part/etc/$sub"/*.xml; do
+                [ -f "$f" ] && [ ! -L "$f" ] || continue
+                case "${f##*/}" in
+                    *google*|*Google*|*gms*|*GMS*|*vending*|*gsf*|*playstore*) ;;
+                    *) continue ;;
+                esac
+                stat -c '%n %s %Y' "$f" >> "$CACHE/.etc.stat" || { WHY="cannot stat $f"; return 1; }
+            done
+        done
+    done
+    [ -s "$CACHE/.etc.stat" ] || { WHY="One UI has no Google permission files"; return 1; }
+    if verify_config && [ -f "$dir/permissions/oneos-privapp-permissions-gms.xml" ] && cmp -s "$dir/source.stat" "$CACHE/.etc.stat"; then
+        say "Google permission files: One UI's copy is unchanged"
+        return 0
+    fi
     rm -rf "$new"; mkdir -p "$new" || { WHY="cannot create $new"; return 1; }
     n=0
     for sub in $CONFIG_DIRS; do
@@ -191,6 +224,7 @@ copy_config() {
 GMSPERM
     n=$((n + 1))
     (cd "$new" && find . -type f -name '*.xml' -exec sha256sum {} + > config.sha256) || { WHY="cannot write checksums"; return 1; }
+    cp "$CACHE/.etc.stat" "$new/source.stat"
     chown -R 0:0 "$new"; find "$new" -type d -exec chmod 755 {} \;; find "$new" -type f -exec chmod 644 {} \;
     rm -rf "$dir"; mv "$new" "$dir" || { WHY="cannot keep the config copy"; return 1; }
     say "Google permission files: $n copied from One UI"
@@ -318,7 +352,12 @@ prepare)
     names="GmsCore Phonesky"; [ $STORE_ONLY = 1 ] && names=Phonesky
     [ $FULL = 1 ] && names="GmsCore Phonesky GoogleServicesFramework"
     for name in $names; do
-        verify "$CACHE/$name" || { say "the copy of $name does not match its checksums: not used"; exit 0; }
+        vdir="$CACHE/$name"
+        if [ -d "$vdir" ] && plain_tree "$vdir" && [ -s "$vdir/.verified_session" ] &&
+           [ "$(cat "$vdir/.verified_session" 2>/dev/null)" = "$(session_stamp "$vdir")" ]; then
+            continue
+        fi
+        verify "$vdir" || { say "the copy of $name does not match its checksums: not used"; exit 0; }
     done
     if [ $FULL = 1 ]; then
         prepare_full

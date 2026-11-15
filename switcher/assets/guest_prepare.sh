@@ -5773,18 +5773,21 @@ mount_payload() {
         fi
     fi
     [ -f "$IMG" ] || return 0
-    if mount | grep "$DEST " | grep -q "/dev/block/dm-"; then
+    if [ -d "$DEST" ]; then
+        if grep -q " $DEST .* /dev/block/dm-" /proc/self/mountinfo 2>/dev/null || mount | grep "$DEST " | grep -q "/dev/block/dm-"; then
+            $BB umount -l "$DEST" 2>/dev/null || true
+            for vdir in "$ROOTFS/apex/${TARGET}"@*; do
+                [ -d "$vdir" ] && $BB umount -l "$vdir" 2>/dev/null || true
+            done
+        fi
+        if grep -q " $DEST .* /dev/block/loop" /proc/self/mountinfo 2>/dev/null || mount | grep "$DEST " | grep -q "/dev/block/loop"; then
+            echo "$NAME already mounted on loop at $DEST"
+            return 0
+        fi
         $BB umount -l "$DEST" 2>/dev/null || true
-        for vdir in "$ROOTFS/apex/${TARGET}"@*; do
-       [ -d "$vdir" ] && $BB umount -l "$vdir" 2>/dev/null || true
-        done
+    else
+        mkdir -p "$DEST"
     fi
-    if mount | grep "$DEST " | grep -q "/dev/block/loop"; then
-        echo "$NAME already mounted on loop at $DEST"
-        return 0
-    fi
-    mkdir -p "$DEST"
-    $BB umount -l "$DEST" 2>/dev/null || true
     LOOP=$($BB losetup -f)
     # Read-only like system.raw: an ext4 payload mounted ro could still have
     # its journal replayed into the staged file (files.sha256).
