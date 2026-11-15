@@ -430,8 +430,94 @@ if [ "${ONEOS_GUEST_ODM_AI:-1}" = 1 ] && [ -f "$ODM_AI_TAR" ] && [ ! -L "$ODM_AI
             $BB mount --make-rslave "$ROOTFS/odm" 2>/dev/null || true
             echo "OPPO AI engine: odm/lib64/libaiboost.so and its delegates over the guest's /odm (read-only overlay)"
         else
-            $BB mount --bind /odm "$ROOTFS/odm" && $BB mount --make-rslave "$ROOTFS/odm" 2>/dev/null
-            echo "!!! OPPO AI engine: overlay on the guest's /odm refused; One UI's /odm as before"
+            $BB mount --bind /odm "$ROOTFS/odm" && $BB mount --make-rprivate "$ROOTFS/odm" 2>/dev/null
+            # SM8750 kernels reject overlayfs over /odm with EINVAL. Mirror /odm/lib64
+            # (or /odm if /odm/lib64 is absent) into a private ro tmpfs bind-farm so
+            # ColorOS AIUnit finds /odm/lib64/libaiboost.so locally instead of spinning
+            # on multi-megabyte plugin downloads/unzips while host /odm stays untouched.
+            odm_fb=0; odm_fw="$STAGE/odm_ai_farm"
+            $BB umount -l "$odm_fw/farm" 2>/dev/null || true
+            rm -rf "$odm_fw" && mkdir -p "$odm_fw/farm"
+            if [ -d "$ROOTFS/odm/lib64" ] && [ ! -L "$ROOTFS/odm/lib64" ]; then
+                if $BB mount -t tmpfs -o size=512k,mode=755 tmpfs "$odm_fw/farm"; then
+                    odm_fb=1
+                    for oe in /odm/lib64/* /odm/lib64/.[!.]*; do
+                        [ -e "$oe" ] || [ -L "$oe" ] || continue
+                        on=${oe##*/}
+                        if [ -L "$oe" ]; then cp -P "$oe" "$odm_fw/farm/$on"
+                        elif [ -d "$oe" ]; then mkdir -p "$odm_fw/farm/$on"
+                        else : > "$odm_fw/farm/$on"; fi || { odm_fb=0; break; }
+                    done
+                    if [ $odm_fb = 1 ]; then
+                        (cd "$ODM_AI/lib64" && find . -mindepth 1 -type d) | while read -r od; do
+                            mkdir -p "$odm_fw/farm/${od#./}"
+                        done
+                        (cd "$ODM_AI/lib64" && find . -mindepth 1 -type f) | while read -r of; do
+                            : > "$odm_fw/farm/${of#./}"
+                        done
+                        chmod 755 "$odm_fw/farm"; $BB chcon -R u:object_r:vendor_file:s0 "$odm_fw/farm" 2>/dev/null || true
+                        for oe in /odm/lib64/* /odm/lib64/.[!.]*; do
+                            [ -e "$oe" ] && [ ! -L "$oe" ] || continue
+                            on=${oe##*/}
+                            [ -e "$ODM_AI/lib64/$on" ] && [ ! -d "$ODM_AI/lib64/$on" ] && continue
+                            $BB mount --bind "$oe" "$odm_fw/farm/$on" && $BB mount --make-rslave "$odm_fw/farm/$on" 2>/dev/null || { odm_fb=0; break; }
+                        done
+                    fi
+                    if [ $odm_fb = 1 ]; then
+                        for of in $(cd "$ODM_AI/lib64" && find . -mindepth 1 -type f); do
+                            of=${of#./}
+                            $BB mount --bind "$ODM_AI/lib64/$of" "$odm_fw/farm/$of" &&
+                                $BB mount -o remount,bind,ro "$ODM_AI/lib64/$of" "$odm_fw/farm/$of" 2>/dev/null || true
+                        done
+                        $BB mount -o remount,ro "$odm_fw/farm" 2>/dev/null || true
+                        if $BB mount --bind "$odm_fw/farm" "$ROOTFS/odm/lib64"; then
+                            $BB mount --make-rprivate "$ROOTFS/odm/lib64" 2>/dev/null || true
+                        else
+                            odm_fb=0
+                        fi
+                    fi
+                    [ $odm_fb = 1 ] || {
+                        awk -v r="$odm_fw/farm/" 'index($2, r) == 1 {print $2}' /proc/mounts | sort -r | while read -r m; do $BB umount -l "$m" 2>/dev/null; done
+                        $BB umount -l "$odm_fw/farm" 2>/dev/null || true
+                    }
+                fi
+            elif [ ! -e "$ROOTFS/odm/lib64" ] && [ ! -L "$ROOTFS/odm/lib64" ]; then
+                if $BB mount -t tmpfs -o size=256k,mode=755 tmpfs "$odm_fw/farm"; then
+                    odm_fb=1
+                    for oe in /odm/* /odm/.[!.]*; do
+                        [ -e "$oe" ] || [ -L "$oe" ] || continue
+                        on=${oe##*/}
+                        if [ -L "$oe" ]; then cp -P "$oe" "$odm_fw/farm/$on"
+                        elif [ -d "$oe" ]; then mkdir -p "$odm_fw/farm/$on"
+                        else : > "$odm_fw/farm/$on"; fi || { odm_fb=0; break; }
+                    done
+                    mkdir -p "$odm_fw/farm/lib64"
+                    chmod 755 "$odm_fw/farm" "$odm_fw/farm/lib64"; $BB chcon -R u:object_r:vendor_file:s0 "$odm_fw/farm" 2>/dev/null || true
+                    if [ $odm_fb = 1 ]; then
+                        for oe in /odm/* /odm/.[!.]*; do
+                            [ -e "$oe" ] && [ ! -L "$oe" ] || continue
+                            $BB mount --bind "$oe" "$odm_fw/farm/${oe##*/}" && $BB mount --make-rslave "$odm_fw/farm/${oe##*/}" 2>/dev/null || { odm_fb=0; break; }
+                        done
+                    fi
+                    if [ $odm_fb = 1 ] && $BB mount --bind "$ODM_AI/lib64" "$odm_fw/farm/lib64"; then
+                        $BB mount -o remount,bind,ro "$ODM_AI/lib64" "$odm_fw/farm/lib64" 2>/dev/null || true
+                        $BB mount -o remount,ro "$odm_fw/farm" 2>/dev/null || true
+                        $BB mount --bind "$odm_fw/farm" "$ROOTFS/odm" && $BB mount --make-rprivate "$ROOTFS/odm" 2>/dev/null || odm_fb=0
+                    else
+                        odm_fb=0
+                    fi
+                    [ $odm_fb = 1 ] || {
+                        awk -v r="$odm_fw/farm/" 'index($2, r) == 1 {print $2}' /proc/mounts | sort -r | while read -r m; do $BB umount -l "$m" 2>/dev/null; done
+                        $BB umount -l "$odm_fw/farm" 2>/dev/null || true
+                    }
+                fi
+            fi
+            if [ $odm_fb = 1 ] && [ -f "$ROOTFS/odm/lib64/libaiboost.so" ]; then
+                echo "OPPO AI engine: odm/lib64/libaiboost.so and its delegates over the guest's /odm (read-only tmpfs bind-farm fallback)"
+            else
+                $BB mount --make-rslave "$ROOTFS/odm" 2>/dev/null || true
+                echo "!!! OPPO AI engine: overlay on the guest's /odm refused; One UI's /odm as before"
+            fi
         fi
     else
         echo "!!! OPPO AI engine: oplus_odm_ai.tar is not plain lib64 files; left out"
@@ -3896,6 +3982,32 @@ if [ "${ONEOS_GUEST_THEME_DIRS:-1}" = 1 ] && [ -e "$ROOTFS/system/framework/oplu
     done < "$STAGE/coloros_data_dirs.txt"
     echo "ColorOS theme/icon /data folders from its init rc files: $made made ($(wc -l < "$STAGE/coloros_data_dirs.txt") listed)"
     rm -f "$STAGE/coloros_data_dirs.txt"
+fi
+# ColorOS /data/persist_log folders normally created by OPPO's init rc files:
+# without them com.oplus.exsystemservice throws SQLiteCantOpenDatabaseException
+# on /data/persist_log/stamp/stamp.db (~1,700 log lines/session) and system_server
+# Osense-BufferQueue emits am_wtf events on /data/persist_log/osense/*.
+if [ "${ONEOS_GUEST_THEME_DIRS:-1}" = 1 ] && [ -e "$ROOTFS/system/framework/oplus-services.jar" ]; then
+    pl_made=0
+    for pl in /data/persist_log /data/persist_log/stamp /data/persist_log/DCS \
+              /data/persist_log/DCS/de /data/persist_log/DCS/de/modemdump \
+              /data/persist_log/sf /data/persist_log/osense \
+              /data/persist_log/osense/psires /data/persist_log/osense/history \
+              /data/persist_log/osense/cpnres /data/persist_log/osense/appquota \
+              /data/persist_log/osense/criticalLowMem; do
+        pq="$STAGE/data"; pl_ok=1
+        for part in $(echo "${pl#/data/}" | tr '/' ' '); do
+            pq="$pq/$part"; [ -L "$pq" ] && { pl_ok=0; break; }
+        done
+        [ $pl_ok = 1 ] || continue
+        pd="$STAGE$pl"
+        if [ ! -d "$pd" ]; then
+            mkdir -p "$pd" && pl_made=$((pl_made + 1))
+        fi
+        $BB chown 1000:1000 "$pd" 2>/dev/null; $BB chmod 0775 "$pd" 2>/dev/null
+        $BB chcon u:object_r:system_data_file:s0 "$pd" 2>/dev/null || true
+    done
+    echo "ColorOS /data/persist_log folders: $pl_made made"
 fi
 
 echo "=== 5.6 $(date +%T) theme folders ==="
