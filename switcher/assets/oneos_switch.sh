@@ -1817,6 +1817,35 @@ if [ "${ONEOS_GUEST_AUDIO:-1}" = "1" ]; then
     touch "$STAGE/data/guest_audio.flag"
     AHAL=$(getprop | sed -n 's/^\[init\.svc\.\(vendor\.audio-hal[^]]*\)\]: \[running\]$/\1/p' | tr '\n' ' ')
     echo "$AHAL" > "$STAGE/host_audio_hal_svcs"
+    # Samsung's AIDL audio effect HAL (audiohalservice.qti) runs in the host
+    # mount namespace and parses /vendor/etc/audio_effects_config_sec.xml
+    # (IFactory::queryProcessing), not the guest namespace's audio_effects.xml.
+    # Without One UI's AudioService / SoundAlive setting a preset or room
+    # context, <postprocess> auto-attaches MySpace (SoundAlive_3DPosisiton_Factory
+    # at mPreset = 0, !mContext) to every STREAM_MUSIC session, muffling speaker
+    # playback. Bind-mount a <postprocess>-cleaned copy in the host namespace
+    # before restarting the HAL; return_to_oneui.sh unmounts it before Gate A.
+    rm -f "$STAGE/host_fx_binds" "$STAGE"/oneos_hfx_* 2>/dev/null || true
+    if [ "${ONEOS_GUEST_STRIP_MYSPACE:-1}" = "1" ]; then
+        hfx_i=0
+        for hfx in /vendor/etc/audio_effects_config_sec.xml /vendor/etc/audio_effects.xml /vendor/etc/audio/sku_sun/audio_effects.xml /vendor/etc/audio/sku_pineapple/audio_effects.xml /vendor/etc/audio/sku_kalama/audio_effects.xml; do
+            [ -f "$hfx" ] && [ ! -L "$hfx" ] || continue
+            grep -qE 'effect="(myspace|music_helper)"' "$hfx" 2>/dev/null || continue
+            hfx_dst="$STAGE/oneos_hfx_${hfx_i}.xml"
+            sed '/<postprocess>/,/<\/postprocess>/{ /effect="myspace"/d; /effect="music_helper"/d; }' "$hfx" > "$hfx_dst" 2>/dev/null || { rm -f "$hfx_dst"; continue; }
+            [ -s "$hfx_dst" ] || { rm -f "$hfx_dst"; continue; }
+            chmod 0644 "$hfx_dst"
+            chcon --reference="$hfx" "$hfx_dst" 2>/dev/null || chcon u:object_r:vendor_configs_file:s0 "$hfx_dst" 2>/dev/null || true
+            if "$BB" mount --bind "$hfx_dst" "$hfx" 2>/dev/null; then
+                "$BB" mount -o remount,ro,bind "$hfx" 2>/dev/null || true
+                echo "$hfx" >> "$STAGE/host_fx_binds"
+                echo "Audio: stripped unconfigured myspace/music_helper postprocess in host $hfx"
+                hfx_i=$((hfx_i + 1))
+            else
+                rm -f "$hfx_dst"
+            fi
+        done
+    fi
     setprop ctl.stop audioserver
     n=0
     while [ $n -lt 25 ] && pidof audioserver >/dev/null; do n=$((n + 1)); sleep 0.2; done
@@ -1824,6 +1853,11 @@ if [ "${ONEOS_GUEST_AUDIO:-1}" = "1" ]; then
     for s in $AHAL; do setprop ctl.stop $s; done
     sleep 1
     for s in $AHAL; do setprop ctl.start $s; done
+    # Stopping/starting vendor.audio-hal* triggers One UI init's
+    # "onrestart restart audioserver": stop any respawned host audioserver so it
+    # does not grab PRIMARY_PLAYBACK before guest_start.sh launches the guest's.
+    setprop ctl.stop audioserver
+    kill -9 $(pidof audioserver) 2>/dev/null || true
     echo "Host audioserver: $(getprop init.svc.audioserver); audio HAL services restarted: ${AHAL:-none found}"
     # The audio HAL adapter's vendor extension. The S25 series' One UI sets
     # ro.audio.ihaladaptervendorextension_enabled=true, and with One UI's
@@ -2677,7 +2711,7 @@ while true; do
             # output, sound much better); ONEOS_GUEST_DOLBY=0: off. Phones
             # whose effect HAL has no Dolby: it gives up after a minute, logged.
             if [ "${ONEOS_GUEST_DOLBY:-1}" = 1 ] && [ -f $STAGE/OneOSEdmStub.dex ] && [ ! -L $STAGE/OneOSEdmStub.dex ]; then
-                ($BB nohup $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/env CLASSPATH=/data/oneos_edm_stub.dex /system/bin/app_process /system/bin OneOSSoundFx \$PID > $STAGE/sound_fx.log 2>&1 </dev/null &)
+                ($BB nohup $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/env CLASSPATH=/data/oneos_edm_stub.dex /system/bin/app_process /system/bin OneOSSoundFx \$PID "" "${ONEOS_GUEST_DOLBY_PROFILE:-0}" > $STAGE/sound_fx.log 2>&1 </dev/null &)
                 sleep 3
                 echo "[UI Activator] sound fx: \$(head -n 3 $STAGE/sound_fx.log 2>/dev/null | tr '\n' ' ' || true)"
             fi

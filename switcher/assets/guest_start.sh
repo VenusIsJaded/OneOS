@@ -1194,9 +1194,20 @@ if [ -f /data/guest_audio.flag ]; then
         service check android.hardware.audio.core.IModule/default 2>/dev/null | grep -q ": found" || return 0
         h=$(pidof audiohalservice.qti 2>/dev/null)
         [ -n "$h" ] && kill -9 $h 2>/dev/null || return 0
+        # Killing audiohalservice.qti triggers One UI init's
+        # "onrestart restart audioserver" in the host namespace: keep One UI's
+        # audioserver stopped so it cannot grab PRIMARY_PLAYBACK (-38) ahead of
+        # the guest's audioserver.
+        setprop ctl.stop audioserver 2>/dev/null || true
         i=0
         while [ $i -lt 50 ]; do
-            service check android.hardware.audio.core.IModule/default 2>/dev/null | grep -q ": found" && return 0
+            [ "$(getprop init.svc.audioserver)" = "stopped" ] || setprop ctl.stop audioserver 2>/dev/null || true
+            if service check android.hardware.audio.core.IModule/default 2>/dev/null | grep -q ": found"; then
+                setprop ctl.stop audioserver 2>/dev/null || true
+                ha=$(pidof audioserver 2>/dev/null)
+                [ -n "$ha" ] && kill -9 $ha 2>/dev/null || true
+                return 0
+            fi
             i=$((i + 1)); sleep 0.2
         done
         return 1
