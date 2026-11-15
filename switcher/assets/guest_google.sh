@@ -66,11 +66,15 @@ verify() { # <dir>: every APK and library as the snapshot recorded it
     dir=$1
     [ -d "$dir" ] && plain_tree "$dir" || return 1
     (cd "$dir" && [ -s apk.sha256 ] && [ -f native.sha256 ] || exit 1
-     sha256sum -c apk.sha256 >/dev/null 2>&1 &
-     p1=$!; p2=""
-     [ -s native.sha256 ] && { sha256sum -c native.sha256 >/dev/null 2>&1 & p2=$!; }
-     if ! wait "$p1"; then [ -z "$p2" ] || wait "$p2" 2>/dev/null; exit 1; fi
-     [ -z "$p2" ] || wait "$p2")
+     vpids=""
+     for w in 0 1 2 3 4 5 6 7; do
+         (s=$(awk -v w="$w" 'NR % 8 == w' apk.sha256 native.sha256)
+          [ -z "$s" ] || printf '%s\n' "$s" | sha256sum -c - >/dev/null 2>&1) &
+         vpids="$vpids $!"
+     done
+     vrc=0
+     for vp in $vpids; do wait "$vp" || vrc=1; done
+     exit "$vrc")
 }
 # Copy <package>'s APKs from One UI into $CACHE/<name>, unless the copy there
 # still matches One UI's files (path, size and time).
@@ -299,17 +303,43 @@ prepare_full() {
         [ -n "$files" ] || continue
         tgt="$PRODUCT/etc/$sub"
         [ -d "$tgt" ] && [ ! -L "$tgt" ] || { say "${tgt#$ROOTFS/} is missing or a link: not used"; undo_all; return 0; }
-        # A file of the same name in the image wins: ours are prefixed with their One UI partition.
-        farm_dir "$tgt" "$W/etc-$sub" $files || { say "could not add mount points to ${tgt#$ROOTFS/}: not used"; undo_all; return 0; }
-        farmed="$tgt|$W/etc-$sub $farmed"
+        # Populate a single read-only tmpfs with our verified Google XMLs first,
+        # then bind the image's own XMLs back over it so any same-named image file
+        # wins — zero per-XML bind mounts in /proc/mounts (saves 70 mount syscalls
+        # and avoids installd rescanning 35 extra quota-mount entries at boot).
+        ef_w="$W/etc-$sub"; ef_f="$ef_w/farm"; ef_o="$ef_w/orig"
+        "$BB" umount -l "$ef_f" 2>/dev/null; "$BB" umount -l "$ef_o" 2>/dev/null
+        mkdir -p "$ef_f" "$ef_o" && "$BB" mount -t tmpfs -o size=2m,mode=755 tmpfs "$ef_f" ||
+            { say "could not mount tmpfs for ${tgt#$ROOTFS/}: not used"; undo_all; return 0; }
+        sub_n=0
         for f in $files; do
-            chcon u:object_r:system_file:s0 "$CACHE/etc/$sub/$f" &&
-                "$BB" mount --bind "$CACHE/etc/$sub/$f" "$tgt/$f" &&
-                "$BB" mount -o remount,bind,ro "$CACHE/etc/$sub/$f" "$tgt/$f" || {
-                say "could not bind $sub/$f: not used"; undo_all; return 0
-            }
-            nfiles=$((nfiles + 1))
+            cp "$CACHE/etc/$sub/$f" "$ef_f/$f" && chmod 644 "$ef_f/$f" ||
+                { "$BB" umount -l "$ef_f" 2>/dev/null; say "could not copy $sub/$f: not used"; undo_all; return 0; }
+            sub_n=$((sub_n + 1))
         done
+        for fd_e in "$tgt"/* "$tgt"/.[!.]*; do
+            [ -e "$fd_e" ] || [ -L "$fd_e" ] || continue
+            fd_n=${fd_e##*/}
+            if [ -L "$fd_e" ]; then rm -f "$ef_f/$fd_n" && cp -P "$fd_e" "$ef_f/$fd_n"
+            elif [ -d "$fd_e" ]; then rm -rf "$ef_f/$fd_n" && mkdir "$ef_f/$fd_n"
+            else : > "$ef_f/$fd_n"; fi ||
+                { "$BB" umount -l "$ef_f" 2>/dev/null; say "could not stage ${tgt#$ROOTFS/}/$fd_n: not used"; undo_all; return 0; }
+        done
+        chmod 755 "$ef_f"; chcon -R u:object_r:system_file:s0 "$ef_f" 2>/dev/null
+        if ! "$BB" mount --bind "$tgt" "$ef_o" ||
+           ! "$BB" mount --make-private "$ef_o" ||
+           ! "$BB" mount --bind "$ef_f" "$tgt"; then
+            "$BB" umount -l "$ef_o" 2>/dev/null; "$BB" umount -l "$ef_f" 2>/dev/null
+            say "could not bind ${tgt#$ROOTFS/}: not used"; undo_all; return 0
+        fi
+        farmed="$tgt|$ef_w $farmed"
+        for fd_e in "$ef_o"/* "$ef_o"/.[!.]*; do
+            [ -e "$fd_e" ] && [ ! -L "$fd_e" ] || continue
+            "$BB" mount --bind "$fd_e" "$tgt/${fd_e##*/}" ||
+                { say "could not bind ${tgt#$ROOTFS/}/${fd_e##*/}: not used"; undo_all; return 0; }
+        done
+        "$BB" mount -o remount,ro "$ef_f" 2>/dev/null
+        nfiles=$((nfiles + sub_n))
     done
     say "Play services, Play Store and Google Services Framework from One UI -> ${PRODUCT#$ROOTFS/}/priv-app (read-only), with $nfiles Google permission file(s) in ${PRODUCT#$ROOTFS/}/etc"
     remove_installed com.google.android.gms
@@ -336,13 +366,36 @@ snapshot)
     mkdir -p "$CACHE" || skip "cannot create $CACHE"
     rm -rf "$CACHE"/.[!.]*
     WHY=
-    [ $STORE_ONLY = 1 ] || copy_app com.google.android.gms GmsCore || skip "$WHY"
-    copy_app com.android.vending Phonesky || skip "$WHY"
-    if [ $FULL = 1 ]; then
-        copy_app com.google.android.gsf GoogleServicesFramework || skip "$WHY"
-        copy_config || skip "$WHY"
+    run_snap() { # <tag> <cmd>...
+        s_tag=$1; shift
+        "$@" > "$CACHE/.$s_tag.out" || { printf '%s\n' "$WHY" > "$CACHE/.$s_tag.why"; return 1; }
+    }
+    spids=""; stags=""
+    if [ $STORE_ONLY != 1 ]; then
+        run_snap GmsCore copy_app com.google.android.gms GmsCore &
+        spids="$spids $!"; stags="$stags GmsCore"
     fi
-    rm -f "$CACHE"/.*.paths "$CACHE"/.*.stat
+    run_snap Phonesky copy_app com.android.vending Phonesky &
+    spids="$spids $!"; stags="$stags Phonesky"
+    if [ $FULL = 1 ]; then
+        run_snap GoogleServicesFramework copy_app com.google.android.gsf GoogleServicesFramework &
+        spids="$spids $!"; stags="$stags GoogleServicesFramework"
+        run_snap etc copy_config &
+        spids="$spids $!"; stags="$stags etc"
+    fi
+    sfail=""
+    set -- $stags
+    for sp in $spids; do
+        st=$1; shift
+        if wait "$sp"; then
+            [ -s "$CACHE/.$st.out" ] && [ -z "$sfail" ] && cat "$CACHE/.$st.out"
+        elif [ -z "$sfail" ]; then
+            sfail=$(cat "$CACHE/.$st.why" 2>/dev/null)
+            [ -n "$sfail" ] || sfail="$st snapshot failed"
+        fi
+    done
+    rm -f "$CACHE"/.*.paths "$CACHE"/.*.stat "$CACHE"/.*.out "$CACHE"/.*.why
+    [ -z "$sfail" ] || skip "$sfail"
     ;;
 prepare)
     rm -f "$CACHE/active"
