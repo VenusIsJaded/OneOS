@@ -1029,12 +1029,13 @@ if [ -f /data/guest_audio.flag ]; then
                     b=$(seen)
                     r=$(service call android.hardware.audio.core.IModule/default 34 i32 1 i32 1 i32 $ps s16 l_a2dp_format i32 1 i32 1 i32 $hs s16 qti.audio.core.VString i32 $vs s16 "$v" i32 0 2>&1 | tr -s " \n" " " | head -c 100 | $bb sed "s/ *\$//")
                     sleep 1; a=$(seen)
-                    [ -n "$a" ] && [ "$a" != "$b" ] || { sleep 2; a=$(seen); }
+                    [ -n "$a" ] && [ "$a" != "$b" ] || [ -n "$b" ] || { sleep 2; a=$(seen); }
                     if [ -n "$a" ] && [ "$a" != "$b" ]; then ok="HAL: ${a#*: }"
+                    elif [ -n "$a" ]; then ok="HAL already configured: ${a#*: }"
                     else ok="HAL NEVER logged it (no AHAL_SecModulePrimary line for l_a2dp_format from pid $h)"; fi
                     echo "$(date +%T) l_a2dp_format=$v (sizes $ps $hs $vs) to the audio HAL pid $h: $r; $ok"
                     # Not logged by the HAL: sent again on the next round, 3 tries per HAL pid.
-                    if [ -n "$a" ] && [ "$a" != "$b" ]; then hp=$h; n=0
+                    if [ -n "$a" ]; then hp=$h; n=0
                     else n=$((n + 1)); [ $n -lt 3 ] || { hp=$h; n=0; echo "$(date +%T) l_a2dp_format: gave up on HAL pid $h after 3 tries"; }; fi
                 fi
                 sleep 10

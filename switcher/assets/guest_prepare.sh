@@ -6644,7 +6644,7 @@ if [ -f "$STAGE/PermissionController_patched.apk" ]; then
         $BB umount -l "$PERM_APK" 2>/dev/null || true
         $BB mount --bind "$STAGE/PermissionController_patched.apk" "$PERM_APK" 2>/dev/null && echo "Bound PermissionController_patched.apk (late) -> $PERM_APK"
     done
-else
+elif [ ! -f "$STAGE/permission_payload.img" ] && [ -n "$(find "$ROOTFS/apex/com.android.permission" -name "PermissionController.apk" 2>/dev/null)" ]; then
     echo "!!! WARNING: PermissionController_patched.apk missing from $STAGE"
     echo "!!! Samsung's PermissionController will crash every runtime-permission dialog"
     echo "!!! (android.permission.RANGING not defined by platform)"
