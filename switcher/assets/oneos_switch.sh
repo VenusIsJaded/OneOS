@@ -1221,7 +1221,10 @@ fi
 # OplusUIFirst_TS "Failed to connect bpf bin" (396).
 for t in CaptureStateTracker libbinder.Parcel Parcel ResourcesManager MediaCodecList AString BOOTPROF GED \
          PerformanceManager ProjectManager SchedAssist GestureLog_OplusPenGestureManager HoraeHelper OsenseResManagerService postman \
-         UserAwareMgr OplusUIFirst_TS SDM; do
+         UserAwareMgr OplusUIFirst_TS SDM \
+         SettingsState SG QuickStartRUSHelper OplusGcSupressionHelper "[UAH_CLIENT]" \
+         OplusDynamicFrameRateRUS DynamicFramerate FlexibleWindowManagerService \
+         Blur_WindowBlurSessionImpl Blur_ScreenCapture Blur_BlurServiceImpl; do
     setprop "log.tag.$t" SILENT 2>/dev/null
 done
 if [ "${ONEOS_SOUND_VERBOSE:-0}" != 1 ]; then
@@ -2370,7 +2373,7 @@ while true; do
             # Once per stage (versioned marker so upgraded lists apply to existing stages),
             # disable background advertising/personalization sandboxes and remaining OEM
             # analytics/telemetry/trace daemons (keeping APEX jars mounted for BOOTCLASSPATH).
-            if [ '${ONEOS_GUEST_KEEP_TELEMETRY:-0}' != 1 ] && [ ! -e $STAGE/data/oneos_trackers_off_v2 ] && [ ! -L $STAGE/data/oneos_trackers_off_v2 ]; then
+            if [ '${ONEOS_GUEST_KEEP_TELEMETRY:-0}' != 1 ] && [ ! -e $STAGE/data/oneos_trackers_off_v3 ] && [ ! -L $STAGE/data/oneos_trackers_off_v3 ]; then
                 (
                     G_TRK=\"timeout 10 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh\"
                     \$G_TRK /system/bin/device_config put adservices global_kill_switch true >/dev/null 2>&1 || true
@@ -2385,14 +2388,30 @@ while true; do
                               com.google.android.ondevicepersonalization.services com.android.ondevicepersonalization.services \
                               com.miui.analytics com.miui.msa.global com.miui.daemon com.xiaomi.joyose \
                               com.nearme.statistics.rom com.oplus.statistics.rom com.oplus.olc com.oplus.logkit \
-                              com.oplus.onetrace com.oplus.obrain com.oplus.powermonitor \
+                              com.oplus.onetrace com.coloros.otrace com.oplus.obrain com.oplus.powermonitor \
                               com.heytap.habit.analysis com.coloros.oshare.statistics com.vivo.epm \
                               com.nothing.proxy com.android.traceur; do
                         if \$G_TRK /system/bin/pm list packages \$tp 2>/dev/null | grep -qxF \"package:\$tp\"; then
                             \$G_TRK /system/bin/pm disable-user --user 0 \$tp >/dev/null 2>&1 && disabled_trk=\$((disabled_trk + 1))
                         fi
                     done
-                    mkdir -p $STAGE/data/oneos_trackers_off $STAGE/data/oneos_trackers_off_v2 2>/dev/null || true
+                    # On non-OPPO vendor HALs without OPPO's AudioX effect UUID (41f6c0f4),
+                    # AudioxService retries AudioEffect creation every 3 s forever while
+                    # OneOSSoundFx already attaches Samsung Dolby (DAX3); disable only the
+                    # spinning service component so Sound & Vibration settings UI stays intact.
+                    if ! grep -rqi '41f6c0f4-5d8f-11ec-bf63-0242ac130002' /vendor/etc /odm/etc 2>/dev/null; then
+                        if \$G_TRK /system/bin/pm list packages com.oplus.audio.effectcenter 2>/dev/null | grep -qxF 'package:com.oplus.audio.effectcenter'; then
+                            \$G_TRK /system/bin/pm disable com.oplus.audio.effectcenter/com.oplus.audio.effectcenter.service.AudioxService >/dev/null 2>&1 || true
+                        fi
+                    fi
+                    # On phones without OPPO Insta360/DJI cross-device camera features,
+                    # com.oplus.devicehub's DeviceAppProvider kills its own process 4x per query.
+                    if \$G_TRK /system/bin/pm list packages com.oplus.devicehub 2>/dev/null | grep -qxF 'package:com.oplus.devicehub'; then
+                        if ! \$G_TRK /system/bin/pm list features 2>/dev/null | grep -Eqi 'insta360|dji'; then
+                            \$G_TRK /system/bin/pm disable com.oplus.devicehub/com.oplus.mydevices.sdk.DeviceAppProvider >/dev/null 2>&1 || true
+                        fi
+                    fi
+                    mkdir -p $STAGE/data/oneos_trackers_off $STAGE/data/oneos_trackers_off_v2 $STAGE/data/oneos_trackers_off_v3 2>/dev/null || true
                     echo \"[UI Activator] privacy/heat: disabled \$disabled_trk background tracker/adservices package(s) and set AdServices/ODP kill-switches\"
                 ) </dev/null &
             fi
