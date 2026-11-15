@@ -858,14 +858,14 @@ if [ "${ONEOS_LOGCAT:-1}" = 1 ]; then
     swp=$(cat "$STAGE/sound_watch.pid" 2>/dev/null)
     case "$swp" in
         ""|*[!0-9]*) ;;
-        *) tr '\0' ' ' < "/proc/$swp/cmdline" 2>/dev/null | grep -q "sound_watch.log" && kill "$swp" 2>/dev/null ;;
+        *) tr '\0' ' ' < "/proc/$swp/cmdline" 2>/dev/null | grep -q "sound_watch.log" && { kill -TERM -"$swp" 2>/dev/null; kill "$swp" 2>/dev/null; } ;;
     esac
     [ -f "$STAGE/sound_watch.log" ] && mv -f "$STAGE/sound_watch.log" "$STAGE/sound_watch.prev"
-    # Only enable verbose vibrator/Dolby/ringtone tracing when full diagnostic
-    # logging is explicitly requested; otherwise keep warnings/errors + key call
-    # and A2DP state transitions so every touch haptic and media buffer does not
-    # wake logd and flush sound_watch.log continuously.
-    if [ "${ONEOS_FULL_LOGS:-0}" = 1 ]; then
+    # Only enable verbose vibrator/Dolby/ringtone tracing when ONEOS_SOUND_VERBOSE=1
+    # is explicitly requested (ONEOS_FULL_LOGS=1 is on by default in app sessions
+    # and produced 645 KB in 5 min from per-tap haptic :V traces); otherwise keep
+    # warnings/errors + crashes + Telecom/A2DP state transitions.
+    if [ "${ONEOS_SOUND_VERBOSE:-0}" = 1 ]; then
         SW_TAGS="AndroidRuntime:E DEBUG:F Telecom:I Telecom_INCOMING_RINGING:V Ringtone:V RingtoneManager:V \
             VibratorManagerService:V VibratorManagerServiceExtImpl:V VibrationThread:V VibrationScaler:V \
             SecVibrator-HAL-AIDL-CORE:V AHAL_StreamOut_QTI:D EffectOffloadImpl:V AHAL_EffectFactoryQti:V \
@@ -895,7 +895,7 @@ fi
 stp=$(cat "$STAGE/store_watch.pid" 2>/dev/null)
 case "$stp" in
     ""|*[!0-9]*) ;;
-    *) tr '\0' ' ' < "/proc/$stp/cmdline" 2>/dev/null | grep -q "store_watch.log" && kill "$stp" 2>/dev/null ;;
+    *) tr '\0' ' ' < "/proc/$stp/cmdline" 2>/dev/null | grep -q "store_watch.log" && { kill -TERM -"$stp" 2>/dev/null; kill "$stp" 2>/dev/null; } ;;
 esac
 rm -f "$STAGE/store_watch.pid"
 # Charging (charge_watch.log, collected with the other stage logs): one line a
@@ -909,7 +909,7 @@ if [ -r "$CHB/current_now" ]; then
     chp=$(cat "$STAGE/charge_watch.pid" 2>/dev/null)
     case "$chp" in
         ""|*[!0-9]*) ;;
-        *) tr '\0' ' ' < "/proc/$chp/cmdline" 2>/dev/null | grep -q "charge_watch" && kill "$chp" 2>/dev/null ;;
+        *) tr '\0' ' ' < "/proc/$chp/cmdline" 2>/dev/null | grep -q "charge_watch" && { kill -TERM -"$chp" 2>/dev/null; kill "$chp" 2>/dev/null; } ;;
     esac
     CHB="$CHB" $BB setsid $BB timeout 7200 $BB sh -c '
         rf() { local _v=""; [ -r "$1" ] && IFS= read -r _v < "$1" 2>/dev/null; printf "%s" "$_v"; }
@@ -4385,3 +4385,4 @@ if [ "$RETURN_MAX" -gt 0 ]; then
 fi
 
 echo "=== TAKEOVER LAUNCHED SUCCESSFULLY ==="
+CESSFULLY ==="
