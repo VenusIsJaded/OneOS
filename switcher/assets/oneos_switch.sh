@@ -3578,39 +3578,81 @@ $BB nice -n 19 $BB sh -c "
     F=$STAGE/diag_series.txt
     T=$STAGE/cpu_top.log
     SKIN_NODE='$SKIN_NODE'
+    AP_NODES='$AP_NODES'
     BOOT_DIAG='${ONEOS_BOOT_DIAG:-0}'
+    fmt_c() {
+        case \"\$1\" in
+            -*|''|*[!0-9.]*) echo '' ;;
+            *.*) echo \"\$1\" ;;
+            *)
+                if [ \"\$1\" -gt 200 ] 2>/dev/null; then
+                    echo \"\$(( \$1 / 1000 )).\$(( (\$1 % 1000) / 100 ))\"
+                elif [ \"\$1\" -gt 0 ] 2>/dev/null; then
+                    echo \"\$1.0\"
+                fi
+                ;;
+        esac
+    }
     echo \"# \$(date) OneOS session sampler: every 60 s (sysfs-first, nice 19)\" > \$T
-    echo \"# \$(date) OneOS session sampler, one line every 60 s: time, thermal status, skin C, policyN=scaling_max_freq/cpuinfo_max_freq kHz, gpu_max_clock, battery %,status\" > \$F
+    echo \"# \$(date) OneOS session sampler, one line every 60 s: time, thermal status, skin C, ap C, policyN=scaling_max_freq/cpuinfo_max_freq kHz, gpu_max_clock, battery %,status\" > \$F
     while true; do
         [ -f $STAGE/data/oneos_rec_stop ] && { echo \"# \$(date +%T) the return started: sampler stopped\" >> \$F; exit 0; }
         [ -s $STAGE/guest_mntns ] || { echo \"# \$(date +%T) no guest namespace record: sampler stopped\" >> \$F; exit 0; }
         t0=\$(date +%s)
-        st=''; sk=''; bl='-'; dw='-'
+        st=''; sk=''; ap=''; bl='-'; dw='-'
         if [ -n \"\$SKIN_NODE\" ] && [ -r \"\$SKIN_NODE\" ]; then
-            raw=\$(cat \"\$SKIN_NODE\" 2>/dev/null)
-            case \"\$raw\" in
-                -*|'') ;;
-                *) sk=\$(awk -v v=\"\$raw\" 'BEGIN { if (v > 200) printf \"%.1f\", v / 1000.0; else if (v > 0) printf \"%.1f\", v }') ;;
-            esac
+            raw=''
+            IFS= read -r raw < \"\$SKIN_NODE\" 2>/dev/null
+            sk=\$(fmt_c \"\$raw\")
         fi
-        P=\$(pidof system_server | awk '{print \$1}')
-        if [ -n \"\$P\" ] && { [ -z \"\$sk\" ] || [ \"\$BOOT_DIAG\" = 1 ]; }; then
-            TH=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys thermalservice 2>/dev/null)
-            st=\$(echo \"\$TH\" | sed -n 's/^Thermal Status: *\([0-9][0-9]*\).*/\1/p' | head -n 1)
-            [ -n \"\$sk\" ] || sk=\$(echo \"\$TH\" | sed -n '/^Current temperatures from HAL/,/^[^[:space:]]/p' | sed -n 's/.*mValue=\([-0-9.]*\), mType=[0-9]*, mName=SKIN,.*/\1/p' | head -n 1)
-            if [ \"\$BOOT_DIAG\" = 1 ]; then
-                bl=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys window windows 2>/dev/null | grep -m 1 -o 'mBlurEnabled=[a-z]*' | sed 's/.*=//')
-                dw=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings get global disable_window_blurs 2>/dev/null)
+        ap_max=0
+        for an in \$AP_NODES; do
+            [ -r \"\$an\" ] || continue
+            araw=''
+            IFS= read -r araw < \"\$an\" 2>/dev/null
+            case \"\$araw\" in
+                -*|''|*[!0-9]*) ;;
+                *)
+                    if [ \"\$araw\" -le 200 ] 2>/dev/null; then araw=\$((araw * 1000)); fi
+                    [ \"\$araw\" -le 130000 ] && [ \"\$araw\" -gt \"\$ap_max\" ] && ap_max=\$araw
+                    ;;
+            esac
+        done
+        [ \"\$ap_max\" -gt 0 ] && ap=\"\$((ap_max / 1000)).\$(( (ap_max % 1000) / 100 ))\"
+        if [ -z \"\$sk\" ] || [ \"\$BOOT_DIAG\" = 1 ]; then
+            P=\$(pidof system_server 2>/dev/null)
+            P=\${P%% *}
+            if [ -n \"\$P\" ]; then
+                TH=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys thermalservice 2>/dev/null)
+                st=\$(echo \"\$TH\" | sed -n 's/^Thermal Status: *\([0-9][0-9]*\).*/\1/p' | head -n 1)
+                [ -n \"\$sk\" ] || sk=\$(echo \"\$TH\" | sed -n '/^Current temperatures from HAL/,/^[^[:space:]]/p' | sed -n 's/.*mValue=\([-0-9.]*\), mType=[0-9]*, mName=SKIN,.*/\1/p' | head -n 1)
+                if [ \"\$BOOT_DIAG\" = 1 ]; then
+                    bl=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys window windows 2>/dev/null | grep -m 1 -o 'mBlurEnabled=[a-z]*' | sed 's/.*=//')
+                    dw=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings get global disable_window_blurs 2>/dev/null)
+                fi
             fi
         fi
         c=''
         for p in /sys/devices/system/cpu/cpufreq/policy*; do
-            [ -r \$p/scaling_max_freq ] && c=\"\$c \${p##*/}=\$(cat \$p/scaling_max_freq 2>/dev/null)/\$(cat \$p/cpuinfo_max_freq 2>/dev/null)\"
+            if [ -r \"\$p/scaling_max_freq\" ]; then
+                sm=''; cm=''
+                IFS= read -r sm < \"\$p/scaling_max_freq\" 2>/dev/null
+                IFS= read -r cm < \"\$p/cpuinfo_max_freq\" 2>/dev/null
+                c=\"\$c \${p##*/}=\$sm/\$cm\"
+            fi
         done
-        [ -r /sys/kernel/gpu/gpu_max_clock ] && c=\"\$c gpu=\$(cat /sys/kernel/gpu/gpu_max_clock 2>/dev/null)\"
-        bc=\$(cat /sys/class/power_supply/battery/capacity 2>/dev/null)
-        bs=\$(cat /sys/class/power_supply/battery/status 2>/dev/null | tr ' ' _)
-        echo \"\$(date +%T) thermal=\${st:--} skin=\${sk:--}\$c blur=\${bl:--} disable_window_blurs=\${dw:--} battery=\${bc:-?}%,\${bs:-?}\" >> \$F
+        if [ -r /sys/kernel/gpu/gpu_max_clock ]; then
+            gm=''
+            IFS= read -r gm < /sys/kernel/gpu/gpu_max_clock 2>/dev/null
+            c=\"\$c gpu=\$gm\"
+        fi
+        bc=''; bs=''
+        [ -r /sys/class/power_supply/battery/capacity ] && IFS= read -r bc < /sys/class/power_supply/battery/capacity 2>/dev/null
+        if [ -r /sys/class/power_supply/battery/status ]; then
+            IFS= read -r bs < /sys/class/power_supply/battery/status 2>/dev/null
+            case \"\$bs\" in *' '*) bs=\$(printf '%s' \"\$bs\" | tr ' ' '_') ;; esac
+        fi
+        echo \"\$(date +%T) thermal=\${st:--} skin=\${sk:--} ap=\${ap:--}\$c blur=\${bl:--} disable_window_blurs=\${dw:--} battery=\${bc:-?}%,\${bs:-?}\" >> \$F
         if [ \"\$BOOT_DIAG\" = 1 ]; then
             TOP=\$(timeout 10 top -b -n 1 -d 1 -m 6 -s 1 -o %CPU,PID,NAME 2>/dev/null)
             echo \"\$(date +%T) \$(echo \"\$TOP\" | grep -m 1 'cpu ' | tr -s ' ') |\$(echo \"\$TOP\" | awk '\$1 ~ /^[0-9.]+\$/ && \$2 ~ /^[0-9]+\$/ { printf \" %s %s\", \$1, \$3 }')\" >> \$T
