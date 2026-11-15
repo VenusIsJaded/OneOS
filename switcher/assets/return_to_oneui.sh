@@ -376,6 +376,7 @@ echo "Kill loop finished $(date +%T)"
 # net_watch (oneos_switch.sh) rewrote routes until the rootfs was gone, 8 s
 # into run 43's return; it has no business in the return.
 pkill -9 -f "$S/rootfs/system/build.prop" 2>/dev/null || true
+pkill -9 -f "oneos_wdog_feeder.sh" 2>/dev/null || true
 rm -f /data/local/tmp/oneos/guest_mntns
 # HyperOS: the spawner's socket (guest_start.sh made it in /dev/socket).
 rm -f /dev/socket/hyos_spawner 2>/dev/null

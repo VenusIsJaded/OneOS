@@ -190,26 +190,27 @@ if ! ps -ef | grep -v grep | grep -q "oneos_wdog_feeder.sh"; then
     echo "Starting watchdog feeder..."
     cat > "$STAGE/oneos_wdog_feeder.sh" <<'WDOG'
 L=/data/local/tmp/oneos/watchdog_feeder.log
+rf() { local _v=''; [ -r "$1" ] && IFS= read -r _v < "$1" 2>/dev/null; printf '%s' "$_v"; }
 holders() {
     for p in /proc/[0-9]*; do
-        ls -l "$p/fd" 2>/dev/null | grep -qE '/dev/(watchdog|softdog)' && printf ' %s:%s' "${p#/proc/}" "$(cat "$p/comm" 2>/dev/null)"
+        ls -l "$p/fd" 2>/dev/null | grep -qE '/dev/(watchdog|softdog)' && printf ' %s:%s' "${p#/proc/}" "$(rf "$p/comm")"
     done
 }
 # Every watchdog the kernel lists: name, identity, state, timeout, time left.
 wdogs() {
     for w in /sys/class/watchdog/watchdog*; do
         [ -d "$w" ] || continue
-        printf ' [%s "%s" %s timeout %s left %s]' "${w##*/}" "$(cat "$w/identity" 2>/dev/null)" "$(cat "$w/state" 2>/dev/null)" \
-            "$(cat "$w/timeout" 2>/dev/null)" "$(cat "$w/timeleft" 2>/dev/null)"
+        printf ' [%s "%s" %s timeout %s left %s]' "${w##*/}" "$(rf "$w/identity")" "$(rf "$w/state")" \
+            "$(rf "$w/timeout")" "$(rf "$w/timeleft")"
     done
 }
 { echo "$(date +%T) nodes: $(ls -ln /dev/watchdog* /dev/softdog* 2>/dev/null | awk '{printf "%s %s:%s %s; ", $NF, $3, $4, $1}')"
   echo "$(date +%T) persist.vendor.softdog=$(getprop persist.vendor.softdog) init.svc.watchdogd=$(getprop init.svc.watchdogd); kernel:$(wdogs)"; } >> "$L"
 was=''; n=0; seen=''
 while true; do
-    if e=$(printf V 2>&1 > /dev/watchdog); then now=written; else now="refused ($e)"; fi
+    if ( printf V > /dev/watchdog ) 2>/dev/null; then now=written; else now=refused; fi
     if [ -c /dev/softdog ]; then
-        if e=$(printf V 2>&1 > /dev/softdog); then now="$now; /dev/softdog kicked"; else now="$now; /dev/softdog refused ($e)"; fi
+        if ( printf V > /dev/softdog ) 2>/dev/null; then now="$now; /dev/softdog kicked"; else now="$now; /dev/softdog refused"; fi
     fi
     # The node(s) One UI's system_server had open at the switch (host_softdog_nodes,
     # oneos_switch.sh): the S24 Exynos's /dev/watchdog1, beside a busy /dev/watchdog;
@@ -217,32 +218,35 @@ while true; do
     # Its own variable: with n (the loop counter below) the shell left n=<node>
     # and the feeder exited on n=$((n + 1)) after its first kick (0.4.67 S25+
     # e92bad4f: three log lines, then softdog_fire).
-    for wd in $(cat /data/local/tmp/oneos/host_softdog_nodes 2>/dev/null); do
-        case "$wd" in /dev/watchdog|/dev/softdog) continue ;; esac
-        [ -c "$wd" ] || continue
-        if e=$(printf V 2>&1 > "$wd"); then now="$now; $wd kicked"; else now="$now; $wd refused ($e)"; fi
-    done
+    if [ -r /data/local/tmp/oneos/host_softdog_nodes ]; then
+        while IFS= read -r wd; do
+            case "$wd" in ''|/dev/watchdog|/dev/softdog) continue ;; esac
+            [ -c "$wd" ] || continue
+            if ( printf V > "$wd" ) 2>/dev/null; then now="$now; $wd kicked"; else now="$now; $wd refused"; fi
+        done < /data/local/tmp/oneos/host_softdog_nodes
+    fi
     # An active software watchdog other than /dev/watchdog: kicked ("V", the
     # magic close where the driver allows it), never started.
     for w in /sys/class/watchdog/watchdog*; do
-        [ "$(cat "$w/state" 2>/dev/null)" = active ] || continue
-        case "$(cat "$w/identity" 2>/dev/null)" in *[Ss]oft*) ;; *) continue ;; esac
+        [ "$(rf "$w/state")" = active ] || continue
+        case "$(rf "$w/identity")" in *[Ss]oft*) ;; *) continue ;; esac
         d=/dev/${w##*/}
         [ -c "$d" ] || continue
-        if e=$(printf V 2>&1 > "$d"); then now="$now; $d kicked"; else now="$now; $d refused ($e)"; fi
+        if ( printf V > "$d" ) 2>/dev/null; then now="$now; $d kicked"; else now="$now; $d refused"; fi
     done
     if [ "$now" != "$was" ]; then
         echo "$(date +%T) /dev/watchdog $now; held by:$(holders)" >> "$L"
         was=$now
     fi
     n=$((n + 1))
-    if [ $((n % 5)) = 0 ]; then
+    if [ $((n % 12)) = 0 ]; then
         k=$(wdogs)
-        [ "$(echo "$k" | sed 's/ left [0-9]*\]/]/g')" != "$seen" ] || [ $((n % 30)) = 0 ] &&
+        ks=$(printf '%s' "$k" | sed 's/ left [0-9]*\]/]/g')
+        [ "$ks" != "$seen" ] || [ $((n % 120)) = 0 ] &&
             echo "$(date +%T) persist.vendor.softdog=$(getprop persist.vendor.softdog); kernel:$k" >> "$L"
-        seen=$(echo "$k" | sed 's/ left [0-9]*\]/]/g')
+        seen=$ks
     fi
-    sleep 2
+    sleep 5
 done
 WDOG
     chmod 700 "$STAGE/oneos_wdog_feeder.sh"
@@ -2865,16 +2869,44 @@ if ! content query --uri "$uri" --where "featurename=\"$f\"" 2>/dev/null | grep 
     # under the user (0.5.11: S23 6d70cb6b took the restart 2 min in, with Settings
     # open, for a SystemUI crash, and went back to One UI).
     echo "wallpaper AOD feature added; SystemUI restarts at the next screen off"
-    (n=0
-     while [ $n -lt 1440 ]; do
-         dumpsys power 2>/dev/null | grep -q 'mWakefulness=Awake' || break
-         n=$((n + 1)); sleep 5
-     done
-     if [ $n -lt 1440 ]; then
-         p=$(pidof com.android.systemui)
-         [ -z "$p" ] || kill -TERM $p
-         echo "$(date +%T) screen off: SystemUI restarted for the wallpaper AOD feature"
-     fi) &
+    (asleep() {
+         # Avoid `dumpsys power | grep -q` every 5 s: closing the pipe after line 7
+         # throws FastPrintWriter Broken pipe stack traces inside system_server for
+         # hours on a 150 KB power dump. Check panel dpms/backlight or dt2w AOD state
+         # directly via shell read, falling back to a full-drain awk only if needed.
+         if [ -r /data/oneos_dt2w_aod ]; then
+             a=0; IFS= read -r a < /data/oneos_dt2w_aod 2>/dev/null
+             [ "$a" = 1 ] && return 0
+         fi
+         for d in /sys/class/drm/card0-DSI-1/dpms /sys/class/drm/card0-DSI-2/dpms; do
+             [ -r "$d" ] || continue
+             v=On; IFS= read -r v < "$d" 2>/dev/null
+             [ "$v" = Off ] || return 1
+             return 0
+         done
+         for b in /sys/class/backlight/panel0-backlight/brightness /sys/class/backlight/panel/brightness; do
+             [ -r "$b" ] || continue
+             v=1; IFS= read -r v < "$b" 2>/dev/null
+             [ "$v" = 0 ]
+             return
+         done
+         dumpsys power 2>/dev/null | awk '/mWakefulness=/ { awake = ($0 ~ /mWakefulness=Awake/) } END { exit (awake ? 1 : 0) }'
+     }
+     # Primary path: block on Android's power_screen_state event (zero polling).
+     timeout 7200 logcat -b events -v raw -s power_screen_state -T "$(date +%s).000" 2>/dev/null |
+         while IFS= read -r l; do
+             case "$l" in "[0,"*) exit 0 ;; esac
+         done
+     if [ $? != 0 ]; then
+         n=0
+         while [ $n -lt 1440 ] && ! asleep; do
+             n=$((n + 1)); sleep 5
+         done
+         [ $n -lt 1440 ] || exit 0
+     fi
+     p=$(pidof com.android.systemui)
+     [ -z "$p" ] || kill -TERM $p
+     echo "$(date +%T) screen off: SystemUI restarted for the wallpaper AOD feature") &
 else
     echo "wallpaper AOD feature present"
 fi
@@ -5579,7 +5611,12 @@ BRQ="$STAGE/data/oneos_bring_requests"; LOG="$STAGE/bring_watch.log"
 GAPP=com.fahadali.oneos.guest
 echo $$ > "$BRQ/.watch.pid"
 say() { echo "$(date +%T) $*" >> "$LOG"; }
-alive() { grep -q " $STAGE/rootfs " /proc/mounts; }
+alive() {
+    while IFS=' ' read -r _ mp _ 2>/dev/null; do
+        [ "$mp" = "$STAGE/rootfs" ] && return 0
+    done < /proc/mounts
+    return 1
+}
 is_package() {
     case "$1" in ''|.*|*.|*[!A-Za-z0-9._]*|*..*) return 1 ;; esac
     case "$1" in *.*) return 0 ;; *) return 1 ;; esac
@@ -5622,7 +5659,7 @@ while alive; do
             status "$pkg" "failed: ${why:-not installed (oneos_bring.log in the guest)}"
         fi
     done
-    sleep 2
+    if [ -n "$owned" ]; then sleep 4; else sleep 2; fi
 done
 say "the system closed; done"
 rm -f "$BRQ/.watch.pid"
