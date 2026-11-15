@@ -470,16 +470,15 @@ if [ "${ONEOS_GUEST_ODM_AI:-1}" = 1 ] && [ -f "$ODM_AI_TAR" ] && [ ! -L "$ODM_AI
                                 $BB mount -o remount,bind,ro "$ODM_AI/lib64/$of" "$odm_fw/farm/$of" 2>/dev/null || true
                         done
                         $BB mount -o remount,ro "$odm_fw/farm" 2>/dev/null || true
-                        if $BB mount --bind "$odm_fw/farm" "$ROOTFS/odm/lib64"; then
+                        if $BB mount --rbind "$odm_fw/farm" "$ROOTFS/odm/lib64"; then
                             $BB mount --make-rprivate "$ROOTFS/odm/lib64" 2>/dev/null || true
                         else
                             odm_fb=0
                         fi
                     fi
-                    [ $odm_fb = 1 ] || {
-                        awk -v r="$odm_fw/farm/" 'index($2, r) == 1 {print $2}' /proc/mounts | sort -r | while read -r m; do $BB umount -l "$m" 2>/dev/null; done
-                        $BB umount -l "$odm_fw/farm" 2>/dev/null || true
-                    }
+                    awk -v r="$odm_fw/farm/" 'index($2, r) == 1 {print $2}' /proc/mounts | sort -r | while read -r m; do $BB umount -l "$m" 2>/dev/null; done
+                    $BB umount -l "$odm_fw/farm" 2>/dev/null || true
+                    rmdir "$odm_fw/farm" "$odm_fw" 2>/dev/null || true
                 fi
             elif [ ! -e "$ROOTFS/odm/lib64" ] && [ ! -L "$ROOTFS/odm/lib64" ]; then
                 if $BB mount -t tmpfs -o size=256k,mode=755 tmpfs "$odm_fw/farm"; then
@@ -502,19 +501,21 @@ if [ "${ONEOS_GUEST_ODM_AI:-1}" = 1 ] && [ -f "$ODM_AI_TAR" ] && [ ! -L "$ODM_AI
                     if [ $odm_fb = 1 ] && $BB mount --bind "$ODM_AI/lib64" "$odm_fw/farm/lib64"; then
                         $BB mount -o remount,bind,ro "$ODM_AI/lib64" "$odm_fw/farm/lib64" 2>/dev/null || true
                         $BB mount -o remount,ro "$odm_fw/farm" 2>/dev/null || true
-                        $BB mount --bind "$odm_fw/farm" "$ROOTFS/odm" && $BB mount --make-rprivate "$ROOTFS/odm" 2>/dev/null || odm_fb=0
+                        $BB mount --rbind "$odm_fw/farm" "$ROOTFS/odm" && $BB mount --make-rprivate "$ROOTFS/odm" 2>/dev/null || odm_fb=0
                     else
                         odm_fb=0
                     fi
-                    [ $odm_fb = 1 ] || {
-                        awk -v r="$odm_fw/farm/" 'index($2, r) == 1 {print $2}' /proc/mounts | sort -r | while read -r m; do $BB umount -l "$m" 2>/dev/null; done
-                        $BB umount -l "$odm_fw/farm" 2>/dev/null || true
-                    }
+                    awk -v r="$odm_fw/farm/" 'index($2, r) == 1 {print $2}' /proc/mounts | sort -r | while read -r m; do $BB umount -l "$m" 2>/dev/null; done
+                    $BB umount -l "$odm_fw/farm" 2>/dev/null || true
+                    rmdir "$odm_fw/farm" "$odm_fw" 2>/dev/null || true
                 fi
             fi
             if [ $odm_fb = 1 ] && [ -f "$ROOTFS/odm/lib64/libaiboost.so" ]; then
                 echo "OPPO AI engine: odm/lib64/libaiboost.so and its delegates over the guest's /odm (read-only tmpfs bind-farm fallback)"
             else
+                awk -v r="$ROOTFS/odm/" 'index($2, r) == 1 {print $2}' /proc/mounts | sort -r | while read -r m; do $BB umount -l "$m" 2>/dev/null; done
+                $BB umount -l "$ROOTFS/odm" 2>/dev/null || true
+                $BB mount --bind /odm "$ROOTFS/odm" 2>/dev/null || true
                 $BB mount --make-rslave "$ROOTFS/odm" 2>/dev/null || true
                 echo "!!! OPPO AI engine: overlay on the guest's /odm refused; One UI's /odm as before"
             fi
