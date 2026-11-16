@@ -83,6 +83,33 @@ store_off() {
     ! pd_mounted
 }
 
+# Verified property writer (S25 SM-S931U1 8f5752ca89e7388d: resetprop -n and
+# resetprop -n -f exited 0 with zero stderr while getprop saw none of the 415
+# guest props or session overrides — saupwk_test, anim_level, screenhole,
+# sdk_full, device_first_boot — causing 5.3 s power-key stalls, BlurService
+# crashes and missing Control Center blur/icons). Always confirm that getprop
+# sees the requested value; if direct mmap (-n) exited 0 without mutating the
+# live bionic property arena, fall back to resetprop without -n / setprop for
+# mutable keys (safe for persist.* only when the session's tmpfs copy over
+# /data/property is mounted, so One UI's own store stays untouched).
+prop_store_isolated() {
+    [ -f "$STORE_MARK" ] && [ "$(cat "$STORE_MARK" 2>/dev/null)" = "$BOOT_ID" ] && pd_mounted
+}
+rp_set_mem() {
+    _rk="$1"; _rv="$2"
+    if "$RP" -n "$_rk" "$_rv" 2>/dev/null && [ "$(getprop "$_rk")" = "$_rv" ]; then
+        return 0
+    fi
+    case "$_rk" in
+        ro.*|ctl.*|init.svc.*) return 1 ;;
+        persist.*) prop_store_isolated || return 1 ;;
+    esac
+    if "$RP" "$_rk" "$_rv" 2>/dev/null && [ "$(getprop "$_rk")" = "$_rv" ]; then
+        return 0
+    fi
+    setprop "$_rk" "$_rv" 2>/dev/null && [ "$(getprop "$_rk")" = "$_rv" ]
+}
+
 drop_stale_memory_lists() {
     if [ -f "$STORE_MARK" ] && [ "$(cat "$STORE_MARK" 2>/dev/null)" != "$BOOT_ID" ]; then
         rm -f "$STORE_MARK"
@@ -119,7 +146,7 @@ add)
     # this boot (see drop_stale_memory_lists).
     drop_stale_memory_lists
     if [ -f "$OVR" ]; then
-        while IFS= read -r line; do "$RP" -n "${line%%=*}" "${line#*=}" 2>/dev/null; done < "$OVR"
+        while IFS= read -r line; do rp_set_mem "${line%%=*}" "${line#*=}"; done < "$OVR"
         rm -f "$OVR"
     fi
     echo "$BOOT_ID" > "$STAGE/guest_props.boot"
@@ -209,7 +236,7 @@ add)
         BLUR=ro.surface_flinger.supports_background_blur
         if grep -qxF "$BLUR" "$HOST"; then
             hv=$(getprop "$BLUR")
-            if [ "$hv" != 1 ] && "$RP" -n "$BLUR" 1 2>/dev/null; then
+            if [ "$hv" != 1 ] && rp_set_mem "$BLUR" 1; then
                 echo "$BLUR=$hv" >> "$OVR"
                 echo "guest_props: $BLUR=$hv overridden to 1 for the session (window blur)"
             fi
@@ -232,13 +259,17 @@ add)
     # ONEOS_GUEST_ANIM_LEVEL=0 leaves it unset; 2, 3 or 4 sets that level.
     AL=persist.sys.oplus.anim_level; ALV=${ONEOS_GUEST_ANIM_LEVEL:-1}
     case "$ALV" in 1|2|3|4) ;; *) ALV="" ;; esac
-    if [ -n "$ALV" ] && { grep -q '"image": "coloros17-findn6"' "$STAGE/.oneos_stage" ||
-            { [ -f "$GSE/framework/oplus-telephony-common.jar" ] && [ -e "$ROOTFS/system/framework/oplus-services.jar" ]; }; }; then
+    IS_COLOROS17=0
+    if grep -q '"image": "coloros17-' "$STAGE/.oneos_stage" 2>/dev/null ||
+       { [ -f "$GSE/framework/oplus-telephony-common.jar" ] && [ -e "$ROOTFS/system/framework/oplus-services.jar" ]; }; then
+        IS_COLOROS17=1
+    fi
+    if [ -n "$ALV" ] && [ "$IS_COLOROS17" = 1 ]; then
         # A previous return can leave an empty property name behind. Treat an
         # empty host/guest value as missing, while recording any host override.
         if grep -qxF "$AL" "$HOST"; then
             hv=$(getprop "$AL")
-            if [ -z "$hv" ] && "$RP" -n "$AL" "$ALV"; then
+            if [ -z "$hv" ] && { if command -v rp_set_mem >/dev/null 2>&1; then rp_set_mem "$AL" "$ALV"; else "$RP" -n "$AL" "$ALV"; fi; }; then
                 echo "$AL=$hv" >> "$OVR"
                 echo "guest_props: empty $AL overridden to $ALV for this ColorOS session"
             fi
@@ -248,14 +279,15 @@ add)
             echo "guest_props: $AL=$ALV for the session (ColorOS launcher material blur level)"
         fi
     fi
-    if grep -q '"image": "coloros17-findn6"' "$STAGE/.oneos_stage"; then
+    if [ "$IS_COLOROS17" = 1 ]; then
         # Framework animation/Gaussian tiers use 3 for high-end; COUI's
-        # separate anim_level above uses 1. Apply both before guest processes.
+        # separate anim_level above uses 1. Apply both before guest processes
+        # across all ColorOS 17 images (Find N6 and Find X9 Ultra alike).
         for kv in ro.launcher.blur.appLaunch=1 ro.oplus.animationlevel=3 ro.oplus.gaussianlevel=3; do
             key=${kv%%=*}; value=${kv#*=}
             if grep -qxF "$key" "$HOST"; then
                 hv=$(getprop "$key")
-                if [ "$hv" != "$value" ] && "$RP" -n "$key" "$value"; then echo "$key=$hv" >> "$OVR"; fi
+                if [ "$hv" != "$value" ] && { if command -v rp_set_mem >/dev/null 2>&1; then rp_set_mem "$key" "$value"; else "$RP" -n "$key" "$value"; fi; }; then echo "$key=$hv" >> "$OVR"; fi
             else
                 sed -i "/^$key=/d" "$NEW"
                 echo "$key=$value" >> "$NEW"
@@ -279,12 +311,12 @@ add)
     # ONEOS_GUEST_SF_POWER_TIMER=0 leaves it out, another number is that many ms.
     PT=ro.surface_flinger.set_display_power_timer_ms; PTV=${ONEOS_GUEST_SF_POWER_TIMER:-1000}
     case "$PTV" in [1-9]|[1-9][0-9]|[1-9][0-9][0-9]|[1-9][0-9][0-9][0-9]) ;; *) PTV="" ;; esac
-    if [ -n "$PTV" ] && grep -q '"image": "coloros17-findn6"' "$STAGE/.oneos_stage"; then
+    if [ -n "$PTV" ] && [ "$IS_COLOROS17" = 1 ]; then
         if grep -qxF "$PT" "$HOST"; then
             hv=$(getprop "$PT")
             case "$hv" in
                 [1-9]*) echo "guest_props: $PT is One UI's $hv, kept" ;;
-                *) if "$RP" -n "$PT" "$PTV"; then
+                *) if { if command -v rp_set_mem >/dev/null 2>&1; then rp_set_mem "$PT" "$PTV"; else "$RP" -n "$PT" "$PTV"; fi; }; then
                        echo "$PT=$hv" >> "$OVR"
                        echo "guest_props: $PT overridden to $PTV for this ColorOS session"
                    fi ;;
@@ -324,7 +356,7 @@ add)
     if [ ! -e /sys/class/kgsl/kgsl-3d0/gpu_model ] && [ "${ONEOS_GUEST_RE_RETRY:-0}" != 1 ]; then
         if grep -qxF "$RR" "$HOST"; then
             hv=$(getprop "$RR")
-            case "$hv" in 1|true) "$RP" -n "$RR" 0 && echo "$RR=$hv" >> "$OVR" &&
+            case "$hv" in 1|true) { if command -v rp_set_mem >/dev/null 2>&1; then rp_set_mem "$RR" 0; else "$RP" -n "$RR" 0; fi; } && echo "$RR=$hv" >> "$OVR" &&
                 echo "guest_props: $RR=$hv overridden to 0 for the session (no Adreno: SkiaGL would wait for kgsl forever)" ;; esac
         # 0.4.85: -E. This was a basic expression with "\|", which the phone's grep does not take
         # as "or" (see oneos_switch.sh), so the image's value was never rewritten here: 0 of 625
@@ -377,7 +409,7 @@ add)
                             case "$rrv" in
                                 0|false) ;;
                                 *)  if grep -qxF "$RR" "$HOST"; then
-                                        "$RP" -n "$RR" 0 && echo "$RR=$rrv" >> "$OVR" ||
+                                        { if command -v rp_set_mem >/dev/null 2>&1; then rp_set_mem "$RR" 0; else "$RP" -n "$RR" 0; fi; } && echo "$RR=$rrv" >> "$OVR" ||
                                             rrs="!!! $RR could not be set to 0 (One UI holds '$rrv'): SkiaGL may wait for kgsl"
                                     else
                                         sed -i "/^persist\.sys\.renderengine\.retry=/d" "$NEW"
@@ -396,7 +428,7 @@ add)
     if [ -n "$REV" ]; then
         if grep -qxF "$RE" "$HOST"; then
             hv=$(getprop "$RE")
-            if "$RP" -n "$RE" "$REV"; then
+            if { if command -v rp_set_mem >/dev/null 2>&1; then rp_set_mem "$RE" "$REV"; else "$RP" -n "$RE" "$REV"; fi; }; then
                 echo "$RE=$hv" >> "$OVR"
                 echo "guest_props: $RE $hv -> $REV for this session (Vulkan RenderEngine)"
             fi
@@ -442,7 +474,7 @@ add)
             *,sec_*)
                 nuv=$(getprop sys.usb.config)
                 case ",$nuv," in ""|*,sec_*|,,) nuv=adb ;; esac
-                if grep -qxF "$UCK" "$HOST" && "$RP" -n "$UCK" "$nuv" 2>/dev/null; then
+                if grep -qxF "$UCK" "$HOST" && rp_set_mem "$UCK" "$nuv"; then
                     echo "$UCK=$huv" >> "$OVR"
                     echo "guest_props: $UCK=$huv overridden to $nuv for the session (AOSP's UsbManager rejects sec_charging)"
                 fi
@@ -485,11 +517,11 @@ add)
                  persist.sys.recopy.preload.opinstalled; do
             hv=$(getprop "$k")
             [ -n "$hv" ] || continue
-            if "$RP" -n "$k" "" 2>/dev/null && [ -z "$(getprop "$k")" ]; then
+            if { if command -v rp_set_mem >/dev/null 2>&1; then rp_set_mem "$k" ""; else "$RP" -n "$k" "" 2>/dev/null && [ -z "$(getprop "$k")" ]; fi; }; then
                 echo "$k=$hv" >> "$OVR"; out="$out $k"
             fi
         done
-        if [ -n "$(getprop sys.oplus.bootupgrade)" ] && "$RP" -n sys.oplus.bootupgrade "" 2>/dev/null; then
+        if [ -n "$(getprop sys.oplus.bootupgrade)" ] && { if command -v rp_set_mem >/dev/null 2>&1; then rp_set_mem sys.oplus.bootupgrade ""; else "$RP" -n sys.oplus.bootupgrade "" 2>/dev/null && [ -z "$(getprop sys.oplus.bootupgrade)" ]; fi; }; then
             out="$out sys.oplus.bootupgrade"
         fi
         [ -z "$out" ] || echo "guest_props: ColorOS's last-boot records from an earlier session blanked for the session:$out"
@@ -516,7 +548,7 @@ add)
         k=persist.bluetooth.a2dp_offload.disabled
         if grep -qxF "$k" "$HOST"; then
             hv=$(getprop "$k")
-            if [ "$hv" != true ] && "$RP" -n "$k" true 2>/dev/null; then
+            if [ "$hv" != true ] && { if command -v rp_set_mem >/dev/null 2>&1; then rp_set_mem "$k" true; else "$RP" -n "$k" true 2>/dev/null; fi; }; then
                 echo "$k=$hv" >> "$OVR"
                 echo "guest_props: $k=$hv overridden to true for the session (A2DP through the vendor's Bluetooth module, as One UI)"
             fi
@@ -555,7 +587,7 @@ add)
         for k in persist.bluetooth.leaudio_offload.disabled; do
             if grep -qxF "$k" "$HOST"; then
                 hv=$(getprop "$k")
-                if [ "$hv" != true ] && "$RP" -n "$k" true 2>/dev/null; then
+                if [ "$hv" != true ] && { if command -v rp_set_mem >/dev/null 2>&1; then rp_set_mem "$k" true; else "$RP" -n "$k" true 2>/dev/null; fi; }; then
                     echo "$k=$hv" >> "$OVR"
                     echo "guest_props: $k=$hv overridden to true for the session (LE Audio encoded by the guest)"
                 fi
@@ -639,7 +671,7 @@ add)
             drop_new "$k" && out="$out $k(guest)"
             grep -qxF "$k" "$HOST" || continue
             hv=$(getprop "$k")
-            if [ "$hv" != false ] && "$RP" -n "$k" false 2>/dev/null; then
+            if [ "$hv" != false ] && rp_set_mem "$k" false; then
                 echo "$k=$hv" >> "$OVR"
                 out="$out $k"
             fi
@@ -688,7 +720,7 @@ add)
         if [ -n "$why" ]; then
             if grep -qxF "$BTO" "$HOST"; then
                 hv=$(getprop "$BTO")
-                if [ "$hv" != true ] && "$RP" -n "$BTO" true 2>/dev/null; then
+                if [ "$hv" != true ] && { if command -v rp_set_mem >/dev/null 2>&1; then rp_set_mem "$BTO" true; else "$RP" -n "$BTO" true 2>/dev/null; fi; }; then
                     echo "$BTO=$hv" >> "$OVR"
                     echo "guest_props: $BTO=$hv overridden to true for the session ($why)"
                 fi
@@ -966,7 +998,7 @@ add)
             hv=$(getprop "$key")
             if [ "$hv" = 0 ]; then
                 echo "guest_props: $key=0 already (One UI's), no first-boot clock reset"
-            elif "$RP" -n "$key" 0 2>/dev/null; then
+            elif rp_set_mem "$key" 0; then
                 echo "$key=$hv" >> "$OVR"
                 echo "guest_props: $key=$hv overridden to 0 for the session (no first-boot clock reset to 1 January)"
             fi
@@ -1088,7 +1120,7 @@ add)
     IGC_DEF=0; [ -f "$ROOTFS/system/framework/vivo-services.jar" ] && IGC_DEF=1
     if [ "${ONEOS_GUEST_IMAGE_GC:-$IGC_DEF}" = 1 ] && [ -n "$UIV" ] && grep -qxF "$UK" "$HOST"; then
         UHV=$(getprop "$UK")
-        if [ "$UHV" != "$UIV" ] && "$RP" -n "$UK" "$UIV" 2>/dev/null; then
+        if [ "$UHV" != "$UIV" ] && rp_set_mem "$UK" "$UIV"; then
             echo "$UK=$UHV" >> "$OVR"
             echo "guest_props: $UK=$UHV overridden to $UIV for the session (the collector the image's boot image is built for)"
         fi
@@ -1150,7 +1182,7 @@ add)
             vrs="$VRM=false for the session"
             if grep -qxF "$VRM" "$HOST"; then
                 vrh=$(getprop "$VRM")
-                "$RP" -n "$VRM" false && echo "$VRM=$vrh" >> "$OVR" ||
+                { if command -v rp_set_mem >/dev/null 2>&1; then rp_set_mem "$VRM" false; else "$RP" -n "$VRM" false; fi; } && echo "$VRM=$vrh" >> "$OVR" ||
                     vrs="!!! $VRM could not be set to false (One UI holds '$vrh')"
             else
                 sed -i '/^persist\.sys\.vivo\.refresh_rate_manager=/d' "$NEW"
@@ -1237,8 +1269,10 @@ add)
             if grep -qxF "$key" "$HOST"; then
                 hv=$(getprop "$key")
                 [ "$hv" = "$value" ] && continue
-                echo "$key=$hv" >> "$OVR" && "$RP" -n "$key" "$value" 2>/dev/null &&
+                if rp_set_mem "$key" "$value"; then
+                    echo "$key=$hv" >> "$OVR"
                     echo "guest_props: $key=$value for the session (One UI: ${hv:-empty})"
+                fi
             else
                 drop_new "$key"
                 echo "$key=$value" >> "$NEW"
@@ -1282,15 +1316,40 @@ add)
         done
     fi
     echo "guest_props add: batch $(date +%T)"
-    if "$RP" -n -f "$NEW" 2>/dev/null; then
-        cut -d= -f1 "$NEW" > "$ADDED"
+    # Probe marker so a single post-batch getprop snapshot can prove whether
+    # resetprop -n -f actually mutated the live bionic property arena.
+    echo "oneos.props.batch_probe=$BOOT_ID" >> "$NEW"
+    RP_BATCH_ERR=$("$RP" -n -f "$NEW" 2>&1)
+    RP_BATCH_RC=$?
+    VERIFY_NOW="$STAGE/guest_props.verify"
+    getprop > "$VERIFY_NOW"
+    if [ "$RP_BATCH_RC" = 0 ] && grep -qxF "[oneos.props.batch_probe]: [$BOOT_ID]" "$VERIFY_NOW"; then
+        awk -F= '$1 != "" && $1 != "oneos.props.batch_probe" { print $1 }' "$NEW" > "$ADDED"
+        "$RP" --delete oneos.props.batch_probe 2>/dev/null || "$RP" -n oneos.props.batch_probe "" 2>/dev/null || true
     else
-        # Older resetprop without -f: fall back to one call per prop.
+        # Diagnostics for silent resetprop -n no-op or missing -f support:
+        # record stderr, exit code, /dev/__properties__ mount + inode state, and
+        # whether pid 1 holds unlinked /dev/__properties__ mappings.
+        pa_diag=$(awk '$5 ~ /^\/dev(\/__properties__)?$/ { printf "%s:%s ", $5, $3 }' /proc/self/mountinfo 2>/dev/null)
+        p1_del=$(grep -c '/dev/__properties__/.*(deleted)' /proc/1/maps 2>/dev/null || echo 0)
+        pa_ino=$(ls -li /dev/__properties__/properties_serial /dev/__properties__/u:object_r:system_prop:s0 /dev/__properties__/u:object_r:default_prop:s0 2>/dev/null | awk '{printf "%s=%s(%s) ", $NF, $1, $6}')
+        echo "guest_props: WARNING: batch resetprop -n -f did not land in getprop (rc=$RP_BATCH_RC err='${RP_BATCH_ERR:-none}' store_isolated=$(prop_store_isolated && echo 1 || echo 0) p1_deleted_maps=$p1_del mounts='${pa_diag:-none}' inodes='${pa_ino:-none}'); falling back per property"
         : > "$ADDED"
+        miss_ro=0; miss_mut=0; fb_ok=0
         while IFS= read -r line; do
-            "$RP" -n "${line%%=*}" "${line#*=}" 2>/dev/null && echo "${line%%=*}" >> "$ADDED"
+            k=${line%%=*}; v=${line#*=}
+            [ -n "$k" ] && [ "$k" != "oneos.props.batch_probe" ] || continue
+            if rp_set_mem "$k" "$v"; then
+                echo "$k" >> "$ADDED"
+                fb_ok=$((fb_ok + 1))
+            else
+                case "$k" in ro.*) miss_ro=$((miss_ro + 1)) ;; *) miss_mut=$((miss_mut + 1)) ;; esac
+            fi
         done < "$NEW"
+        "$RP" --delete oneos.props.batch_probe 2>/dev/null || "$RP" -n oneos.props.batch_probe "" 2>/dev/null || true
+        echo "guest_props: per-property fallback set $fb_ok props (missed ro=$miss_ro mutable=$miss_mut)"
     fi
+    rm -f "$VERIFY_NOW"
     echo "guest_props add: batch done $(date +%T)"
     echo "guest_props: added $(wc -l < "$ADDED") props from the guest's build.prop files"
     rm -f "$HOST" "$NEW"
@@ -1308,8 +1367,10 @@ add)
                 "$GPR"/etc/build.prop "$ROOTFS"/my_*/build.prop "$ROOTFS"/mi_ext/etc/build.prop 2>/dev/null | sed -n "s/^$key=//p" | tail -n 1)
             h=$(getprop "$key")
             [ -n "$g" ] && [ -n "$h" ] && [ "$g" != "$h" ] || continue
-            echo "$key=$h" >> "$OVR" && "$RP" -n "$key" "$g" 2>/dev/null &&
+            if rp_set_mem "$key" "$g"; then
+                echo "$key=$h" >> "$OVR"
                 echo "guest_props: $key=$g for the session (One UI: $h)"
+            fi
         done
     fi
     # The audio HAL adapter's vendor extension. One UI sets
@@ -1329,8 +1390,10 @@ add)
             "$GPR"/etc/build.prop "$ROOTFS"/my_*/build.prop "$ROOTFS"/mi_ext/etc/build.prop 2>/dev/null | sed -n "s/^$key=//p" | tail -n 1)
         h=$(getprop "$key")
         [ -n "$g" ] && [ -n "$h" ] && [ "$g" != "$h" ] || continue
-        echo "$key=$h" >> "$OVR" && "$RP" -n "$key" "$g" 2>/dev/null &&
+        if rp_set_mem "$key" "$g"; then
+            echo "$key=$h" >> "$OVR"
             echo "guest_props: $key=$g for the session (One UI: $h)"
+        fi
     done
     # vivo OriginOS: vivo's apps tell a vivo phone from another maker's by
     # ro.product.system.manufacturer (Android R and later: isNoVivoPhone is true
@@ -1349,8 +1412,10 @@ add)
             g=$(sed -n "s/^$key=//p" "$ROOTFS/system/build.prop" 2>/dev/null | tail -n 1)
             h=$(getprop "$key")
             [ -n "$g" ] && [ -n "$h" ] && [ "$g" != "$h" ] || continue
-            echo "$key=$h" >> "$OVR" && "$RP" -n "$key" "$g" 2>/dev/null &&
+            if rp_set_mem "$key" "$g"; then
+                echo "$key=$h" >> "$OVR"
                 echo "guest_props: $key=$g for the session (One UI: $h; vivo's apps run as a vivo phone's)"
+            fi
         done
     fi
     # A 64-bit guest on a phone with 32-bit ABIs (Galaxy S23: zygote64_32,
@@ -1374,8 +1439,10 @@ add)
             fi
             h=$(getprop "$key")
             [ "$g" != "$h" ] || continue
-            echo "$key=$h" >> "$OVR" && "$RP" -n "$key" "$g" 2>/dev/null &&
+            if rp_set_mem "$key" "$g"; then
+                echo "$key=$h" >> "$OVR"
                 echo "guest_props: $key='$g' for the session (One UI: $h; the guest has no 32-bit zygote)"
+            fi
         done
     fi
     # A Qualcomm-built guest on an Exynos phone (Galaxy S26+, 4cad07e6, 0.4.19).
@@ -1393,8 +1460,10 @@ add)
         h=$(getprop ro.boot.hardware)
         case "$h" in
             qcom*) ;;
-            *) echo "ro.boot.hardware=$h" >> "$OVR" && "$RP" -n ro.boot.hardware qcom 2>/dev/null &&
-                   echo "guest_props: ro.boot.hardware=qcom for the session (One UI: $h; the guest's zygote then preloads its Qualcomm perf library)" ;;
+            *) if rp_set_mem ro.boot.hardware qcom; then
+                   echo "ro.boot.hardware=$h" >> "$OVR"
+                   echo "guest_props: ro.boot.hardware=qcom for the session (One UI: $h; the guest's zygote then preloads its Qualcomm perf library)"
+               fi ;;
         esac
     fi
     # The platform's minor SDK version (Build.VERSION.SDK_INT_FULL, read from
@@ -1416,8 +1485,10 @@ add)
         ""|*[!0-9.]*|.*|*.|*.*.*) ;;
         *)
             if [ -n "$h" ] && [ "$g" != "$h" ] && [ "${g%%.*}" = "$(getprop ro.build.version.sdk)" ]; then
-                echo "$key=$h" >> "$OVR" && "$RP" -n "$key" "$g" 2>/dev/null &&
+                if rp_set_mem "$key" "$g"; then
+                    echo "$key=$h" >> "$OVR"
                     echo "guest_props: $key=$g for the session (One UI: $h; the guest framework has no $h APIs)"
+                fi
             fi ;;
     esac
     # No isolated compilation from the guest. SystemServer starts
@@ -1428,8 +1499,10 @@ add)
     key=ro.config.isolated_compilation_enabled
     h=$(getprop "$key")
     if [ "$h" = true ]; then
-        echo "$key=$h" >> "$OVR" && "$RP" -n "$key" false 2>/dev/null &&
+        if rp_set_mem "$key" false; then
+            echo "$key=$h" >> "$OVR"
             echo "guest_props: $key=false for the session (the guest never drives One UI's composd)"
+        fi
     fi
     ;;
 remove)
@@ -1437,7 +1510,7 @@ remove)
     # extension, isolated compilation).
     if [ -f "$OVR" ]; then
         while IFS= read -r line; do
-            "$RP" -n "${line%%=*}" "${line#*=}" 2>/dev/null && echo "guest_props: restored host ${line%%=*}=${line#*=}"
+            rp_set_mem "${line%%=*}" "${line#*=}" && echo "guest_props: restored host ${line%%=*}=${line#*=}"
         done < "$OVR"
         rm -f "$OVR"
     fi
