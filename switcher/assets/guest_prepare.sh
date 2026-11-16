@@ -4515,20 +4515,55 @@ rm -rf "$STAGE/data/misc/profiles/ref/0" 2>/dev/null
 [ -n "$CUR_RAW_ID" ] && printf '%s\n' "$CUR_RAW_ID" > "$PROF_STAMP" 2>/dev/null
 prof_made=0
 if [ -f "$STAGE/data/system/packages.list" ]; then
-    while read -r pkg auid rest; do
-        case "$pkg:$auid" in *[!A-Za-z0-9._:-]*|:*|*:) continue ;; esac
-        case "$auid" in ''|*[!0-9]*) continue ;; esac
-        cd_cur="$STAGE/data/misc/profiles/cur/0/$pkg"
-        cd_ref="$STAGE/data/misc/profiles/ref/$pkg"
-        if [ ! -d "$cd_cur" ]; then
-            mkdir -p "$cd_cur" 2>/dev/null && chown "$auid:$auid" "$cd_cur" 2>/dev/null && chmod 0700 "$cd_cur" 2>/dev/null && prof_made=$((prof_made + 1))
-        fi
-        if [ ! -d "$cd_ref" ]; then
-            mkdir -p "$cd_ref" 2>/dev/null && chown "$auid:1000" "$cd_ref" 2>/dev/null && chmod 0771 "$cd_ref" 2>/dev/null && prof_made=$((prof_made + 1))
-        fi
-    done < "$STAGE/data/system/packages.list"
+    # Speed: on S25 (8f5752ca89e7388d, 477 packages) a per-package shell loop
+    # spawned ~1,431 mkdir/chown/chmod processes and took 15 s (22:34:32 -> 22:34:47).
+    # List already-present profile dirs in two directory scans, compute only the
+    # missing dirs in one awk pass, batch mkdir + chmod via xargs, and apply chown
+    # only to the newly created dirs.
+    PROF_CUR_DIR="$STAGE/data/misc/profiles/cur/0"
+    PROF_REF_DIR="$STAGE/data/misc/profiles/ref"
+    "$BB" find "$PROF_CUR_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | "$BB" awk -F/ '{print "cur " $NF}' > "$STAGE/prof.have" ||
+        (cd "$PROF_CUR_DIR" 2>/dev/null && for d in *; do [ -d "$d" ] && printf 'cur %s\n' "$d"; done) > "$STAGE/prof.have"
+    "$BB" find "$PROF_REF_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | "$BB" awk -F/ '{print "ref " $NF}' >> "$STAGE/prof.have" ||
+        (cd "$PROF_REF_DIR" 2>/dev/null && for d in *; do [ -d "$d" ] && printf 'ref %s\n' "$d"; done) >> "$STAGE/prof.have"
+    "$BB" awk -v cur="$PROF_CUR_DIR" -v ref="$PROF_REF_DIR" \
+        -v fc="$STAGE/prof.mk.cur" -v fr="$STAGE/prof.mk.ref" -v fo="$STAGE/prof.chown.sh" '
+        NR == FNR { have[$1 ":" $2] = 1; next }
+        NF >= 2 && $1 ~ /^[A-Za-z0-9._:-]+$/ && $2 ~ /^[0-9]+$/ {
+            p = $1; u = $2
+            if (!(("cur:" p) in have)) {
+                print cur "/" p > fc
+                cur_by_uid[u] = cur_by_uid[u] " " cur "/" p
+                made++
+            }
+            if (!(("ref:" p) in have)) {
+                print ref "/" p > fr
+                ref_by_uid[u] = ref_by_uid[u] " " ref "/" p
+                made++
+            }
+        }
+        END {
+            for (u in cur_by_uid) print "chown " u ":" u cur_by_uid[u] " 2>/dev/null" > fo
+            for (u in ref_by_uid) print "chown " u ":1000" ref_by_uid[u] " 2>/dev/null" > fo
+            print made + 0
+        }
+    ' "$STAGE/prof.have" "$STAGE/data/system/packages.list" > "$STAGE/prof.count"
+    prof_made=$(cat "$STAGE/prof.count" 2>/dev/null)
+    prof_made=${prof_made:-0}
+    if [ -s "$STAGE/prof.mk.cur" ]; then
+        "$BB" xargs -r mkdir -p < "$STAGE/prof.mk.cur" 2>/dev/null || while IFS= read -r d; do mkdir -p "$d" 2>/dev/null; done < "$STAGE/prof.mk.cur"
+        "$BB" xargs -r chmod 0700 < "$STAGE/prof.mk.cur" 2>/dev/null || while IFS= read -r d; do chmod 0700 "$d" 2>/dev/null; done < "$STAGE/prof.mk.cur"
+    fi
+    if [ -s "$STAGE/prof.mk.ref" ]; then
+        "$BB" xargs -r mkdir -p < "$STAGE/prof.mk.ref" 2>/dev/null || while IFS= read -r d; do mkdir -p "$d" 2>/dev/null; done < "$STAGE/prof.mk.ref"
+        "$BB" xargs -r chmod 0771 < "$STAGE/prof.mk.ref" 2>/dev/null || while IFS= read -r d; do chmod 0771 "$d" 2>/dev/null; done < "$STAGE/prof.mk.ref"
+    fi
+    if [ -s "$STAGE/prof.chown.sh" ]; then
+        sh "$STAGE/prof.chown.sh" 2>/dev/null || true
+    fi
+    rm -f "$STAGE/prof.have" "$STAGE/prof.mk.cur" "$STAGE/prof.mk.ref" "$STAGE/prof.chown.sh" "$STAGE/prof.count"
 fi
-[ "$prof_made" -gt 0 ] && echo "ART profile dirs pre-created before Zygote: $prof_made"
+[ "$prof_made" -gt 0 ] && echo "ART profile dirs pre-created before Zygote: $prof_made" || true
 echo "=== 5.10 $(date +%T) realign ==="
 
 # Create the bluetooth stack's storage before the guest ever starts. The GSI's
