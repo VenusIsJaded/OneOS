@@ -802,6 +802,16 @@ if [ -x /data/adb/ksud ] && [ "${ONEOS_GUEST_KSU_MANAGER:-0}" = 1 ]; then
         u=$(awk -v p="$p" '$1 == p { print $2 }' /data/system/packages.list 2>/dev/null)
         [ -n "$u" ] && { KSU_PKG=$p KSU_ID=$u; break; }
     done
+    # Also match package-name-spoofed KernelSU / KernelSU Next managers by their
+    # bundled libksud.so in /data/app (uid < 15000 on One UI).
+    if [ -z "$KSU_PKG" ]; then
+        for lk in /data/app/~~*/*/lib/*/libksud.so /data/app/*/lib/*/libksud.so; do
+            [ -f "$lk" ] || continue
+            d=${lk%/lib/*}; bn=${d##*/}; sp=${bn%-*}
+            u=$(awk -v p="$sp" '$1 == p && $2 + 0 >= 10000 && $2 + 0 < 15000 { print $2; exit }' /data/system/packages.list 2>/dev/null)
+            [ -n "$u" ] && { KSU_PKG=$sp KSU_ID=$u; break; }
+        done
+    fi
     KSU_APK=$(timeout 10 pm path "$KSU_PKG" 2>/dev/null | sed -n 's/^package://p' | grep '/base\.apk$' | head -n 1)
     case "$KSU_ID" in
         1[0-4][0-9][0-9][0-9]) ;;
@@ -916,11 +926,14 @@ if [ "${ONEOS_LOGCAT:-1}" = 1 ]; then
         SW_TAGS="AndroidRuntime:E DEBUG:F Telecom:I Telecom_INCOMING_RINGING:V Ringtone:V RingtoneManager:V \
             VibratorManagerService:V VibratorManagerServiceExtImpl:V VibrationThread:V VibrationScaler:V \
             SecVibrator-HAL-AIDL-CORE:V AHAL_StreamOut_QTI:D EffectOffloadImpl:V AHAL_EffectFactoryQti:V \
-            AHAL_DlbSpatializerEffectImpl:V DlbDap2Process:V"
+            AHAL_DlbSpatializerEffectImpl:V DlbDap2Process:V AHAL_DlbEffectContext:V DlbEffectContext:V \
+            DlbProfileParamCache:V EffectMySpaceImpl:V EffectMySpaceContext:V AudioPolicyEffects:V AudioFlingerExtImpl:V"
     else
         SW_TAGS="AndroidRuntime:E DEBUG:F Telecom:I Ringtone:W RingtoneManager:W \
             VibratorManagerService:W SecVibrator-HAL-AIDL-CORE:F AHAL_StreamOut_QTI:W \
-            EffectOffloadImpl:W AHAL_EffectFactoryQti:W AHAL_DlbSpatializerEffectImpl:W DlbDap2Process:W"
+            EffectOffloadImpl:W AHAL_EffectFactoryQti:W AHAL_DlbSpatializerEffectImpl:W DlbDap2Process:I \
+            AHAL_DlbEffectContext:D DlbEffectContext:D DlbProfileParamCache:D EffectMySpaceContext:I \
+            AudioPolicyEffects:D AudioFlingerExtImpl:D"
     fi
     $BB setsid $BB timeout 7200 logcat -b main,system,crash -v threadtime -T "$(date +%s).000" -f "$STAGE/sound_watch.log" -r 2048 -n 1 -s \
         $SW_TAGS \
@@ -929,6 +942,24 @@ if [ "${ONEOS_LOGCAT:-1}" = 1 ]; then
         BTAudioProviderStub_2_1:I BTAudioProviderA2dpSoftware:W </dev/null >/dev/null 2>&1 &
     echo $! > "$STAGE/sound_watch.pid"
     echo "Sound watch: $STAGE/sound_watch.log"
+
+    # Rotation-proof display wake & sleep watch ($STAGE/display_wake.log, 1 MiB cap).
+    # Captures exact screen sleep/wake transitions, composer/HWC power modes, doze
+    # states, and panoramic AOD transitions across the entire session even when
+    # boot.log rotates out early wake events.
+    dwp=$(cat "$STAGE/display_wake.pid" 2>/dev/null)
+    case "$dwp" in
+        ""|*[!0-9]*) ;;
+        *) tr '\0' ' ' < "/proc/$dwp/cmdline" 2>/dev/null | grep -q "display_wake.log" && { kill -TERM -- -"$dwp" 2>/dev/null; kill "$dwp" 2>/dev/null; } ;;
+    esac
+    pkill -f "^logcat .*$STAGE/display_wake.log" 2>/dev/null || true
+    [ -f "$STAGE/display_wake.log" ] && mv -f "$STAGE/display_wake.log" "$STAGE/display_wake.prev"
+    $BB setsid $BB timeout 7200 logcat -b main,system,events -v threadtime -T "$(date +%s).000" -f "$STAGE/display_wake.log" -r 1024 -n 1 -s \
+        power_screen_state:I PowerManagerService:I DisplayPowerController:I DisplayPowerController2:I \
+        LocalDisplayAdapter:I DisplayDeviceRepository:I HWComposer:I SDM:W DrmDisplay:I \
+        KeyguardViewMediator:I DozeService:I DozeMachine:I OplusDozeService:I PanoramicAod:D </dev/null >/dev/null 2>&1 &
+    echo $! > "$STAGE/display_wake.pid"
+    echo "Display wake watch: $STAGE/display_wake.log"
 fi
 # Play Store and Google sign-in watch: no longer live. Test builds 3 to 6 ran
 # a logcat -e watch here (store_watch.log); its regex runs on every line of the
@@ -1896,19 +1927,61 @@ if [ "${ONEOS_GUEST_AUDIO:-1}" = "1" ]; then
     # before restarting the HAL; return_to_oneui.sh unmounts it before Gate A.
     rm -f "$STAGE/host_fx_binds" "$STAGE"/oneos_hfx_* 2>/dev/null || true
     if [ "${ONEOS_GUEST_STRIP_MYSPACE:-1}" = "1" ]; then
+        # Resolve effect/effectProxy names in Samsung's audio_effects_config_sec.xml
+        # (and SKU audio_effects.xml files) by UUID as well as by literal name:
+        # Samsung's SEC config maps MySpace / SoundAlive_3DPosisiton_Factory to UUIDs
+        # c7a84e61-eebe-4fcc-bc53-efcb841b4625 (offload), 3462a6e0-655a-11e4-8b67-0002a5d5c51b
+        # (SW MySpace Library), and type b6c0ace0-..., under SEC-specific effect names
+        # that a literal effect="myspace" check missed.
+        strip_host_fx_xml() {
+            awk '
+                BEGIN { IGNORECASE = 1; bad["myspace"] = 1; bad["music_helper"] = 1; bad["sa3d"] = 1 }
+                /<effectProxy[ \t>]/ {
+                    if (match($0, /name="[^"]+"/)) px = substr($0, RSTART + 6, RLENGTH - 7)
+                    else px = ""
+                }
+                /<\/effectProxy>/ { px = "" }
+                /(c7a84e61-eebe-4fcc-bc53-efcb841b4625|3462a6e0-655a-11e4-8b67-0002a5d5c51b|b6c0ace0-|libmyspace|myspace)/ {
+                    if (px != "") bad[tolower(px)] = 1
+                    if (match($0, /name="[^"]+"/)) {
+                        nm = substr($0, RSTART + 6, RLENGTH - 7)
+                        bad[tolower(nm)] = 1
+                    }
+                }
+                END {
+                    for (k in bad) printf "%s|", k
+                }
+            ' "$1" 2>/dev/null
+        }
         hfx_i=0
-        for hfx in /vendor/etc/audio_effects_config_sec.xml /vendor/etc/audio_effects.xml /vendor/etc/audio/sku_sun/audio_effects.xml /vendor/etc/audio/sku_pineapple/audio_effects.xml /vendor/etc/audio/sku_kalama/audio_effects.xml; do
+        for hfx in /vendor/etc/audio_effects_config_sec.xml /vendor/etc/audio_effects.xml \
+                   /vendor/etc/audio/sku_"$(getprop ro.boot.product.vendor.sku)"/audio_effects.xml \
+                   /vendor/etc/audio/sku_sun/audio_effects.xml /vendor/etc/audio/sku_pineapple/audio_effects.xml \
+                   /vendor/etc/audio/sku_kalama/audio_effects.xml /odm/etc/audio_effects.xml; do
             [ -f "$hfx" ] && [ ! -L "$hfx" ] || continue
-            grep -qE 'effect="(myspace|music_helper)"' "$hfx" 2>/dev/null || continue
+            case " $HFX_SEEN " in *" $hfx "*) continue ;; esac
+            HFX_SEEN="${HFX_SEEN:-} $hfx"
+            bad_pat=$(strip_host_fx_xml "$hfx")
+            bad_pat=${bad_pat%|}
+            [ -n "$bad_pat" ] || continue
             hfx_dst="$STAGE/oneos_hfx_${hfx_i}.xml"
-            sed '/<postprocess>/,/<\/postprocess>/{ /effect="myspace"/d; /effect="music_helper"/d; }' "$hfx" > "$hfx_dst" 2>/dev/null || { rm -f "$hfx_dst"; continue; }
+            awk -v pat="^($bad_pat)$" '
+                /<postprocess>/ { inp = 1 }
+                /<\/postprocess>/ { inp = 0 }
+                inp && /<apply[ \t]/ && match($0, /effect="[^"]+"/) {
+                    ef = tolower(substr($0, RSTART + 8, RLENGTH - 9))
+                    if (ef ~ pat) { stripped++; next }
+                }
+                { print }
+                END { if (stripped + 0 == 0) exit 4 }
+            ' "$hfx" > "$hfx_dst" 2>/dev/null || { rm -f "$hfx_dst"; continue; }
             [ -s "$hfx_dst" ] || { rm -f "$hfx_dst"; continue; }
             chmod 0644 "$hfx_dst"
             chcon --reference="$hfx" "$hfx_dst" 2>/dev/null || chcon u:object_r:vendor_configs_file:s0 "$hfx_dst" 2>/dev/null || true
             if "$BB" mount --bind "$hfx_dst" "$hfx" 2>/dev/null; then
-                "$BB" mount -o remount,ro,bind "$hfx" 2>/dev/null || true
+                "$BB" mount -o remount,ro,bind "$hfx_dst" "$hfx" 2>/dev/null || "$BB" mount -o remount,ro,bind "$hfx" 2>/dev/null || true
                 echo "$hfx" >> "$STAGE/host_fx_binds"
-                echo "Audio: stripped unconfigured myspace/music_helper postprocess in host $hfx"
+                echo "Audio: stripped unconfigured MySpace/music_helper postprocess ($bad_pat) in host $hfx"
                 hfx_i=$((hfx_i + 1))
             else
                 rm -f "$hfx_dst"
@@ -2488,6 +2561,26 @@ while true; do
                             echo "[UI Activator] KernelSU manager: \$KP (app id \$KC) removed from the guest; its late load would run One UI's KernelSU boot and modules here (off for this session)" ;;
                     esac
                 done
+                # Also wrap any package-name-spoofed KernelSU / KernelSU Next manager
+                # installed inside the guest (identified by bundled lib/arm64/libksud.so)
+                # so its root shell/WebUI uses OneOS's guest ksud wrapper instead of
+                # entering One UI's host PID 1 mount namespace (global_mnt: true).
+                if [ -f $STAGE/data/oneos_ksu/ksud ]; then
+                    for GK in $STAGE/data/app/~~*/*/lib/arm64/libksud.so $STAGE/data/app/*/lib/arm64/libksud.so; do
+                        [ -f "\$GK" ] && [ ! -L "\$GK" ] || continue
+                        gd=\${GK%/lib/arm64/libksud.so}; gbn=\${gd##*/}; gpkg=\${gbn%-*}
+                        if ! cmp -s $STAGE/data/oneos_ksu/ksud "\$GK" 2>/dev/null; then
+                            cp -f $STAGE/data/oneos_ksu/ksud "\$GK" 2>/dev/null && chmod 755 "\$GK" 2>/dev/null &&
+                                echo "[UI Activator] KernelSU manager (spoofed package \$gpkg): wrapped bundled libksud.so so WebUI/su stays in the guest namespace"
+                        fi
+                    done
+                else
+                    for GK in $STAGE/data/app/~~*/*/lib/arm64/libksud.so $STAGE/data/app/*/lib/arm64/libksud.so; do
+                        [ -f "\$GK" ] || continue
+                        gd=\${GK%/lib/arm64/libksud.so}; gbn=\${gd##*/}; gpkg=\${gbn%-*}
+                        echo "[UI Activator] KernelSU manager (spoofed package \$gpkg): detected bundled libksud.so in guest (Guest Root uses OneOS NeoZygisk; host ZygiskNext/global_mnt modules cannot run in the guest)"
+                    done
+                fi
             fi
             if [ -f $STAGE/data/oneos_ksu/manager ] && [ -f $STAGE/data/oneos_ksu/manager.apk ]; then
                 read KP KU < $STAGE/data/oneos_ksu/manager

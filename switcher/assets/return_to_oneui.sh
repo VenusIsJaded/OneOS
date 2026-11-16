@@ -145,6 +145,7 @@ if [ -d "$LOGS" ] && [ ! -L "$LOGS" ]; then
         rm -f "$LOGS/$f" 2>/dev/null
         cp "$S/data/$f" "$LOGS/$f" 2>/dev/null
     done
+    [ -f "$S/display_wake.log" ] && [ ! -L "$S/display_wake.log" ] && cp -f "$S/display_wake.log" "$LOGS/display_wake.log" 2>/dev/null
 fi
 
 # Bluetooth and audio as the guest has them at the end, also before anything
@@ -197,6 +198,8 @@ if [ -n "$BB" ] && [ -n "$gp" ] && [ ! -L "$DR" ] && rm -rf "$DR" 2>/dev/null &&
     p6=$!
     gd sensorservice | "$BB" grep -i -A 12 'hinge' > "$DR/sensor_hinge.txt" 2>&1 &
     p7=$!
+    gd media.audio_flinger > "$DR/dumpsys_media.audio_flinger.txt" 2>&1 &
+    p8=$!
     for t in /sys/class/sec/tsp*; do
         [ -r "$t/get_lp_dump" ] || continue
         echo "== $t (support_feature $(cat "$t/support_feature" 2>/dev/null))"
@@ -208,7 +211,7 @@ if [ -n "$BB" ] && [ -n "$gp" ] && [ ! -L "$DR" ] && rm -rf "$DR" 2>/dev/null &&
       done
       echo "audio HAL pid: $(timeout 3 dumpsys --pid android.hardware.audio.core.IModule/default 2>/dev/null | head -n 1)"
     } > "$DR/bt_props.txt" 2>&1
-    wait $p1 $p2 $p3 $p4 $p5 $p6 $p7 2>/dev/null
+    wait $p1 $p2 $p3 $p4 $p5 $p6 $p7 $p8 2>/dev/null
     echo "$(date +%T) Guest Bluetooth, audio and location at the return (pid $gp's namespace): $(ls "$DR" 2>/dev/null | tr '\n' ' ')in $DR"
 else
     why="no guest surfaceflinger or system_server"

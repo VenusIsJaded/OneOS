@@ -4144,18 +4144,27 @@ fi
 # ONEOS_GUEST_THEME_DIRS=0 leaves them alone.
 if [ "${ONEOS_GUEST_THEME_DIRS:-1}" = 1 ] && [ -e "$ROOTFS/system/framework/oplus-services.jar" ]; then
     made=0
+    set --
     for f in "$ROOTFS"/system/etc/init/*.rc "$GUEST_SYSTEM_EXT"/etc/init/*.rc; do
-        [ -f "$f" ] && [ ! -L "$f" ] && cat "$f"
-    done | awk '$1 == "mkdir" && $2 ~ /^\/data\/(theme|format_unclear(\/font)?|oplus\/(uxicons|uxres|language))\/?$/ { sub(/\/$/, "", $2); print $2, ($3 ~ /^[0-7]+$/ ? $3 : "0771"), ($4 == "root" ? 0 : 1000), ($5 == "root" ? 0 : 1000) }' |
-        sort -u -k1,1 > "$STAGE/coloros_data_dirs.txt"
+        [ -f "$f" ] && [ ! -L "$f" ] && set -- "$@" "$f"
+    done
+    if [ "$#" -gt 0 ]; then
+        awk '$1 == "mkdir" && $2 ~ /^\/data\/(theme|format_unclear(\/font)?|oplus\/(uxicons|uxres|language))\/?$/ {
+                 sub(/\/$/, "", $2)
+                 print $2, ($3 ~ /^[0-7]+$/ ? $3 : "0771"), ($4 == "root" ? 0 : 1000), ($5 == "root" ? 0 : 1000)
+             }' "$@" 2>/dev/null | sort -u -k1,1 > "$STAGE/coloros_data_dirs.txt"
+    else
+        : > "$STAGE/coloros_data_dirs.txt"
+    fi
     for p in /data/format_unclear /data/format_unclear/font; do
         grep -q "^$p " "$STAGE/coloros_data_dirs.txt" || echo "$p 0771 1000 1000" >> "$STAGE/coloros_data_dirs.txt"
     done
     while read -r p mode u g; do
-        q="$STAGE/data"; ok=1
-        for part in $(echo "${p#/data/}" | tr '/' ' '); do
+        q="$STAGE/data"; ok=1; o=$IFS; IFS=/; set -f
+        for part in ${p#/data/}; do
             q="$q/$part"; [ -L "$q" ] && { ok=0; break; }
         done
+        IFS=$o; set +f
         [ $ok = 1 ] || { echo "ColorOS /data folder $p: a link on the way, skipped"; continue; }
         d="$STAGE$p"
         if [ ! -d "$d" ]; then
@@ -4489,8 +4498,37 @@ if [ -f "$STAGE/data/system/packages.list" ]; then
     rm -f "$STAGE/realign.now" "$STAGE/realign.fix"
 fi
 echo "App data dirs realigned to their package uids: $realigned"
-# Profiles: installd recreates them with the owners it expects.
-rm -rf "$STAGE/data/misc/profiles/cur/0/"* "$STAGE/data/misc/profiles/ref/"* 2>/dev/null
+# Profiles: preserve existing ART JIT/AOT profiles across boots of the same image
+# (only wipe if system.raw changed since profiles were recorded), and pre-create
+# /data/misc/profiles/cur/0/<pkg> (auid:auid 0700) and /data/misc/profiles/ref/<pkg>
+# (auid:1000 0771, no /0/ subdir — Android binds /data/misc/profiles/ref directly to
+# /data_mirror/ref_profiles/<pkg>) so Zygote and ART ProfileSaver find them immediately
+# at boot without ENOENT warnings.
+PROF_STAMP="$STAGE/data/misc/profiles/.oneos_raw_id"
+CUR_RAW_ID=$(cat "$STAGE/system.raw.id" 2>/dev/null)
+if [ -n "$CUR_RAW_ID" ] && [ -f "$PROF_STAMP" ] && [ "$(cat "$PROF_STAMP" 2>/dev/null)" != "$CUR_RAW_ID" ]; then
+    rm -rf "$STAGE/data/misc/profiles/cur/0/"* "$STAGE/data/misc/profiles/ref/"* 2>/dev/null
+    echo "ART profiles: cleared stale profiles from previous image"
+fi
+mkdir -p "$STAGE/data/misc/profiles/cur/0" "$STAGE/data/misc/profiles/ref" 2>/dev/null
+rm -rf "$STAGE/data/misc/profiles/ref/0" 2>/dev/null
+[ -n "$CUR_RAW_ID" ] && printf '%s\n' "$CUR_RAW_ID" > "$PROF_STAMP" 2>/dev/null
+prof_made=0
+if [ -f "$STAGE/data/system/packages.list" ]; then
+    while read -r pkg auid rest; do
+        case "$pkg:$auid" in *[!A-Za-z0-9._:-]*|:*|*:) continue ;; esac
+        case "$auid" in ''|*[!0-9]*) continue ;; esac
+        cd_cur="$STAGE/data/misc/profiles/cur/0/$pkg"
+        cd_ref="$STAGE/data/misc/profiles/ref/$pkg"
+        if [ ! -d "$cd_cur" ]; then
+            mkdir -p "$cd_cur" 2>/dev/null && chown "$auid:$auid" "$cd_cur" 2>/dev/null && chmod 0700 "$cd_cur" 2>/dev/null && prof_made=$((prof_made + 1))
+        fi
+        if [ ! -d "$cd_ref" ]; then
+            mkdir -p "$cd_ref" 2>/dev/null && chown "$auid:1000" "$cd_ref" 2>/dev/null && chmod 0771 "$cd_ref" 2>/dev/null && prof_made=$((prof_made + 1))
+        fi
+    done < "$STAGE/data/system/packages.list"
+fi
+[ "$prof_made" -gt 0 ] && echo "ART profile dirs pre-created before Zygote: $prof_made"
 echo "=== 5.10 $(date +%T) realign ==="
 
 # Create the bluetooth stack's storage before the guest ever starts. The GSI's
@@ -5018,12 +5056,13 @@ for d in app app-staging anr dalvik-cache incremental property resource-cache ro
     $BB chown system:system "$STAGE/data/$d" 2>/dev/null || true
     $BB chmod 0771 "$STAGE/data/$d" 2>/dev/null || true
 done
-mkdir -p "$STAGE/data/misc/profiles/cur/0" "$STAGE/data/misc/profiles/ref/0" 2>/dev/null || true
+mkdir -p "$STAGE/data/misc/profiles/cur/0" "$STAGE/data/misc/profiles/ref" 2>/dev/null || true
 $BB chown system:system "$STAGE/data/misc" "$STAGE/data/misc/profiles" 2>/dev/null || true
 for d in "$STAGE/data/misc/profiles/cur" "$STAGE/data/misc/profiles/ref" \
-         "$STAGE/data/misc/profiles/cur/0" "$STAGE/data/misc/profiles/ref/0"; do
-    [ -d "$d" ] && $BB chown system:system "$d" 2>/dev/null || true
+         "$STAGE/data/misc/profiles/cur/0"; do
+    [ -d "$d" ] && $BB chown system:system "$d" 2>/dev/null && $BB chmod 0771 "$d" 2>/dev/null || true
 done
+$BB chcon -h -R u:object_r:user_profile_data_file:s0 "$STAGE/data/misc/profiles" 2>/dev/null || true
 
 # Pixel guest only (an image with oplus-services.jar is ColorOS, unchanged).
 # After 5b and 5c, which relabel and re-own the staged trees every session.
@@ -5563,14 +5602,22 @@ for tok in $(pm list packages -U 2>/dev/null); do
             created=$((created + 1))
         fi
     done
-    for d in "/data/misc/profiles/cur/0/$pkg" "/data/misc/profiles/ref/0/$pkg"; do
-        [ -d "$d" ] && continue
-        if mkdir -p "$d" 2>/dev/null; then
-            chown "$uid:$uid" "$d" 2>/dev/null
-            chmod 0771 "$d" 2>/dev/null
+    if [ ! -d "/data/misc/profiles/cur/0/$pkg" ]; then
+        if mkdir -p "/data/misc/profiles/cur/0/$pkg" 2>/dev/null; then
+            chown "$uid:$uid" "/data/misc/profiles/cur/0/$pkg" 2>/dev/null
+            chmod 0700 "/data/misc/profiles/cur/0/$pkg" 2>/dev/null
+            chcon u:object_r:user_profile_data_file:s0 "/data/misc/profiles/cur/0/$pkg" 2>/dev/null
             profile_dirs=$((profile_dirs + 1))
         fi
-    done
+    fi
+    if [ ! -d "/data/misc/profiles/ref/$pkg" ]; then
+        if mkdir -p "/data/misc/profiles/ref/$pkg" 2>/dev/null; then
+            chown "$uid:1000" "/data/misc/profiles/ref/$pkg" 2>/dev/null
+            chmod 0771 "/data/misc/profiles/ref/$pkg" 2>/dev/null
+            chcon u:object_r:user_profile_data_file:s0 "/data/misc/profiles/ref/$pkg" 2>/dev/null
+            profile_dirs=$((profile_dirs + 1))
+        fi
+    fi
     pkg=""; uid=""
 done
 echo "[fix_app_dirs] created $created data dirs, $profile_dirs profile dirs"

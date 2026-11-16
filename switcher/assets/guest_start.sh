@@ -103,8 +103,9 @@ for ak in data media obb; do
     chmod 0777 "/data/media/0/Android/$ak" 2>/dev/null || true
 done
 $BB mount -t tmpfs tmpfs /storage 2>/dev/null || true
-mkdir -p /storage/emulated/0
+mkdir -p /storage/emulated/0 /storage/self
 $BB mount --bind /data/media/0 /storage/emulated/0 2>/dev/null || true
+ln -sfn /storage/emulated/0 /storage/self/primary 2>/dev/null || true
 mkdir -p /mnt/user/0
 $BB mount -t tmpfs tmpfs /mnt/user/0 2>/dev/null || true
 mkdir -p /mnt/user/0/emulated
@@ -1127,10 +1128,53 @@ if [ -f /data/guest_audio.flag ]; then
        [ -f /vendor/etc/audio_policy_configuration_base.xml ] && [ ! -e /vendor/etc/audio_policy_configuration.xml ]; then
         NEED_COLOROS_APM=1
     fi
+    # Resolve MySpace / music_helper effect names by UUID as well as literal name
+    # (Samsung's SEC config maps MySpace to c7a84e61-eebe-4fcc-bc53-efcb841b4625 /
+    # 3462a6e0-655a-11e4-8b67-0002a5d5c51b / type b6c0ace0-...).
+    fx_bad_names() {
+        awk '
+            BEGIN { IGNORECASE = 1; bad["myspace"] = 1; bad["music_helper"] = 1; bad["sa3d"] = 1 }
+            /<effectProxy[ \t>]/ {
+                if (match($0, /name="[^"]+"/)) px = substr($0, RSTART + 6, RLENGTH - 7)
+                else px = ""
+            }
+            /<\/effectProxy>/ { px = "" }
+            /(c7a84e61-eebe-4fcc-bc53-efcb841b4625|3462a6e0-655a-11e4-8b67-0002a5d5c51b|b6c0ace0-|libmyspace|myspace)/ {
+                if (px != "") bad[tolower(px)] = 1
+                if (match($0, /name="[^"]+"/)) {
+                    nm = substr($0, RSTART + 6, RLENGTH - 7)
+                    bad[tolower(nm)] = 1
+                }
+            }
+            END { for (k in bad) printf "%s|", k }
+        ' "$1" 2>/dev/null
+    }
+    fx_strip_postprocess() {
+        p_pat=$(fx_bad_names "$1"); p_pat=${p_pat%|}
+        [ -n "$p_pat" ] || return 1
+        awk -v pat="^($p_pat)$" '
+            /<postprocess>/ { inp = 1 }
+            /<\/postprocess>/ { inp = 0 }
+            inp && /<apply[ \t]/ && match($0, /effect="[^"]+"/) {
+                ef = tolower(substr($0, RSTART + 8, RLENGTH - 9))
+                if (ef ~ pat) { stripped++; next }
+            }
+            { print }
+            END { if (stripped + 0 == 0) exit 4 }
+        ' "$1" > "$2" 2>/dev/null
+    }
     NEED_FX_CLEAN=0
-    if [ "${ONEOS_GUEST_KEEP_MYSPACE:-0}" != 1 ] && [ -f /vendor/etc/audio_effects.xml ] && [ ! -L /vendor/etc/audio_effects.xml ] &&
-       grep -Eq '<apply[[:space:]]+effect="(myspace|music_helper)"' /vendor/etc/audio_effects.xml 2>/dev/null; then
-        NEED_FX_CLEAN=1
+    if [ "${ONEOS_GUEST_KEEP_MYSPACE:-0}" != 1 ] && [ -f /vendor/etc/audio_effects.xml ] && [ ! -L /vendor/etc/audio_effects.xml ]; then
+        p_pat=$(fx_bad_names /vendor/etc/audio_effects.xml); p_pat=${p_pat%|}
+        if [ -n "$p_pat" ] && awk -v pat="^($p_pat)$" '
+            /<postprocess>/ { inp = 1 }
+            /<\/postprocess>/ { inp = 0 }
+            inp && /<apply[ \t]/ && match($0, /effect="[^"]+"/) {
+                if (tolower(substr($0, RSTART + 8, RLENGTH - 9)) ~ pat) f = 1
+            }
+            END { exit !f }' /vendor/etc/audio_effects.xml 2>/dev/null; then
+            NEED_FX_CLEAN=1
+        fi
     fi
     if [ "$NEED_COLOROS_APM" = 1 ] || [ "$NEED_FX_CLEAN" = 1 ]; then
         AOV=/data/oneos_audio_policy
@@ -1143,8 +1187,7 @@ if [ -f /data/guest_audio.flag ]; then
                 $BB chcon u:object_r:vendor_configs_file:s0 "$AOV/upper/audio_policy_configuration.xml" 2>/dev/null || true
         fi
         if [ "$NEED_FX_CLEAN" = 1 ]; then
-            sed -E '/<postprocess>/,/<\/postprocess>/{ /^[[:space:]]*<apply[[:space:]]+effect="(myspace|music_helper)"[[:space:]]*\/>/d; }' \
-                /vendor/etc/audio_effects.xml > "$AOV/upper/audio_effects.xml" &&
+            fx_strip_postprocess /vendor/etc/audio_effects.xml "$AOV/upper/audio_effects.xml" &&
                 [ -s "$AOV/upper/audio_effects.xml" ] &&
                 chmod 644 "$AOV/upper/audio_effects.xml" &&
                 $BB chcon u:object_r:vendor_configs_file:s0 "$AOV/upper/audio_effects.xml" 2>/dev/null || rm -f "$AOV/upper/audio_effects.xml"
@@ -1162,22 +1205,25 @@ if [ -f /data/guest_audio.flag ]; then
         fi
     fi
     if [ "${ONEOS_GUEST_KEEP_MYSPACE:-0}" != 1 ]; then
-        for fx_alt in /odm/etc/audio_effects.xml /vendor/etc/audio/sku_"$(getprop ro.boot.product.vendor.sku)"/audio_effects.xml \
+        for fx_alt in /vendor/etc/audio_effects_config_sec.xml /odm/etc/audio_effects.xml \
+                      /vendor/etc/audio/sku_"$(getprop ro.boot.product.vendor.sku)"/audio_effects.xml \
                       /vendor/etc/audio/sku_"$(getprop ro.boot.product.vendor.sku)"_qssi/audio_effects.xml; do
             [ -f "$fx_alt" ] && [ ! -L "$fx_alt" ] || continue
-            grep -Eq '<apply[[:space:]]+effect="(myspace|music_helper)"' "$fx_alt" 2>/dev/null || continue
             AOV=/data/oneos_audio_policy
             mkdir -p "$AOV"
             mount | grep -q " $AOV " || $BB mount -t tmpfs -o size=8m,mode=755 tmpfs "$AOV"
             fx_bn=$(echo "$fx_alt" | tr '/' '_')
-            if sed -E '/<postprocess>/,/<\/postprocess>/{ /^[[:space:]]*<apply[[:space:]]+effect="(myspace|music_helper)"[[:space:]]*\/>/d; }' \
-                "$fx_alt" > "$AOV/$fx_bn" && [ -s "$AOV/$fx_bn" ]; then
+            if fx_strip_postprocess "$fx_alt" "$AOV/$fx_bn" && [ -s "$AOV/$fx_bn" ]; then
                 chmod 644 "$AOV/$fx_bn"
                 $BB chcon u:object_r:vendor_configs_file:s0 "$AOV/$fx_bn" 2>/dev/null || true
                 if $BB mount --bind "$AOV/$fx_bn" "$fx_alt" 2>/dev/null; then
-                    $BB mount -o remount,ro,bind "$fx_alt" 2>/dev/null || true
+                    $BB mount -o remount,ro,bind "$AOV/$fx_bn" "$fx_alt" 2>/dev/null || $BB mount -o remount,ro,bind "$fx_alt" 2>/dev/null || true
                     echo "[Pivoted Root] Guest audio effects: stripped unconfigured MySpace/music_helper postprocess from $fx_alt"
+                else
+                    rm -f "$AOV/$fx_bn"
                 fi
+            else
+                rm -f "$AOV/$fx_bn"
             fi
         done
     fi
@@ -2120,6 +2166,11 @@ if [ "$DT2W" = 1 ] && command -v getevent >/dev/null 2>&1 && { [ -w /sys/class/s
                   fi
                   if in_call; then log "$1: double tap during a call: ignored"; continue; fi
                   log "$1: double tap: waking the guest"
+                  eval c=\$C_$1 b=\$B_$1
+                  dp=?; [ -r "$c" ] && read -r dp < "$c" 2>/dev/null
+                  bl=?; [ -r "$b" ] && read -r bl < "$b" 2>/dev/null
+                  aodv=0; [ -r "$AF" ] && read -r aodv < "$AF" 2>/dev/null
+                  log "$1: wake state before keyevent: dpms=$dp bl=$bl aod=$aodv"
                   timeout 5 cmd input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || log "$1: cmd input keyevent failed"
                   # 0.5.15: a click, as One UI gives for its double tap (owner: "there should be haptic
                   # feedback for dt2w"). EFFECT_CLICK through the guest vibrator service; -f: also on silent.
@@ -2424,7 +2475,18 @@ if [ "$ONEOS_GUEST_ODREFRESH" = 1 ] && [ "$ONEOS_GUEST_JIT_ZYGOTE" != 1 ] && [ -
                ls -lnL "$j" 2>/dev/null | awk '{ print $5, $6, $7, $NF }'
            done | cksum 2>/dev/null | awk '{ print $1 "-" $2 }')
     t0=$(date +%s)
-    timeout 300 "$ODR" --compile > /data/odrefresh.log 2>&1; rc=$?
+    # Fast path across soft reboots and same-image switches: when a complete boot
+    # image with matching GC collector (CCWANT) and matching jar checksums
+    # (oneos_jars) already sits in $ADC/dalvik-cache/arm64, skip invoking
+    # odrefresh --compile (which on soft reboots deleted boot.art on exit 81 and
+    # triggered a 10 s --force-compile of all 93 files).
+    if [ -f "$ADC/dalvik-cache/arm64/boot.art" ] && [ -f "$ADC/dalvik-cache/arm64/boot.oat" ] &&
+       [ "$CCHAVE" = "$CCWANT" ] && [ -n "$JARS" ] && [ "$(cat "$ADC/oneos_jars" 2>/dev/null)" = "$JARS" ]; then
+        rc=0
+        echo "odrefresh fast-path: boot.art/boot.oat current ($JARS, concurrent-copying $CCHAVE)" > /data/odrefresh.log
+    else
+        timeout 300 "$ODR" --compile > /data/odrefresh.log 2>&1; rc=$?
+    fi
     # odrefresh takes the image's own primary boot image as usable and compiles only
     # the mainline extension on top of it, which dex2oat cannot load (OneOS's
     # framework.jar), and aborts in no time (thirteenth run: 0 files). Without a boot

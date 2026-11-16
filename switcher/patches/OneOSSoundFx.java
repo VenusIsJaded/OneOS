@@ -9,7 +9,7 @@ import java.util.UUID;
 
 /**
  * Samsung's speaker tuning for the guest (experiment, 0.4.58; started by the
- * UI activator only while /data/local/tmp/oneos/guest_dolby.on exists).
+ * UI activator unless ONEOS_GUEST_DOLBY=0).
  *
  * One UI's audioserver runs Samsung's processing on what it plays: Dolby DAX3
  * with Samsung's speaker endpoint tuning ("ProfileParamCache(There is specific
@@ -20,13 +20,19 @@ import java.util.UUID;
  * report 4933a41d) and ColorOS's own engine (AudioEffectCenter's effect
  * 41f6c0f4-5d8f-11ec-bf63-0242ac130002) is not in Samsung's HAL. The vendor
  * effect HAL does list Dolby ("DAX3_S_3.14.0.0_r1", type 46d279d9): this
- * creates it on the output mix (session 0), enables it, selects an active
- * Dolby profile (profile = 0 Auto by default; without CPDP EFFECT_PARAM_PROFILE
- * Samsung's DAX3 stays on profile = -1, its "Dolby Atmos OFF" bypass table
- * where speaker EQ ceon=0, Audio Regulator aron=0 and Bass Enhancer bexe=0),
- * and holds it until the guest's system_server (args[0]) is gone. args[1] may
- * name another effect type (empty uses DOLBY_TYPE); args[2] may override the
- * Dolby profile index (0=Auto, 1=Movie, 2=Music, 3=Voice).
+ * creates it on the output mix (session 0), enables it, activates Samsung's
+ * Dolby DAX3 profile (profile = 0 Auto by default; without EFFECT_PARAM_PROFILE
+ * Samsung's AHAL_DlbEffectContext stays on profile = -1, its "Dolby Atmos OFF"
+ * bypass table where speaker EQ ceon=0, Audio Regulator aron=0 and Bass
+ * Enhancer bexe=0), and holds it until the guest's system_server (args[0]) is
+ * gone. args[1] may name another effect type (empty uses DOLBY_TYPE); args[2]
+ * may override the Dolby profile index (0=Auto, 1=Movie, 2=Music, 3=Voice).
+ *
+ * Also bridges ColorOS's Mono Audio accessibility toggle (Settings.System
+ * "master_mono") into AOSP's AudioSystem.setMasterMono(boolean): on ColorOS 17
+ * AudioFlingerExtImpl sends "mono_output=1" to AudioFlinger.setParameters(),
+ * which stock AOSP / Samsung HAL rejects ("1 KVP rejected: mono_output=1"),
+ * leaving Master mono off unless AudioSystem.setMasterMono() is invoked.
  *
  * 0.4.65 (on by default; F8U InfinityX test): an output-mix effect is put on
  * the output music plays on when it is created, and stays there. Created at
@@ -43,8 +49,10 @@ public final class OneOSSoundFx {
  private static final String DOLBY_TYPE = "46d279d9-9be7-453d-9d7c-ef937f675587";
  private static final String TYPE_NULL = "ec7178ec-e5e1-4432-a3f4-4657e6795210";
 
- // Dolby DAX2/DAX3 CPDP AudioEffect parameter protocol (little-endian int32):
- // setParameter(5, [paramId, valueCount=1, value]) and getParameter(5 + paramId, buf[12]).
+ // Direct AHAL_DlbEffectContext parameter IDs on Samsung AIDL audio HAL:
+ // AudioEffect.setParameter(int param, int value) / getParameter(int param, int[] value)
+ // pass `param` directly as the 32-bit paramId into AHAL_DlbEffectContext::setParamImpl/getParamImpl.
+ // (Previously passing EFFECT_PARAM_CPDP_VALUES + paramId sent invalid IDs 0x0A000005 / 0x03000005.)
  private static final int EFFECT_PARAM_ENABLE = 0x00000000;
  private static final int EFFECT_PARAM_CPDP_VALUES = 5;
  private static final int EFFECT_PARAM_PROFILE_COUNT = 0x03000000;
@@ -55,6 +63,10 @@ public final class OneOSSoundFx {
   final UUID type = UUID.fromString(args.length > 1 && args[1] != null && !args[1].isEmpty() ? args[1] : DOLBY_TYPE);
   final int profile = parseProfile(args.length > 2 ? args[2] : null);
   Looper.prepareMainLooper();
+
+  // Initial sync of master_mono if the user already enabled Mono Audio in Settings.
+  Boolean lastMono = syncMasterMono(null);
+
   Class<?> c = Class.forName("android.media.audiofx.AudioEffect");
   Constructor<?> k = c.getDeclaredConstructor(UUID.class, UUID.class, int.class, int.class);
   k.setAccessible(true);
@@ -64,7 +76,9 @@ public final class OneOSSoundFx {
    fx = create(c, k, type, profile, i == 0 || i == 29 ? "try " + (i + 1) : null);
    if (fx == null) Thread.sleep(2000);
   }
-  if (fx == null) { log("no effect of type " + type + " on the output mix; exiting"); return; }
+  if (fx == null) {
+   log("no effect of type " + type + " on the output mix; keeping master_mono bridge only");
+  }
   // 0.5.11: music already playing when it was made counts as a start too (it was made at boot,
   // on whatever output ran then; S25 Ultra LineageOS 89eaa265, "speakers sound muffled": the
   // effect sat on the idle deep-buffer output for 10 minutes, 0 re-attachments).
@@ -72,6 +86,8 @@ public final class OneOSSoundFx {
   int moves = 0;
   while (alive(guest)) {
    Thread.sleep(2000);
+   lastMono = syncMasterMono(lastMono);
+   if (fx == null) continue;
    boolean now = musicActive();
    if (now && !was) {
     // Music started: create it again, so it is on the output music plays on. Not at
@@ -106,8 +122,8 @@ public final class OneOSSoundFx {
  private static Object create(Class<?> c, Constructor<?> k, UUID type, int profile, String why) {
   try {
    Object fx = k.newInstance(type, UUID.fromString(TYPE_NULL), 0, 0);
-   Object r = c.getMethod("setEnabled", boolean.class).invoke(fx, true);
    String dapInfo = DOLBY_TYPE.equalsIgnoreCase(type.toString()) ? configureDolby(c, fx, profile) : "";
+   Object r = c.getMethod("setEnabled", boolean.class).invoke(fx, true);
    if (why != null) {
     Object d = c.getMethod("getDescriptor").invoke(fx);
     log("created " + field(d, "name") + " " + field(d, "uuid") + " (" + field(d, "implementor") + ") on the output mix ("
@@ -123,40 +139,130 @@ public final class OneOSSoundFx {
  }
 
  static String configureDolby(Class<?> c, Object fx, int profile) {
+  StringBuilder sb = new StringBuilder();
   try {
-   Method setParam = c.getMethod("setParameter", int.class, byte[].class);
-   int sEn = setDapInt(setParam, fx, EFFECT_PARAM_ENABLE, 1);
-   int sPr = setDapInt(setParam, fx, EFFECT_PARAM_PROFILE, profile);
-   String rb = "";
-   try {
-    Method getParam = c.getMethod("getParameter", int.class, byte[].class);
-    Integer curPr = getDapInt(getParam, fx, EFFECT_PARAM_PROFILE);
-    Integer cnt = getDapInt(getParam, fx, EFFECT_PARAM_PROFILE_COUNT);
-    if (curPr != null || cnt != null) {
-     rb = ", activeProfile=" + (curPr != null ? curPr : "?") + "/" + (cnt != null ? cnt : "?");
+   Method setInt = c.getMethod("setParameter", int.class, int.class);
+   Method getInt = c.getMethod("getParameter", int.class, int[].class);
+
+   Integer before = readDirectInt(getInt, fx, EFFECT_PARAM_PROFILE);
+   Integer count = readDirectInt(getInt, fx, EFFECT_PARAM_PROFILE_COUNT);
+   sb.append(", profileBefore=").append(before != null ? before : "?");
+   if (count != null) sb.append("/").append(count);
+
+   // 1. Direct AIDL parameter IDs (EFFECT_PARAM_ENABLE = 0, EFFECT_PARAM_PROFILE = 0x0A000000).
+   int sEn = invokeSetInt(setInt, fx, EFFECT_PARAM_ENABLE, 1);
+   int sPr = invokeSetInt(setInt, fx, EFFECT_PARAM_PROFILE, profile);
+   Integer after = readDirectInt(getInt, fx, EFFECT_PARAM_PROFILE);
+   sb.append(", direct(en=").append(sEn).append(",pr=").append(sPr)
+     .append("->").append(after != null ? after : "?").append(")");
+
+   // 2. Fallback to legacy CPDP packet (param=5, [paramId, 1, val]) only if direct profile readback
+   // is still -1 (Dolby Atmos OFF bypass table) or unavailable.
+   if (after == null || after == -1) {
+    Method setBytes = c.getMethod("setParameter", int.class, byte[].class);
+    int cEn = setCpdpInt(setBytes, fx, EFFECT_PARAM_ENABLE, 1);
+    int cPr = setCpdpInt(setBytes, fx, EFFECT_PARAM_PROFILE, profile);
+    Integer afterCpdp = readDirectInt(getInt, fx, EFFECT_PARAM_PROFILE);
+    sb.append(", cpdp(en=").append(cEn).append(",pr=").append(cPr)
+      .append("->").append(afterCpdp != null ? afterCpdp : "?").append(")");
+   }
+
+   // 3. Probe low-numbered parameter IDs (0..4) read-only on first creation if neither 0x0A000000
+   // nor 0x03000000 answered, so sound_fx.log records the exact vendor enum layout without guessing.
+   if (before == null && count == null) {
+    StringBuilder probe = new StringBuilder();
+    for (int id = 0; id <= 4; id++) {
+     Integer v = readDirectInt(getInt, fx, id);
+     if (v != null) {
+      if (probe.length() > 0) probe.append(' ');
+      probe.append(id).append('=').append(v);
+     }
     }
-   } catch (Throwable ignored) { }
-   return ", dapEnable=" + sEn + ", setProfile(" + profile + ")=" + sPr + rb;
+    if (probe.length() > 0) sb.append(", probe[").append(probe).append(']');
+   }
   } catch (Throwable t) {
    Throwable e = t.getCause() != null ? t.getCause() : t;
-   return ", dapConfigErr=" + e;
+   sb.append(", dapConfigErr=").append(e);
+  }
+  return sb.toString();
+ }
+
+ private static int invokeSetInt(Method setInt, Object fx, int paramId, int value) {
+  try {
+   Object res = setInt.invoke(fx, paramId, value);
+   return res instanceof Integer ? (Integer) res : -99;
+  } catch (Throwable t) {
+   return -98;
   }
  }
 
- static int setDapInt(Method setParam, Object fx, int paramId, int value) throws Exception {
-  byte[] buf = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN)
-      .putInt(paramId).putInt(1).putInt(value).array();
-  Object res = setParam.invoke(fx, EFFECT_PARAM_CPDP_VALUES, buf);
-  return res instanceof Integer ? (Integer) res : -1;
+ private static Integer readDirectInt(Method getInt, Object fx, int paramId) {
+  try {
+   int[] val = new int[]{Integer.MIN_VALUE};
+   Object res = getInt.invoke(fx, paramId, val);
+   int n = res instanceof Integer ? (Integer) res : -1;
+   // AudioEffect.getParameter(int, int[]) returns the number of bytes read (4 for int32) or SUCCESS (0) on some OEMs.
+   if ((n >= 4 || n == 0) && val[0] != Integer.MIN_VALUE) {
+    return val[0];
+   }
+  } catch (Throwable ignored) { }
+  return null;
  }
 
- static Integer getDapInt(Method getParam, Object fx, int paramId) throws Exception {
-  byte[] buf = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN).putInt(paramId).array();
-  Object res = getParam.invoke(fx, EFFECT_PARAM_CPDP_VALUES + paramId, buf);
-  int n = res instanceof Integer ? (Integer) res : -1;
-  if (n >= 4) {
-   return ByteBuffer.wrap(buf).order(ByteOrder.LITTLE_ENDIAN).getInt(0);
+ private static int setCpdpInt(Method setBytes, Object fx, int paramId, int value) {
+  try {
+   byte[] buf = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN)
+       .putInt(paramId).putInt(1).putInt(value).array();
+   Object res = setBytes.invoke(fx, EFFECT_PARAM_CPDP_VALUES, buf);
+   return res instanceof Integer ? (Integer) res : -99;
+  } catch (Throwable t) {
+   return -98;
   }
+ }
+
+ /**
+  * Sync Settings.System "master_mono" -> AudioSystem.setMasterMono(boolean) whenever it changes
+  * (or on startup when master_mono == 1), fixing ColorOS's rejected "mono_output=1" HAL parameter.
+  */
+ private static Boolean syncMasterMono(Boolean prev) {
+  try {
+   Integer setting = readSystemMasterMono();
+   if (setting == null) return prev;
+   boolean want = (setting == 1);
+   if (prev == null) {
+    if (!want) return Boolean.FALSE;
+   } else if (prev.booleanValue() == want) {
+    return prev;
+   }
+   Class<?> as = Class.forName("android.media.AudioSystem");
+   Object r = as.getMethod("setMasterMono", boolean.class).invoke(null, want);
+   Object cur = null;
+   try { cur = as.getMethod("getMasterMono").invoke(null); } catch (Throwable ignored) { }
+   log("master_mono=" + setting + " -> AudioSystem.setMasterMono(" + want + ")=" + r
+       + (cur != null ? " (getMasterMono=" + cur + ")" : ""));
+   return want;
+  } catch (Throwable t) {
+   return prev;
+  }
+ }
+
+ private static Integer readSystemMasterMono() {
+  try {
+   Class<?> at = Class.forName("android.app.ActivityThread");
+   Object app = at.getMethod("currentApplication").invoke(null);
+   if (app == null) {
+    Object sysMain = at.getMethod("systemMain").invoke(null);
+    app = at.getMethod("getSystemContext").invoke(sysMain);
+   }
+   if (app == null) return null;
+   Object cr = app.getClass().getMethod("getContentResolver").invoke(app);
+   Class<?> sys = Class.forName("android.provider.Settings$System");
+   Object v = sys.getMethod("getInt", Class.forName("android.content.ContentResolver"), String.class, int.class)
+       .invoke(null, cr, "master_mono", -1);
+   if (v instanceof Integer && ((Integer) v == 0 || (Integer) v == 1)) {
+    return (Integer) v;
+   }
+  } catch (Throwable ignored) { }
   return null;
  }
 
