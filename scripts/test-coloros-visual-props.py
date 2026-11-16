@@ -22,9 +22,11 @@ class VisualPropsTest(unittest.TestCase):
  def test_empty_guest_property_is_replaced(self):
   new,_,_=self.run_case('coloros17-findn6','','persist.sys.oplus.anim_level=\nro.launcher.blur.appLaunch=0\n')
   self.assertEqual(1,new.count('persist.sys.oplus.anim_level=1'));self.assertNotIn('ro.launcher.blur.appLaunch=0',new);self.assertIn('ro.oplus.animationlevel=3',new);self.assertIn('ro.oplus.gaussianlevel=3',new)
- def test_findx9u_coloros17_also_gets_visual_blur_tiers(self):
+ def test_findx9u_does_not_get_findn6_ro_visual_tiers(self):
+  # 58bc1b9 widened these to the Find X9 Ultra image; its first session with them
+  # came up with a corrupted Control Center and home screen. They stay Find N6 only.
   new,_,_=self.run_case('coloros17-findx9u-in-1105','','persist.sys.oplus.anim_level=\n')
-  self.assertEqual(1,new.count('persist.sys.oplus.anim_level=1'));self.assertIn('ro.launcher.blur.appLaunch=1',new);self.assertIn('ro.oplus.animationlevel=3',new);self.assertIn('ro.oplus.gaussianlevel=3',new);self.assertIn('ro.surface_flinger.set_display_power_timer_ms=1000',new)
+  for k in ('ro.launcher.blur.appLaunch=1','ro.oplus.animationlevel=3','ro.oplus.gaussianlevel=3','ro.surface_flinger.set_display_power_timer_ms=1000'):self.assertNotIn(k,new)
  def test_other_images_unchanged(self):
   original='persist.sys.oplus.anim_level=\n';new,overrides,calls=self.run_case('pixel11fold-yogi','',original)
   self.assertEqual(original,new);self.assertEqual('',overrides);self.assertEqual('',calls)

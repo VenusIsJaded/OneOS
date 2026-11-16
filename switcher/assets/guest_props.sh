@@ -259,8 +259,18 @@ add)
     # ONEOS_GUEST_ANIM_LEVEL=0 leaves it unset; 2, 3 or 4 sets that level.
     AL=persist.sys.oplus.anim_level; ALV=${ONEOS_GUEST_ANIM_LEVEL:-1}
     case "$ALV" in 1|2|3|4) ;; *) ALV="" ;; esac
+    # IS_COLOROS17: the condition anim_level has always used (Find N6 image, or
+    # any image with the oplus framework jars, which includes Find X9 Ultra).
+    # IS_FINDN6: the only image the ro.* tiers below were read in and tested on.
+    # 58bc1b9 widened those tiers to every coloros17-* image; the first Find X9
+    # Ultra session with them (11:43, 0.5.17) came up with a corrupted Control
+    # Center/home screen, so they stay limited to the image they came from.
     IS_COLOROS17=0
-    if grep -q '"image": "coloros17-' "$STAGE/.oneos_stage" 2>/dev/null ||
+    IS_FINDN6=0
+    if grep -q '"image": "coloros17-findn6"' "$STAGE/.oneos_stage" 2>/dev/null; then
+        IS_FINDN6=1
+    fi
+    if [ "$IS_FINDN6" = 1 ] ||
        { [ -f "$GSE/framework/oplus-telephony-common.jar" ] && [ -e "$ROOTFS/system/framework/oplus-services.jar" ]; }; then
         IS_COLOROS17=1
     fi
@@ -279,10 +289,9 @@ add)
             echo "guest_props: $AL=$ALV for the session (ColorOS launcher material blur level)"
         fi
     fi
-    if [ "$IS_COLOROS17" = 1 ]; then
+    if [ "$IS_FINDN6" = 1 ]; then
         # Framework animation/Gaussian tiers use 3 for high-end; COUI's
-        # separate anim_level above uses 1. Apply both before guest processes
-        # across all ColorOS 17 images (Find N6 and Find X9 Ultra alike).
+        # separate anim_level above uses 1. Apply both before guest processes.
         for kv in ro.launcher.blur.appLaunch=1 ro.oplus.animationlevel=3 ro.oplus.gaussianlevel=3; do
             key=${kv%%=*}; value=${kv#*=}
             if grep -qxF "$key" "$HOST"; then
@@ -311,7 +320,7 @@ add)
     # ONEOS_GUEST_SF_POWER_TIMER=0 leaves it out, another number is that many ms.
     PT=ro.surface_flinger.set_display_power_timer_ms; PTV=${ONEOS_GUEST_SF_POWER_TIMER:-1000}
     case "$PTV" in [1-9]|[1-9][0-9]|[1-9][0-9][0-9]|[1-9][0-9][0-9][0-9]) ;; *) PTV="" ;; esac
-    if [ -n "$PTV" ] && [ "$IS_COLOROS17" = 1 ]; then
+    if [ -n "$PTV" ] && [ "$IS_FINDN6" = 1 ]; then
         if grep -qxF "$PT" "$HOST"; then
             hv=$(getprop "$PT")
             case "$hv" in
@@ -1316,40 +1325,52 @@ add)
         done
     fi
     echo "guest_props add: batch $(date +%T)"
-    # Probe marker so a single post-batch getprop snapshot can prove whether
-    # resetprop -n -f actually mutated the live bionic property arena.
-    echo "oneos.props.batch_probe=$BOOT_ID" >> "$NEW"
+    # Apply the whole file in one resetprop call, exactly as before (no extra
+    # marker property: a new name has to be allocated in default_prop, and a
+    # miss on that one slot made the previous probe-based check declare a
+    # fully landed batch "failed", after which the per-property fallback could
+    # never set the 231 ro.* ColorOS properties: empty ro.oplus.display.*,
+    # ro.oplus.image.* in SystemUI/launcher, a broken Control Center).
+    # Then ONE getprop snapshot is compared by key against what was asked for;
+    # only keys that are really absent are retried (resetprop -n, ro.* too),
+    # and only keys that really exist are recorded in the added list.
     RP_BATCH_ERR=$("$RP" -n -f "$NEW" 2>&1)
     RP_BATCH_RC=$?
     VERIFY_NOW="$STAGE/guest_props.verify"
-    getprop > "$VERIFY_NOW"
-    if [ "$RP_BATCH_RC" = 0 ] && grep -qxF "[oneos.props.batch_probe]: [$BOOT_ID]" "$VERIFY_NOW"; then
-        awk -F= '$1 != "" && $1 != "oneos.props.batch_probe" { print $1 }' "$NEW" > "$ADDED"
-        "$RP" --delete oneos.props.batch_probe 2>/dev/null || "$RP" -n oneos.props.batch_probe "" 2>/dev/null || true
-    else
-        # Diagnostics for silent resetprop -n no-op or missing -f support:
-        # record stderr, exit code, /dev/__properties__ mount + inode state, and
-        # whether pid 1 holds unlinked /dev/__properties__ mappings.
-        pa_diag=$(awk '$5 ~ /^\/dev(\/__properties__)?$/ { printf "%s:%s ", $5, $3 }' /proc/self/mountinfo 2>/dev/null)
-        p1_del=$(grep -c '/dev/__properties__/.*(deleted)' /proc/1/maps 2>/dev/null || echo 0)
-        pa_ino=$(ls -li /dev/__properties__/properties_serial /dev/__properties__/u:object_r:system_prop:s0 /dev/__properties__/u:object_r:default_prop:s0 2>/dev/null | awk '{printf "%s=%s(%s) ", $NF, $1, $6}')
-        echo "guest_props: WARNING: batch resetprop -n -f did not land in getprop (rc=$RP_BATCH_RC err='${RP_BATCH_ERR:-none}' store_isolated=$(prop_store_isolated && echo 1 || echo 0) p1_deleted_maps=$p1_del mounts='${pa_diag:-none}' inodes='${pa_ino:-none}'); falling back per property"
-        : > "$ADDED"
-        miss_ro=0; miss_mut=0; fb_ok=0
+    VERIFY_KEYS="$STAGE/guest_props.verify.keys"
+    VERIFY_MISS="$STAGE/guest_props.verify.miss"
+    # (BEGIN-getline joins, not NR==FNR: with an empty first file awk would
+    # treat the second input as the first and every key would look missing.)
+    snap_keys() {
+        getprop | awk '{ i = index($0, "]: ["); if (substr($0, 1, 1) == "[" && i > 2) print substr($0, 2, i - 2) }' > "$VERIFY_NOW"
+        cut -d= -f1 "$NEW" > "$VERIFY_KEYS"
+        awk -v f="$VERIFY_NOW" 'BEGIN { while ((getline l < f) > 0) s[l] = 1 } $0 != "" && !($0 in s)' "$VERIFY_KEYS" > "$VERIFY_MISS"
+    }
+    snap_keys
+    batch_total=$(grep -c . "$VERIFY_KEYS")
+    batch_missed=$(grep -c . "$VERIFY_MISS")
+    if [ "$batch_missed" -gt 0 ]; then
+        # resetprop without -f, or a slot that did not take: one call per
+        # missing property (rp_set_mem: resetprop -n first, which sets ro.* too).
+        awk -F= -v f="$VERIFY_MISS" 'BEGIN { while ((getline l < f) > 0) m[l] = 1 } ($1 in m)' "$NEW" > "$VERIFY_KEYS"
         while IFS= read -r line; do
-            k=${line%%=*}; v=${line#*=}
-            [ -n "$k" ] && [ "$k" != "oneos.props.batch_probe" ] || continue
-            if rp_set_mem "$k" "$v"; then
-                echo "$k" >> "$ADDED"
-                fb_ok=$((fb_ok + 1))
-            else
-                case "$k" in ro.*) miss_ro=$((miss_ro + 1)) ;; *) miss_mut=$((miss_mut + 1)) ;; esac
-            fi
-        done < "$NEW"
-        "$RP" --delete oneos.props.batch_probe 2>/dev/null || "$RP" -n oneos.props.batch_probe "" 2>/dev/null || true
-        echo "guest_props: per-property fallback set $fb_ok props (missed ro=$miss_ro mutable=$miss_mut)"
+            [ -n "${line%%=*}" ] && rp_set_mem "${line%%=*}" "${line#*=}"
+        done < "$VERIFY_KEYS"
+        snap_keys
+        batch_left=$(grep -c . "$VERIFY_MISS")
+        if [ "$batch_left" -gt 0 ]; then
+            miss_ro=$(grep -c '^ro\.' "$VERIFY_MISS")
+            pa_diag=$(awk '$5 ~ /^\/dev(\/__properties__)?$/ { printf "%s:%s ", $5, $3 }' /proc/self/mountinfo 2>/dev/null)
+            pa_ino=$(ls -li /dev/__properties__/properties_serial /dev/__properties__/u:object_r:system_prop:s0 /dev/__properties__/u:object_r:default_prop:s0 2>/dev/null | awk '{printf "%s=%s(%s) ", $NF, $1, $6}')
+            echo "guest_props: WARNING: $batch_left of $batch_total props are still not in getprop after the batch and a per-property retry (ro=$miss_ro, rc=$RP_BATCH_RC err='${RP_BATCH_ERR:-none}' store_isolated=$(prop_store_isolated && echo 1 || echo 0) mounts='${pa_diag:-none}' inodes='${pa_ino:-none}' first: $(head -n 8 "$VERIFY_MISS" | tr '\n' ' '))"
+        else
+            echo "guest_props: $batch_missed of $batch_total props missed the batch and were set one by one"
+        fi
     fi
-    rm -f "$VERIFY_NOW"
+    # Added list: every requested key that now exists (never a name that did
+    # not land, so the return never blanks something that was not set).
+    cut -d= -f1 "$NEW" | awk -v f="$VERIFY_MISS" 'BEGIN { while ((getline l < f) > 0) m[l] = 1 } $0 != "" && !($0 in m)' > "$ADDED"
+    rm -f "$VERIFY_NOW" "$VERIFY_KEYS" "$VERIFY_MISS"
     echo "guest_props add: batch done $(date +%T)"
     echo "guest_props: added $(wc -l < "$ADDED") props from the guest's build.prop files"
     rm -f "$HOST" "$NEW"

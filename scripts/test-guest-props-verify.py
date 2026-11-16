@@ -131,33 +131,47 @@ class GuestPropsSilentNoopFallbackTest(unittest.TestCase):
             ovr = (stage / 'guest_props.overridden').read_text().splitlines() if (stage / 'guest_props.overridden').exists() else []
             return res.stdout, state, added, ovr
 
-    def test_normal_batch_resetprop_succeeds_and_cleans_probe(self):
+    def test_normal_batch_lands_every_prop_and_records_them(self):
         out, state, added, ovr = self.run_add(n_silent_noop=False, store_isolated=True)
-        self.assertNotIn('WARNING: batch resetprop -n -f did not land', out)
+        self.assertNotIn('WARNING', out)
         self.assertNotIn('oneos.props.batch_probe', state)
-        self.assertNotIn('oneos.props.batch_probe', added)
         self.assertEqual('1', state.get('persist.sys.saupwk_test'))
         self.assertEqual('1', state.get('persist.sys.oplus.anim_level'))
         self.assertEqual('511,23:569,81', state.get('ro.oplus.display.screenhole.positon'))
         self.assertEqual('37.0', state.get('ro.build.version.sdk_full'))
-        self.assertEqual('3', state.get('ro.oplus.gaussianlevel'))
+        # The ro.* visual tiers were read in and tested on the Find N6 image only;
+        # the Find X9 Ultra image must not get them (Control Center regression).
+        for k in ('ro.oplus.gaussianlevel', 'ro.oplus.animationlevel', 'ro.launcher.blur.appLaunch',
+                  'ro.surface_flinger.set_display_power_timer_ms'):
+            self.assertIsNone(state.get(k), k)
+        self.assertIn('ro.oplus.display.screenhole.positon', added)
+        # sdk_full is defined by One UI too, so it is a recorded override, not an added name
+        self.assertTrue(any(l.startswith('ro.build.version.sdk_full=') for l in ovr), ovr)
 
-    def test_silent_resetprop_n_noop_falls_back_for_mutable_and_isolated_persist_props(self):
+    def test_ro_props_are_never_dropped_when_batch_lands(self):
+        # 58bc1b9 declared a landed batch failed (probe name missing from the
+        # snapshot) and its fallback could not set ro.*: the whole ro.* set was lost.
+        out, state, added, ovr = self.run_add(n_silent_noop=False, store_isolated=True)
+        self.assertNotIn('falling back', out)
+        self.assertNotIn('missed the batch', out)
+        self.assertTrue(any(k.startswith('ro.') for k in added), added)
+
+    def test_silent_resetprop_n_noop_retries_mutable_props_only_for_missing_keys(self):
         out, state, added, ovr = self.run_add(n_silent_noop=True, store_isolated=True)
-        self.assertIn('WARNING: batch resetprop -n -f did not land in getprop', out)
-        # Critical runtime & persist props land via fallback when store is isolated!
+        self.assertIn('still not in getprop after the batch and a per-property retry', out)
         self.assertEqual('1', state.get('persist.sys.saupwk_test'))
         self.assertEqual('1', state.get('persist.sys.oplus.anim_level'))
         self.assertEqual('0', state.get('persist.sys.device_first_boot'))
         self.assertEqual('adb', state.get('persist.sys.usb.config'))
         self.assertEqual('', state.get('persist.sys.oplus.my_carrier.data_utc_backup'))
-        # Un-applied ro.* overrides are NOT falsely recorded in guest_props.overridden
+        # ro.* that did not land are neither recorded as overridden nor as added
         self.assertFalse(any(l.startswith('ro.') for l in ovr), ovr)
+        self.assertFalse(any(l.startswith('ro.oplus.display.screenhole') for l in added), added)
+        self.assertIn('persist.sys.saupwk_test', added)
 
     def test_silent_resetprop_n_noop_never_writes_persist_without_isolated_store(self):
         out, state, added, ovr = self.run_add(n_silent_noop=True, store_isolated=False)
-        self.assertIn('WARNING: batch resetprop -n -f did not land in getprop', out)
-        # Without tmpfs /data/property isolation, persist.* fallback is refused so One UI's store is untouched
+        self.assertIn('still not in getprop after the batch', out)
         self.assertIsNone(state.get('persist.sys.saupwk_test'))
         self.assertEqual('sec_charging,adb', state.get('persist.sys.usb.config'))
 
