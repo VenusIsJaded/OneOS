@@ -1,71 +1,83 @@
 #!/usr/bin/env python3
-"""app_data_labels (guest_prepare.sh): which app folders keep the guest's label and which get their own categories."""
-from pathlib import Path
+"""Verify app_data_labels in guest_prepare.sh skips unchanged kept dirs on warm boots while still relabeling pre-seeded/new/changed dirs."""
+from __future__ import annotations
+
 import os
 import subprocess
 import tempfile
 import unittest
-
-ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / 'switcher/assets/guest_prepare.sh').read_text()
-FUNCTION = 'app_data_labels() {' + SOURCE.split('\napp_data_labels() {', 1)[1].split('\n}\n', 1)[0] + '\n}\n'
-A = 'u:object_r:app_data_file:'
-PACKAGES = [
-    ('com.reg', 10123, 'default:targetSdkVersion=34'),
-    ('com.reset', 10124, 'default:targetSdkVersion=36'),
-    ('com.moved', 10200, 'default:targetSdkVersion=34'),
-    ('com.priv', 10050, 'default:privapp:targetSdkVersion=34'),
-    ('com.old', 10300, 'default:targetSdkVersion=26'),
-    ('com.sysuid', 1000, 'platform:privapp:targetSdkVersion=36'),
-]
-FOLDERS = [
-    (A + 's0:c123,c256,c512,c768', 'com.reg'),                      # the guest's own label: kept
-    ('u:object_r:privapp_data_file:s0:c512,c768', 'com.priv'),      # kept, not turned into app_data_file
-    ('u:object_r:system_app_data_file:s0', 'com.sysuid'),           # kept
-    (A + 's0:c9,c256,c512,c768', 'com.gone'),                       # no longer installed: kept as it is
-    (A + 's0:c44,c256,c512,c768', 'com.moved'),                     # another uid's categories: its own again
-    (A + 's0', 'com.old'),                                          # bare: the level of an older app
-    ('u:object_r:system_data_file:s0', 'com.reset'),                # reset or staged: its own
-    ('u:object_r:shell_data_file:s0', 'com.unknown'),               # not installed: bare
-    (A + 's0', 'odd name'),                                         # a space: a line of its own
-]
+from pathlib import Path
 
 
-def labels():
-    with tempfile.TemporaryDirectory() as d:
-        root = Path(d); (root / 'data/system').mkdir(parents=True)
-        (root / 'data/system/packages.list').write_text(''.join(f'{n} {u} 0 /data/user/0/{n} {s} none 0 1 1 @null\n' for n, u, s in PACKAGES))
-        (root / 'ls').write_text(''.join(f'{l} /st/{p}\n' for l, p in FOLDERS))
-        out = subprocess.run(['/bin/sh', '-c', 'ls() { cat "$STAGE/ls"; }\n' + FUNCTION + 'app_data_labels /st'],
-                             env=dict(os.environ, STAGE=str(root)), check=True, capture_output=True, text=True).stdout
-    got = {}; counts = None
-    for line in out.splitlines():
-        kind, rest = line.split(' ', 1)
-        if kind == '#': counts = rest
-        elif kind == 'n':
-            label, *paths = rest.split(' ')
-            for p in paths: got[p[4:]] = label
-        else:
-            label, path = rest.split(' ', 1); got[path[4:]] = label
-    return got, counts
+REPO_ROOT = Path(__file__).resolve().parent.parent
+PREPARE = REPO_ROOT / "switcher" / "assets" / "guest_prepare.sh"
 
 
-class AppDataLabels(unittest.TestCase):
-    def test_labels(self):
-        got, counts = labels()
-        self.assertEqual({
-            'com.reg': A + 's0:c123,c256,c512,c768',
-            'com.priv': 'u:object_r:privapp_data_file:s0:c512,c768',
-            'com.sysuid': 'u:object_r:system_app_data_file:s0',
-            'com.gone': A + 's0:c9,c256,c512,c768',
-            'com.moved': A + 's0:c200,c256,c512,c768',
-            'com.old': A + 's0:c512,c768',
-            'com.reset': A + 's0:c124,c256,c512,c768',
-            'com.unknown': A + 's0',
-            'odd name': A + 's0',
-        }, got)
-        self.assertEqual('4 3', counts)
+def extract_app_data_labels() -> str:
+    text = PREPARE.read_text(encoding="utf-8")
+    start = text.index("app_data_labels() {")
+    end = text.index("p=$($BB nproc", start)
+    return text[start:end]
 
 
-if __name__ == '__main__':
+class AppDataLabelsSkipTest(unittest.TestCase):
+    def run_helper(self, skip_kept: str) -> list[str]:
+        func = extract_app_data_labels()
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = Path(tmp) / "stage"
+            (stage / "data" / "system").mkdir(parents=True)
+            user0 = stage / "data" / "user" / "0"
+            user0.mkdir(parents=True)
+            (stage / "data" / "system" / "packages.list").write_text(
+                "com.example.kept 10100 0 /data/user/0/com.example.kept default:targetSdkVersion=37 none 0 1\n"
+                "com.example.fresh 10101 0 /data/user/0/com.example.fresh default:targetSdkVersion=37 none 0 1\n"
+                "com.android.systemui 10102 0 /data/user/0/com.android.systemui platform:privapp:targetSdkVersion=37 none 0 1\n",
+                encoding="utf-8",
+            )
+            for pkg in ("com.example.kept", "com.example.fresh", "com.android.systemui"):
+                (user0 / pkg).mkdir()
+
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            fake_ls = bin_dir / "ls"
+            fake_ls.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = \"-dZ\" ]; then\n"
+                f"  echo 'u:object_r:app_data_file:s0:c100,c256,c512,c768 {user0}/com.example.kept'\n"
+                f"  echo 'u:object_r:shell_data_file:s0 {user0}/com.example.fresh'\n"
+                f"  echo 'u:object_r:privapp_data_file:s0:c512,c768 {user0}/com.android.systemui'\n"
+                "  exit 0\n"
+                "fi\n"
+                "exec /bin/ls \"$@\"\n",
+                encoding="utf-8",
+            )
+            fake_ls.chmod(0o755)
+
+            run = Path(tmp) / "run.sh"
+            run.write_text(
+                f"#!/bin/sh\nset -eu\nSTAGE='{stage}'\nPRE_PKGS='com.android.providers.settings com.android.systemui'\nPATH='{bin_dir}':\"$PATH\"\n"
+                + func
+                + f"\napp_data_labels '{user0}' '{skip_kept}'\n",
+                encoding="utf-8",
+            )
+            run.chmod(0o755)
+            out = subprocess.run(["dash", str(run)], capture_output=True, text=True, check=True)
+            return out.stdout.strip().splitlines()
+
+    def test_warm_boot_skips_unchanged_kept_app_but_relabels_pre_pkgs_and_fresh(self) -> None:
+        warm = "\n".join(self.run_helper("1"))
+        self.assertIn("# 2 1", warm)
+        self.assertNotIn("com.example.kept", warm)
+        self.assertIn("com.example.fresh", warm)
+        self.assertIn("com.android.systemui", warm)
+
+    def test_cold_boot_relabels_all_kept_apps_too(self) -> None:
+        cold = "\n".join(self.run_helper("0"))
+        self.assertIn("# 2 1", cold)
+        self.assertIn("com.example.kept", cold)
+        self.assertIn("com.example.fresh", cold)
+        self.assertIn("com.android.systemui", cold)
+
+
+if __name__ == "__main__":
     unittest.main()

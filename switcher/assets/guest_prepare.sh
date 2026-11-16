@@ -4505,8 +4505,9 @@ echo "App data dirs realigned to their package uids: $realigned"
 # /data_mirror/ref_profiles/<pkg>) so Zygote and ART ProfileSaver find them immediately
 # at boot without ENOENT warnings.
 PROF_STAMP="$STAGE/data/misc/profiles/.oneos_raw_id"
+PREV_PROF_RAW_ID=$(cat "$PROF_STAMP" 2>/dev/null)
 CUR_RAW_ID=$(cat "$STAGE/system.raw.id" 2>/dev/null)
-if [ -n "$CUR_RAW_ID" ] && [ -f "$PROF_STAMP" ] && [ "$(cat "$PROF_STAMP" 2>/dev/null)" != "$CUR_RAW_ID" ]; then
+if [ -n "$CUR_RAW_ID" ] && [ -n "$PREV_PROF_RAW_ID" ] && [ "$PREV_PROF_RAW_ID" != "$CUR_RAW_ID" ]; then
     rm -rf "$STAGE/data/misc/profiles/cur/0/"* "$STAGE/data/misc/profiles/ref/"* 2>/dev/null
     echo "ART profiles: cleared stale profiles from previous image"
 fi
@@ -4994,7 +4995,8 @@ done
 # (0 kept in every one of 224 log lines of 39 reports). An installed app's folder with
 # app_data_file and another uid's categories (its uid changed since) gets its own again.
 app_data_labels() {
-    ls -dZ "$1"/* 2>/dev/null | awk -v pl="$STAGE/data/system/packages.list" '
+    ls -dZ "$1"/* 2>/dev/null | awk -v pl="$STAGE/data/system/packages.list" \
+        -v skip_kept="${2:-0}" -v pre_pkgs=" $PRE_PKGS com.sec.android.app.camera com.fahadali.oneos.guest " '
         BEGIN {
             while ((getline line < pl) > 0) {
                 n = split(line, f, " ")
@@ -5013,8 +5015,11 @@ app_data_labels() {
             t = l; sub(/^u:object_r:/, "", t); sub(/:.*/, "", t)
             if (l ~ /^u:object_r:[a-z0-9_]+_data_file:s0(:c[0-9]+(,c[0-9]+)*)?$/ && t != "shell_data_file" &&
                 t != "system_data_file" && l !~ /^u:object_r:(priv)?app_data_file:s0$/ &&
-                !(t == "app_data_file" && (pkg in lvl) && l != "u:object_r:app_data_file:" lvl[pkg])) { w = l; kept++ }
-            else if (pkg in lvl) { w = "u:object_r:app_data_file:" lvl[pkg]; given++ }
+                !(t == "app_data_file" && (pkg in lvl) && l != "u:object_r:app_data_file:" lvl[pkg])) {
+                kept++
+                if (skip_kept == "1" && index(pre_pkgs, " " pkg " ") == 0) next
+                w = l
+            } else if (pkg in lvl) { w = "u:object_r:app_data_file:" lvl[pkg]; given++ }
             else w = "u:object_r:app_data_file:s0"
             if (p ~ /^[A-Za-z0-9_.\/-]+$/) group[w] = group[w] " " p
             else print "1 " w " " p
@@ -5028,11 +5033,18 @@ p=$($BB nproc 2>/dev/null || nproc 2>/dev/null || echo 2)
 case "$p" in ''|*[!0-9]*) p=2 ;; esac
 [ "$p" -gt 8 ] && p=8
 [ "$p" -lt 2 ] && p=2
+# Speed: on warm boots where the image raw_id matches the previous session,
+# an app folder that already holds its guest-assigned SELinux label (kept) only
+# needs recursive chcon if files were seeded inside it earlier in step 5 (e.g.
+# launcher grid/settings). Skipping recursive xattr walks across ~948 unchanged
+# app trees (471 user/0 + 477 user_de/0 in 8f5752ca89e7388d) cuts step 5b I/O.
+SKIP_KEPT_CHCON=0
+[ "$PREV_PROF_RAW_ID" = "$CUR_RAW_ID" ] && [ -n "$CUR_RAW_ID" ] && [ "${ONEOS_FORCE_APP_RELABEL:-0}" != 1 ] && SKIP_KEPT_CHCON=1
 for d in "$STAGE/data/user/0" "$STAGE/data/user_de/0"; do
     if [ -d "$d" ]; then
         $BB chcon u:object_r:system_data_file:s0 "$d" 2>/dev/null || true
         if ls -dZ "$d" >/dev/null 2>&1; then
-            app_data_labels "$d" | {
+            app_data_labels "$d" "$SKIP_KEPT_CHCON" | {
                 jobs=0
                 kept=
                 given=
