@@ -101,7 +101,17 @@ rp_set_mem() {
         return 0
     fi
     case "$_rk" in
-        ro.*|ctl.*|init.svc.*) return 1 ;;
+        ctl.*|init.svc.*) return 1 ;;
+        ro.*)
+            # resetprop -n did not land it. init's property service takes a NEW
+            # ro.* name (AOSP property_service.cpp PropertySet: it only refuses
+            # a name that already exists, "Read-only property was already set"),
+            # and the session runs SELinux permissive. So a ro.* name that is
+            # absent is added through the service; one that exists is never
+            # touched (write-once: the service would refuse it anyway).
+            [ -z "$(getprop "$_rk")" ] || return 1
+            setprop "$_rk" "$_rv" 2>/dev/null && [ "$(getprop "$_rk")" = "$_rv" ]
+            return ;;
         persist.*) prop_store_isolated || return 1 ;;
     esac
     if "$RP" "$_rk" "$_rv" 2>/dev/null && [ "$(getprop "$_rk")" = "$_rv" ]; then
@@ -1457,6 +1467,23 @@ add)
     rm -f "$VERIFY_NOW" "$VERIFY_KEYS" "$VERIFY_MISS"
     echo "guest_props add: batch done $(date +%T)"
     echo "guest_props: added $(wc -l < "$ADDED") props from the guest's build.prop files"
+    # Props whose absence breaks a ColorOS system app outright (not just a
+    # feature). ro.build.version.oplus.api: BlurService's CaptureLayerUtils
+    # takes the screen-capture API from it (>= 40 ScreenCaptureInternal, below
+    # that android.window.ScreenCapture$LayerCaptureArgs, which Android 17 no
+    # longer has), so a session without it crash-looped com.oplus.blur with a
+    # NoClassDefFoundError (49 FATAL EXCEPTIONs in the 11:43 session of
+    # oneos-logs-994da8eab7d29e5e, where none of the guest's 231 ro.* props
+    # reached getprop). Said loudly, with the free room of the area that holds
+    # it, instead of leaving the next report to guess.
+    for ck in ro.build.version.oplus.api; do
+        grep -q "^$ck=" "$NEW" || continue
+        [ -n "$(getprop "$ck")" ] && continue
+        ck_ctx=$(getprop -Z "$ck" 2>/dev/null)
+        ck_f="/dev/__properties__/${ck_ctx:-u:object_r:default_prop:s0}"
+        ck_used=$(od -An -tu4 -N4 "$ck_f" 2>/dev/null | tr -d ' ')
+        echo "guest_props: !!! $ck is not set although the image defines it ($(grep "^$ck=" "$NEW" | head -n 1)): ColorOS BlurService would crash in a loop. Property area ${ck_ctx:-unknown}: $(stat -c %s "$ck_f" 2>/dev/null || echo ?) bytes, ${ck_used:-?} used"
+    done
     rm -f "$HOST" "$NEW"
     # ColorOS's default sounds. One UI defines ro.config.ringtone,
     # notification_sound and alarm_alert, so the guest read Samsung's names (run

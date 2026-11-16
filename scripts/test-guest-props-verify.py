@@ -11,7 +11,7 @@ SCRIPT = ROOT / 'switcher/assets/guest_props.sh'
 
 
 class GuestPropsSilentNoopFallbackTest(unittest.TestCase):
-    def run_add(self, n_silent_noop=True, store_isolated=True):
+    def run_add(self, n_silent_noop=True, store_isolated=True, setprop_ro=False):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             stage = root / 'stage'
@@ -22,6 +22,11 @@ class GuestPropsSilentNoopFallbackTest(unittest.TestCase):
             rootfs = root / 'rootfs'
             (rootfs / 'system/framework').mkdir(parents=True)
             (rootfs / 'system/system_ext/framework').mkdir(parents=True)
+            (rootfs / 'system/system_ext/etc').mkdir(parents=True)
+            (rootfs / 'system/system_ext/etc/build.prop').write_text(
+                'ro.build.version.oplus.api=40\n'
+                'ro.build.version.oplus.sub_api=25\n'
+            )
             (rootfs / 'system/framework/oplus-services.jar').write_text('')
             (rootfs / 'system/system_ext/framework/oplus-telephony-common.jar').write_text('')
             (rootfs / 'system/build.prop').write_text(
@@ -66,9 +71,12 @@ class GuestPropsSilentNoopFallbackTest(unittest.TestCase):
 
             # Mock setprop writing mutable properties to props/
             sp = bin_dir / 'setprop'
+            # init's property service takes a NEW ro.* name and refuses an existing one
+            # (AOSP property_service.cpp: "Read-only property was already set").
             sp.write_text(
                 '#!/bin/sh\n'
-                'case "$1" in ro.*) exit 1 ;; esac\n'
+                + ('case "$1" in ro.*) [ -e "$PROPS/$1" ] && exit 1 ;; esac\n' if setprop_ro else
+                   'case "$1" in ro.*) exit 1 ;; esac\n') +
                 'printf "%s" "$2" > "$PROPS/$1"\n'
             )
             sp.chmod(0o755)
@@ -168,6 +176,25 @@ class GuestPropsSilentNoopFallbackTest(unittest.TestCase):
         self.assertFalse(any(l.startswith('ro.') for l in ovr), ovr)
         self.assertFalse(any(l.startswith('ro.oplus.display.screenhole') for l in added), added)
         self.assertIn('persist.sys.saupwk_test', added)
+
+    def test_missing_oplus_api_is_reported_loudly(self):
+        # com.oplus.blur crash-looped (49 FATAL EXCEPTIONs) when
+        # ro.build.version.oplus.api never reached getprop.
+        out, state, added, ovr = self.run_add(n_silent_noop=True, store_isolated=True)
+        self.assertIsNone(state.get('ro.build.version.oplus.api'))
+        self.assertIn('!!! ro.build.version.oplus.api is not set although the image defines it', out)
+
+    def test_ro_props_that_resetprop_n_missed_are_added_through_the_property_service(self):
+        # resetprop -n silently did nothing: absent ro.* names are retried with
+        # setprop (init accepts a new ro.* name), existing ones are never touched.
+        out, state, added, ovr = self.run_add(n_silent_noop=True, store_isolated=True, setprop_ro=True)
+        self.assertEqual('40', state.get('ro.build.version.oplus.api'))
+        self.assertEqual('25', state.get('ro.build.version.oplus.sub_api'))
+        self.assertEqual('511,23:569,81', state.get('ro.oplus.display.screenhole.positon'))
+        self.assertIn('ro.build.version.oplus.api', added)
+        self.assertNotIn('!!! ro.build.version.oplus.api', out)
+        # One UI's own ro.* value stays (write-once)
+        self.assertEqual('ACH_Galaxy_Bells.ogg', state.get('ro.config.ringtone'))
 
     def test_silent_resetprop_n_noop_never_writes_persist_without_isolated_store(self):
         out, state, added, ovr = self.run_add(n_silent_noop=True, store_isolated=False)
