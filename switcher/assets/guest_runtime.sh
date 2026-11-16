@@ -189,8 +189,36 @@ verify-return)
     [ "$(cat "$B/boot")" = "$(cat /proc/sys/kernel/random/boot_id)" ] || exit 1
     "$S/guest_root" --host-audit > "$B/return.unsorted" || exit 1
     sort "$B/return.unsorted" > "$B/return.root"
+    if ! cmp -s "$B/root" "$B/return.root" && [ -f /data/system/packages.list ] && [ ! -L /data/system/packages.list ]; then
+        # KernelSU / BakaSU (pkg_observer.c + throne_tracker.c, confirmed in S25 SM8750
+        # kernel source): any FS_CREATE/FS_MOVE on /data/system/packages.list while
+        # /data/app is bridged to the guest's app dir runs search_manager("/data/app")
+        # against the guest tree, unregistering One UI's manager so manager_appid drops
+        # to 65535 and ksu_get_allow_list stops filtering the manager's own UID out
+        # (baseline=3 return=2 or manager mismatch in all 8 returns of 8f5752ca89e7388d).
+        # Now that One UI's /data/app is unbridged, atomically replace packages.list with
+        # a verified byte-identical copy preserving owner, mode, timestamps, and SELinux
+        # context (cp -a; fallback chcon --reference) so pkg_observer / renameat fires
+        # FS_MOVE_TO("packages.list") and re-crowns One UI's manager synchronously.
+        PL=/data/system/packages.list
+        PL_TMP="/data/system/.oneos_ksu_rescan.$$"
+        rm -f "$PL_TMP" 2>/dev/null || true
+        if cp -a "$PL" "$PL_TMP" 2>/dev/null && cmp -s "$PL" "$PL_TMP"; then
+            chcon --reference="$PL" "$PL_TMP" 2>/dev/null || true
+            if mv -f "$PL_TMP" "$PL" 2>/dev/null; then
+                "$S/guest_root" --host-audit > "$B/return.unsorted" || exit 1
+                sort "$B/return.unsorted" > "$B/return.root"
+            else
+                rm -f "$PL_TMP" 2>/dev/null || true
+            fi
+        else
+            rm -f "$PL_TMP" 2>/dev/null || true
+        fi
+    fi
     cmp -s "$B/root" "$B/return.root" || {
-        echo "Guest runtime: host root grants or manager changed (baseline=$(wc -l < "$B/root" | tr -d ' ') return=$(wc -l < "$B/return.root" | tr -d ' ') entries; clean reboot will reload protected allowlist)"
+        b_mgr=$(awk '$1 == "manager" { print $2 }' "$B/root" 2>/dev/null)
+        r_mgr=$(awk '$1 == "manager" { print $2 }' "$B/return.root" 2>/dev/null)
+        echo "Guest runtime: host root grants or manager changed (baseline=$(wc -l < "$B/root" | tr -d ' ') return=$(wc -l < "$B/return.root" | tr -d ' ') entries, mgr=${b_mgr:-?}->${r_mgr:-?}; clean reboot will reload protected allowlist)"
         exit 1
     }
     sha256sum -c "$B/selinux" || { echo 'Guest runtime: shared SELinux policy changed'; exit 1; }
