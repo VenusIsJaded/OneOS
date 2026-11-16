@@ -1530,24 +1530,24 @@ rm -f "$STAGE/data/guest_audio.flag"
 nohup $BB sh -c '
     echo $$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null
     STAGE=$1
+    # Query only the 10 guarded init.svc.* slots via getprop <name> instead of
+    # dumping all ~2,500 system properties (~120 KB) every second for the entire
+    # session (~3,600 full property-area scans/hour on S25).
     stop_host_svcs() {
         acted=0
-        p=$(getprop 2>/dev/null)
-        case "$p" in *"[init.svc.zygote]: [running]"*) setprop ctl.stop zygote; acted=1 ;; esac
-        case "$p" in *"[init.svc.zygote_secondary]: [running]"*) setprop ctl.stop zygote_secondary; acted=1 ;; esac
-        case "$p" in *"[init.svc.bootchecker]: [running]"*) setprop ctl.stop bootchecker; acted=1 ;; esac
-        case "$p" in *"[init.svc.surfaceflinger]: [running]"*)
-            [ ! -f "$STAGE/data/oneos_host_sf_frozen" ] && { setprop ctl.stop surfaceflinger; acted=1; } ;;
-        esac
-        case "$p" in *"[init.svc.bootanim]: [running]"*) setprop ctl.stop bootanim; acted=1 ;; esac
-        case "$p" in *"[init.svc.audioserver]: [running]"*)
-            [ -f "$STAGE/data/guest_audio.flag" ] && { setprop ctl.stop audioserver; acted=1; } ;;
-        esac
-        case "$p" in *"[init.svc.dumpstate]: [running]"*) setprop ctl.stop dumpstate; acted=1 ;; esac
-        case "$p" in *"[init.svc.dumpstatez]: [running]"*) setprop ctl.stop dumpstatez; acted=1 ;; esac
-        case "$p" in *"[init.svc.bugreport]: [running]"*) setprop ctl.stop bugreport; acted=1 ;; esac
-        case "$p" in *"[init.svc.bugreportd]: [running]"*) setprop ctl.stop bugreportd; acted=1 ;; esac
+        for s in zygote zygote_secondary bootchecker bootanim dumpstate dumpstatez bugreport bugreportd; do
+            [ "$(getprop init.svc.$s 2>/dev/null)" = running ] && { setprop ctl.stop $s; acted=1; }
+        done
+        if [ ! -f "$STAGE/data/oneos_host_sf_frozen" ] && [ "$(getprop init.svc.surfaceflinger 2>/dev/null)" = running ]; then
+            setprop ctl.stop surfaceflinger; acted=1
+        fi
+        if [ -f "$STAGE/data/guest_audio.flag" ] && [ "$(getprop init.svc.audioserver 2>/dev/null)" = running ]; then
+            setprop ctl.stop audioserver; acted=1
+        fi
     }
+    # Keep literal "ctl.stop zygote" in this script argument so return_to_oneui.sh
+    # pkill/pgrep -f "ctl.stop zygote" always finds and stops this guard loop.
+    : "ctl.stop zygote"
     ticks=0; fast_until=600
     while true; do
         stop_host_svcs
