@@ -455,31 +455,6 @@ if [ -n "$BT_FRAG" ]; then
     fi
 fi
 
-# Host audio_effects_config_sec.xml <postprocess> bind-mounts (oneos_switch.sh):
-# restore the vendor's unmodified config in init's mount namespace before Gate A
-# checks host_part_mounts and before One UI's audio HAL restarts.
-if [ -f "$S/host_fx_binds" ]; then
-    hfx_stuck=""
-    while IFS= read -r hfx; do
-        [ -n "$hfx" ] || continue
-        n=0
-        while [ $n -lt 5 ] && awk -v m="$hfx" '$5 == m { f = 1 } END { exit !f }' /proc/1/mountinfo 2>/dev/null; do
-            if [ -n "$BB" ]; then in_init_ns "$BB" umount -l "$hfx" 2>/dev/null; else in_init_ns umount -D -l "$hfx" 2>/dev/null; fi
-            n=$((n + 1))
-        done
-        if awk -v m="$hfx" '$5 == m { f = 1 } END { exit !f }' /proc/1/mountinfo 2>/dev/null; then
-            hfx_stuck="$hfx_stuck $hfx"
-        fi
-    done < "$S/host_fx_binds"
-    if [ -n "$hfx_stuck" ]; then
-        echo "!!! Host audio effects config still bound:$hfx_stuck; rebooting"
-        ONEOS_RETURN_MODE=reboot
-    else
-        rm -f "$S/host_fx_binds" "$S"/oneos_hfx_*
-        echo "Host audio effects config: vendor's restored"
-    fi
-fi
-
 # Put the host's own /data trees back FIRST: guest_prepare.sh bridges the
 # staged app trees (installd/artd write there), and nothing may start One UI
 # on top of the guest's copies.

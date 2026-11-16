@@ -1917,77 +1917,6 @@ if [ "${ONEOS_GUEST_AUDIO:-1}" = "1" ]; then
     touch "$STAGE/data/guest_audio.flag"
     AHAL=$(getprop | sed -n 's/^\[init\.svc\.\(vendor\.audio-hal[^]]*\)\]: \[running\]$/\1/p' | tr '\n' ' ')
     echo "$AHAL" > "$STAGE/host_audio_hal_svcs"
-    # Samsung's AIDL audio effect HAL (audiohalservice.qti) runs in the host
-    # mount namespace and parses /vendor/etc/audio_effects_config_sec.xml
-    # (IFactory::queryProcessing), not the guest namespace's audio_effects.xml.
-    # Without One UI's AudioService / SoundAlive setting a preset or room
-    # context, <postprocess> auto-attaches MySpace (SoundAlive_3DPosisiton_Factory
-    # at mPreset = 0, !mContext) to every STREAM_MUSIC session, muffling speaker
-    # playback. Bind-mount a <postprocess>-cleaned copy in the host namespace
-    # before restarting the HAL; return_to_oneui.sh unmounts it before Gate A.
-    rm -f "$STAGE/host_fx_binds" "$STAGE"/oneos_hfx_* 2>/dev/null || true
-    if [ "${ONEOS_GUEST_STRIP_MYSPACE:-1}" = "1" ]; then
-        # Resolve effect/effectProxy names in Samsung's audio_effects_config_sec.xml
-        # (and SKU audio_effects.xml files) by UUID as well as by literal name:
-        # Samsung's SEC config maps MySpace / SoundAlive_3DPosisiton_Factory to UUIDs
-        # c7a84e61-eebe-4fcc-bc53-efcb841b4625 (offload), 3462a6e0-655a-11e4-8b67-0002a5d5c51b
-        # (SW MySpace Library), and type b6c0ace0-..., under SEC-specific effect names
-        # that a literal effect="myspace" check missed.
-        strip_host_fx_xml() {
-            awk '
-                BEGIN { IGNORECASE = 1; bad["myspace"] = 1; bad["music_helper"] = 1; bad["sa3d"] = 1 }
-                /<effectProxy[ \t>]/ {
-                    if (match($0, /name="[^"]+"/)) px = substr($0, RSTART + 6, RLENGTH - 7)
-                    else px = ""
-                }
-                /<\/effectProxy>/ { px = "" }
-                /(c7a84e61-eebe-4fcc-bc53-efcb841b4625|3462a6e0-655a-11e4-8b67-0002a5d5c51b|b6c0ace0-|libmyspace|myspace)/ {
-                    if (px != "") bad[tolower(px)] = 1
-                    if (match($0, /name="[^"]+"/)) {
-                        nm = substr($0, RSTART + 6, RLENGTH - 7)
-                        bad[tolower(nm)] = 1
-                    }
-                }
-                END {
-                    for (k in bad) printf "%s|", k
-                }
-            ' "$1" 2>/dev/null
-        }
-        hfx_i=0
-        for hfx in /vendor/etc/audio_effects_config_sec.xml /vendor/etc/audio_effects.xml \
-                   /vendor/etc/audio/sku_"$(getprop ro.boot.product.vendor.sku)"/audio_effects.xml \
-                   /vendor/etc/audio/sku_sun/audio_effects.xml /vendor/etc/audio/sku_pineapple/audio_effects.xml \
-                   /vendor/etc/audio/sku_kalama/audio_effects.xml /odm/etc/audio_effects.xml; do
-            [ -f "$hfx" ] && [ ! -L "$hfx" ] || continue
-            case " $HFX_SEEN " in *" $hfx "*) continue ;; esac
-            HFX_SEEN="${HFX_SEEN:-} $hfx"
-            bad_pat=$(strip_host_fx_xml "$hfx")
-            bad_pat=${bad_pat%|}
-            [ -n "$bad_pat" ] || continue
-            hfx_dst="$STAGE/oneos_hfx_${hfx_i}.xml"
-            awk -v pat="^($bad_pat)$" '
-                /<postprocess>/ { inp = 1 }
-                /<\/postprocess>/ { inp = 0 }
-                inp && /<apply[ \t]/ && match($0, /effect="[^"]+"/) {
-                    ef = tolower(substr($0, RSTART + 8, RLENGTH - 9))
-                    if (ef ~ pat) { stripped++; next }
-                }
-                { print }
-                END { if (stripped + 0 == 0) exit 4 }
-            ' "$hfx" > "$hfx_dst" 2>/dev/null || { rm -f "$hfx_dst"; continue; }
-            [ -s "$hfx_dst" ] || { rm -f "$hfx_dst"; continue; }
-            chmod 0644 "$hfx_dst"
-            chcon --reference="$hfx" "$hfx_dst" 2>/dev/null || chcon u:object_r:vendor_configs_file:s0 "$hfx_dst" 2>/dev/null || true
-            if "$BB" mount --bind "$hfx_dst" "$hfx" 2>/dev/null; then
-                "$BB" mount -o remount,ro,bind "$hfx_dst" "$hfx" 2>/dev/null || "$BB" mount -o remount,ro,bind "$hfx" 2>/dev/null || true
-                echo "$hfx" >> "$STAGE/host_fx_binds"
-                echo "Audio: stripped unconfigured MySpace/music_helper postprocess ($bad_pat) in host $hfx"
-                hfx_i=$((hfx_i + 1))
-            else
-                rm -f "$hfx_dst"
-            fi
-        done
-    fi
     setprop ctl.stop audioserver
     n=0
     while [ $n -lt 25 ] && pidof audioserver >/dev/null; do n=$((n + 1)); sleep 0.2; done
@@ -2944,7 +2873,7 @@ while true; do
             # output, sound much better); ONEOS_GUEST_DOLBY=0: off. Phones
             # whose effect HAL has no Dolby: it gives up after a minute, logged.
             if [ "${ONEOS_GUEST_DOLBY:-1}" = 1 ] && [ -f $STAGE/OneOSEdmStub.dex ] && [ ! -L $STAGE/OneOSEdmStub.dex ]; then
-                ($BB nohup $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/env CLASSPATH=/data/oneos_edm_stub.dex /system/bin/app_process /system/bin OneOSSoundFx \$PID "" "${ONEOS_GUEST_DOLBY_PROFILE:-0}" > $STAGE/sound_fx.log 2>&1 </dev/null &)
+                ($BB nohup $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/env CLASSPATH=/data/oneos_edm_stub.dex /system/bin/app_process /system/bin OneOSSoundFx \$PID > $STAGE/sound_fx.log 2>&1 </dev/null &)
                 w=0
                 while [ \$w -lt 15 ] && [ ! -s $STAGE/sound_fx.log ]; do w=\$((w + 1)); sleep 0.2; done
                 echo "[UI Activator] sound fx: \$(head -n 3 $STAGE/sound_fx.log 2>/dev/null | tr '\n' ' ' || true)"
