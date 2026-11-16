@@ -4190,12 +4190,13 @@ echo "Session sampler: every 60 s to $STAGE/diag_series.txt (skin sysfs: ${SKIN_
 # return_to_oneui.sh stops it as well and does the same (heat_cap.active), for
 # One UI's SSRM to set its own. ONEOS_HEAT_CAP=0 (Advanced: Cool down when hot
 # off): no cap. Out of the app cgroup, like the sampler.
-# Guest thermal status (Pixel; owner's go, 2026-11-06). Samsung's thermal HAL
-# told Pixel CRITICAL at 49.6 C skin, and Pixel's JobScheduler holds every
-# ordinary job from SEVERE on (ThermalStatusRestriction, fixed in its code):
-# Play installs, the live wallpaper download, theme packs and icon styles never
-# started while the phone was warm (test build 6, 14:46-14:50). The same loop
-# gives the guest a status from the skin temperature instead: NONE under 47 C,
+# Guest thermal status (every guest system; originally Pixel, extended after S25
+# ColorOS 8f5752ca89e7388d). Samsung's thermal HAL reports MODERATE at 44.2 C
+# skin, SEVERE at 46.3 C, and CRITICAL at 45.5 C from AP-die / virtual sensors:
+# WindowManager's BlurController disabled all cross-window blur at 44.2 C skin
+# (mDisabledByThermal: true), ColorOS capped display refresh to 60 Hz, and
+# JobScheduler held background jobs from SEVERE on. The same loop gives every
+# guest a status purely from the SKIN temperature instead: NONE under 47 C,
 # LIGHT from 47, MODERATE from 50, SEVERE from 53 (1 C hysteresis), and from
 # 56 C the HAL's own again, CRITICAL and SHUTDOWN included (cmd thermalservice
 # override-status / reset; again after a guest system_server restart). The
@@ -4204,7 +4205,7 @@ echo "Session sampler: every 60 s to $STAGE/diag_series.txt (skin sysfs: ${SKIN_
 rm -f "$STAGE/heat_cap.active"
 HEAT_CAP=0; [ "${ONEOS_HEAT_CAP:-1}" = 1 ] && HEAT_CAP=1
 GUEST_THERMAL_MAP=0
-[ "${ONEOS_GUEST_THERMAL_MAP:-1}" = 1 ] && grep -q '^  "image": "pixel' "$STAGE/.oneos_stage" 2>/dev/null && GUEST_THERMAL_MAP=1
+[ "${ONEOS_GUEST_THERMAL_MAP:-1}" = 1 ] && GUEST_THERMAL_MAP=1
 if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
     [ $HEAT_CAP = 1 ] && : > "$STAGE/heat_cap.active"
     # Preserve cpufreq_max_limit.released if [4b/6] already released a stale
