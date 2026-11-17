@@ -50,6 +50,16 @@ read-only there, and the guest now has its own), **no more boot failures from fa
 **ColorOS lock screen depth effect** (0.4.60 gave its files to the wrong app; OPPO's AI engine from the
 Find X9 Ultra's own firmware is in ColorOS too), and the **Samsung Camera on the A56** (its sensor crop).
 
+Unreleased: cooler and quicker, from the 11-16 logs.
+- **The heat cap now throttles on the battery's temperature too** (from 42 C), not only on the skin sensor that
+  lags it: a battery at 44 C with a skin at 41 C used to leave the cap idle ("not throttling").
+- **The one-time full compile of all apps no longer heats the phone for minutes**: it runs paced (half duty),
+  pauses while the heat cap is active, does your apps, the launcher and SystemUI first, and stops when you return
+  to One UI. Before, it ran flat out and took the processor from 48 C to 56-60 C until the return.
+- **The switch no longer waits ~20 s on properties the system will not take** (11 `debug.sf.*_phase_offset_ns`
+  names): after two stalled calls the rest of the retry skips the slow path.
+- Three more per-frame log storms are silenced for the session (about 10k lines in 6 minutes).
+
 New in 0.5.19: Nothing OS on the Galaxy S23s, Turn it off that lasts.
 - **Nothing OS on the Galaxy S23, S23+ and S23 Ultra**, untested: it **might not boot**. If it does not, the phone
   comes back to One UI by itself; please send a report either way (with Record full logs from now on if it starts).
