@@ -6022,7 +6022,7 @@ while true; do
             # App by app, with its progress in a notification (owner: show that it is optimizing); the last one
             # says it is done and is swiped away (a shell notification cannot be withdrawn).
             # Heat (oneos-logs-49a4bcbbfa659c09, 16:23:05): started flat out, 69 apps took 229 s of CPU in 88 s of wall
-            # clock and the AP die went from 48 C to 56-60 C (skin 42 C and falling) until the return. Same compile, paced:
+            # clock and the AP die went from 48 C to 56-60 C (battery 42 C and falling) until the return. Same compile, paced:
             #  - the apps people open first (the ones they installed, the launcher, SystemUI), the system's rest after;
             #  - nothing while the heat cap is on (data/oneos_heat_level, written by the host's heat cap, 0 or absent when
             #    cool), re-checked every 10 s for 10 min at most per app;

@@ -27,7 +27,7 @@ package com.fahadali.oneos.core.model
  * which the session scripts refuse to hide, so 0.3.7 has no image that may.
  *
  * [HEAT_CAP] (0.4.23) is the other: Prepare writes 1, and root's `launch`
- * writes Advanced's Cool down when hot. 1 caps the CPU while the skin is hot
+ * writes Advanced's Cool down when hot. 1 caps the CPU while the battery is hot
  * (oneos_switch.sh), 0 leaves it at full clock. Neither touches the way back.
  * [SEC_IMS] (0.4.20) is the second key a launch changes: Prepare writes 0, a
  * launch writes the Advanced screen's choice. 1 stages this phone's own Samsung
@@ -52,7 +52,7 @@ object SessionEnv {
     /** 1: hide Play services, the Play Store and their helpers in the guest for this session (guest_prepare.sh). */
     const val HIDE_GMS = "ONEOS_GUEST_HIDE_GMS"
 
-    /** 1: cap the CPU from 45 °C skin during the session (oneos_switch.sh); 0: full clock all session. */
+    /** 1: cap the CPU from 42 °C battery during the session (oneos_switch.sh); 0: full clock all session. */
     const val HEAT_CAP = "ONEOS_HEAT_CAP"
     /** 1: this phone's Samsung IMS app (VoLTE) staged into the guest for this session (guest_prepare.sh); experimental. */
     const val SEC_IMS = "ONEOS_GUEST_SEC_IMS"

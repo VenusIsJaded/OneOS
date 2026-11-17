@@ -30,7 +30,7 @@
     <string name="advanced_logs_summary">Share them with the OneOS team. Personal info is removed first.</string>
     <string name="advanced_restore_summary">Only needed after a force restart during a session</string>
     <string name="advanced_heat_cap_title">Cool down when hot</string>
-    <string name="advanced_heat_cap_summary">One UI\'s heat control doesn\'t run in the other system. From 45 °C, OneOS slows the processor there until the phone cools down.</string>
+    <string name="advanced_heat_cap_summary">One UI\'s heat control doesn\'t run in the other system. From 42 °C battery temperature, OneOS slows the processor there until the phone cools down.</string>
     <string name="advanced_full_logs_title">Full session logs</string>
     <string name="advanced_full_logs_summary">Records everything the systems do, for bug reports. Off by default: it adds heat and uses storage. Turn it on when something goes wrong, then send a report.</string>
     <string name="advanced_card_help">Help</string>

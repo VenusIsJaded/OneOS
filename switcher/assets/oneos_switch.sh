@@ -1387,16 +1387,25 @@ cpu_caps() {
     done
     echo "${caps# }"
 }
-skin_temp() {
-    ts=""
-    if [ "${1:-}" != stopped ]; then
-        ts=$(timeout 5 dumpsys thermalservice 2>/dev/null | sed -n '/^Current temperatures from HAL/,/^[^[:space:]]/p' |
-            sed -n 's/.*mValue=\([-0-9.]*\), mType=[0-9]*, mName=SKIN,.*/\1/p' | head -n 1)
-    fi
-    tc=$(timeout 3 logcat -d -t 400 -s thermal_core:I 2>/dev/null | sed -n 's/.* skin : \([0-9][0-9]*\).*/\1/p' | tail -n 1)
-    if [ -n "$ts" ]; then ts="$ts C"; else ts="none"; fi
-    if [ -n "$tc" ]; then tc="$((tc / 10)).$((tc % 10)) C"; else tc="none logged"; fi
-    echo "thermal service $ts, thermal_core $tc"
+# The phone's battery temperature (sysfs, tenths of a degree), the one temperature OneOS acts on: the battery
+# is what gets hot to the touch, what wears out, and what Samsung's own heat control follows. A plain file read.
+# (The skin sensor was dropped: this phone does not expose it, so every read cost a logcat scan or a dumpsys.)
+batt_node() {
+    for bn in /sys/class/power_supply/battery/temp /sys/class/power_supply/*/temp; do
+        [ -r "$bn" ] || continue
+        case "$bn" in */battery/temp) ;; *) [ "$(cat "${bn%/temp}/type" 2>/dev/null)" = Battery ] || continue ;; esac
+        bv=''; IFS= read -r bv < "$bn" 2>/dev/null
+        case "$bv" in ''|*[!0-9]*) continue ;; esac
+        echo "$bn"; return 0
+    done
+    return 1
+}
+batt_temp() {
+    bn=$(batt_node) || { echo "battery none"; return; }
+    bv=''; IFS= read -r bv < "$bn" 2>/dev/null
+    case "$bv" in ''|*[!0-9]*) echo "battery none"; return ;; esac
+    [ "$bv" -gt 1500 ] && bv=$((bv / 100))
+    echo "battery $((bv / 10)).$((bv % 10)) C"
 }
 STAGE="$STAGE" BB="$BB" /system/bin/sh "$STAGE/fold8_coloros.sh" performance-snapshot || refuse "Performance limit snapshot failed"
 # Samsung's own CPU ceiling (cpufreq_limit/cpufreq_max_limit, SSRM's vote)
@@ -1409,8 +1418,8 @@ STAGE="$STAGE" BB="$BB" /system/bin/sh "$STAGE/fold8_coloros.sh" performance-sna
 HOST_LOW_POWER=$(timeout 3 settings get global low_power 2>/dev/null)
 echo "Before the stop: power saving ${HOST_LOW_POWER:-unknown}, cpufreq_max_limit $(cat /sys/devices/system/cpu/cpufreq_limit/cpufreq_max_limit 2>/dev/null || echo none)"
 echo "=== [4b/6] $(date +%T) Stopping the One UI framework ==="
-PRE_STOP_SKIN=$(skin_temp)
-echo "Before the stop: CPU max/hw kHz: $(cpu_caps); skin: $PRE_STOP_SKIN"
+PRE_STOP_BATT=$(batt_temp)
+echo "Before the stop: CPU max/hw kHz: $(cpu_caps); $PRE_STOP_BATT"
 pkill -f "while true; do [ \"\$(getprop init.svc.zygote)\"" 2>/dev/null || true
 pkill -f "while true; do for p in \\\$(pidof audioserver cameraserver)" 2>/dev/null || true
 # Gap splash (see the top): once SplashActivity is on screen, freeze One UI's
@@ -1627,13 +1636,13 @@ fi
 # cpufreq_max_limit=1958400 kHz (43% of 4.47 GHz) at 39.7 C skin, throttling all
 # of guest_prepare.sh (+15 s), guest_props.sh, guest_start.sh, ZygoteInit and
 # SystemServer's 538-package scan. Only when Cool down when hot is on, power
-# saving was off, and pre-stop SKIN < 43 C.
+# saving was off, and pre-stop battery < 42 C (where the heat cap starts).
 rm -f "$STAGE/cpufreq_max_limit.released"
 if [ "${ONEOS_HEAT_CAP:-1}" = 1 ] && [ "$HOST_LOW_POWER" = 0 ]; then
-    pre_sk=$(printf '%s\n' "$PRE_STOP_SKIN" | awk '{
+    pre_sk=$(printf '%s\n' "$PRE_STOP_BATT" | awk '{
         for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+(\.[0-9]+)?$/ && ($(i + 1) == "C" || $(i + 1) == "C,")) { print $i; exit }
     }')
-    if [ -z "$pre_sk" ] || awk -v s="$pre_sk" 'BEGIN { exit !(s + 0 < 43) }'; then
+    if [ -z "$pre_sk" ] || awk -v s="$pre_sk" 'BEGIN { exit !(s + 0 < 42) }'; then
         CFL_EARLY=/sys/devices/system/cpu/cpufreq_limit/cpufreq_max_limit
         early_lifted=""
         if [ -w "$CFL_EARLY" ]; then
@@ -1654,11 +1663,11 @@ if [ "${ONEOS_HEAT_CAP:-1}" = 1 ] && [ "$HOST_LOW_POWER" = 0 ]; then
         done
         if [ -n "$early_lifted" ]; then
             : > "$STAGE/heat_cap.active"
-            echo "Early CPU uncap for switch and boot (skin ${pre_sk:-<43} C, power saving off):$early_lifted"
+            echo "Early CPU uncap for switch and boot (battery ${pre_sk:-<42} C, power saving off):$early_lifted"
         fi
     fi
 fi
-echo "After the stop: CPU max/hw kHz: $(cpu_caps); skin: $(skin_temp stopped)"
+echo "After the stop: CPU max/hw kHz: $(cpu_caps); $(batt_temp)"
 
 # --- MOUNT PREPARATION ---
 # OneOS safeguards: One UI's /apex mounts must look the same after the
@@ -3995,8 +4004,8 @@ fi
 # Session sampler (run 44: nothing was recorded after the 90 s round; window
 # blur went off and on with the guest's thermal status, not the setting, while
 # One UI's last CPU cap stayed). Every 30 s until the return, one line in
-# $STAGE/diag_series.txt: time, the guest's thermal status and skin
-# temperature (its thermal service on the shared HAL), each cpufreq policy's
+# $STAGE/diag_series.txt: time, the guest's thermal status (boot diagnostics
+# only) and the battery temperature, each cpufreq policy's
 # scaling_max_freq/cpuinfo_max_freq, WindowManager's mBlurEnabled,
 # disable_window_blurs, battery level and status. Read only, each guest call
 # with a timeout; until the guest's system_server runs only the kernel's
@@ -4007,80 +4016,42 @@ fi
 # $STAGE/cpu_top.log (collected with the stage's logs), the six busiest
 # processes over one second and the CPU totals (HyperOS run 11: 42-44 C skin
 # all session and nothing said which process kept the CPU busy).
-SKIN_NODE=''
-SKIN_SCALE=1000
 AP_NODES=''
+BATT_NODE=$(batt_node)
 for tz in /sys/class/thermal/thermal_zone*; do
     [ -r "$tz/type" ] && [ -r "$tz/temp" ] || continue
     tzt=''
     IFS= read -r tzt < "$tz/type" 2>/dev/null
     case "$tzt" in
-        skin-therm|skin_therm|skin-msm-therm*|skin_msm_therm*|sec-skin-therm*|sec_skin_therm*|sec-therm|sec_therm|surface_therm*|surface-therm*|quiet-therm*|quiet_therm*|xo-therm*|xo_therm*|ap_ntc)
-            [ -n "$SKIN_NODE" ] && continue
-            tv=''
-            IFS= read -r tv < "$tz/temp" 2>/dev/null
-            case "$tv" in -*[0-9]*|[1-9][0-9]*) SKIN_NODE="$tz/temp" ;; esac ;;
         cpu-*-usr|cpuss-*-usr|cpu_therm|cpu-therm|soc_therm|soc-therm|big-therm|big_therm|little-therm|little_therm|mid-therm|mid_therm|prime-therm|prime_therm|ns-cpu-*-step|ap_therm|ap-therm)
             tv=''
             IFS= read -r tv < "$tz/temp" 2>/dev/null
             case "$tv" in [1-9][0-9]*) AP_NODES="$AP_NODES $tz/temp" ;; esac ;;
     esac
 done
-if [ -z "$SKIN_NODE" ]; then
-    for sn in /sys/class/sec/sec-therm/temperature /sys/class/sec/sec-ap-therm/temperature; do
-        [ -r "$sn" ] || continue
-        tv=''
-        IFS= read -r tv < "$sn" 2>/dev/null
-        case "$tv" in
-            [1-9][0-9]*)
-                SKIN_NODE="$sn"
-                [ "$tv" -le 1200 ] 2>/dev/null && SKIN_SCALE=10
-                break ;;
-        esac
-    done
-fi
 AP_NODES=${AP_NODES# }
 
 $BB nice -n 19 $BB sh -c "
     echo \$\$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null
     F=$STAGE/diag_series.txt
     T=$STAGE/cpu_top.log
-    SKIN_NODE='$SKIN_NODE'
-    SKIN_SCALE='$SKIN_SCALE'
+    BATT_NODE='$BATT_NODE'
     AP_NODES='$AP_NODES'
     BOOT_DIAG='${ONEOS_BOOT_DIAG:-0}'
-    fmt_c() {
-        case \"\$1\" in
-            -*|''|*[!0-9.]*) echo '' ;;
-            *.*) echo \"\$1\" ;;
-            *)
-                if [ \"\$SKIN_SCALE\" = 10 ] && [ \"\$1\" -gt 100 ] && [ \"\$1\" -le 1200 ] 2>/dev/null; then
-                    echo \"\$(( \$1 / 10 )).\$(( \$1 % 10 ))\"
-                elif [ \"\$1\" -gt 1200 ] 2>/dev/null; then
-                    echo \"\$(( \$1 / 1000 )).\$(( (\$1 % 1000) / 100 ))\"
-                elif [ \"\$1\" -gt 100 ] 2>/dev/null; then
-                    echo \"\$(( \$1 / 10 )).\$(( \$1 % 10 ))\"
-                elif [ \"\$1\" -gt 0 ] 2>/dev/null; then
-                    echo \"\$1.0\"
-                fi
-                ;;
-        esac
-    }
     echo \"# \$(date) OneOS session sampler: every 60 s (sysfs-first, nice 19)\" > \$T
-    echo \"# \$(date) OneOS session sampler, one line every 60 s: time, thermal status, skin C, ap C, policyN=scaling_max_freq/cpuinfo_max_freq kHz, gpu_max_clock, battery %,status\" > \$F
+    echo \"# \$(date) OneOS session sampler, one line every 60 s: time, thermal status, battery C, ap C, policyN=scaling_max_freq/cpuinfo_max_freq kHz, gpu_max_clock, battery %,status\" > \$F
     while true; do
         [ -f $STAGE/data/oneos_rec_stop ] && { echo \"# \$(date +%T) the return started: sampler stopped\" >> \$F; exit 0; }
         [ -s $STAGE/guest_mntns ] || { echo \"# \$(date +%T) no guest namespace record: sampler stopped\" >> \$F; exit 0; }
         t0=\$(date +%s)
-        st=''; sk=''; ap=''; bl='-'; dw='-'
-        if [ -n \"\$SKIN_NODE\" ] && [ -r \"\$SKIN_NODE\" ]; then
+        st=''; bt=''; ap=''; bl='-'; dw='-'
+        if [ -n \"\$BATT_NODE\" ]; then
             raw=''
-            IFS= read -r raw < \"\$SKIN_NODE\" 2>/dev/null
-            sk=\$(fmt_c \"\$raw\")
-        fi
-        if [ -z \"\$sk\" ]; then
-            tc=\$(timeout 2 logcat -d -t 80 -s thermal_core:I 2>/dev/null | sed -n 's/.* skin : \([1-9][0-9]*\).*/\1/p' | tail -n 1)
-            [ -n \"\$tc\" ] && sk=\"\$((tc / 10)).\$((tc % 10))\"
+            IFS= read -r raw < \"\$BATT_NODE\" 2>/dev/null
+            case \"\$raw\" in
+                ''|*[!0-9]*) ;;
+                *) [ \"\$raw\" -gt 1500 ] && raw=\$((raw / 100)); bt=\"\$((raw / 10)).\$((raw % 10))\" ;;
+            esac
         fi
         ap_max=0
         for an in \$AP_NODES; do
@@ -4096,13 +4067,12 @@ $BB nice -n 19 $BB sh -c "
             esac
         done
         [ \"\$ap_max\" -gt 0 ] && ap=\"\$((ap_max / 1000)).\$(( (ap_max % 1000) / 100 ))\"
-        if [ -z \"\$sk\" ] || [ \"\$BOOT_DIAG\" = 1 ]; then
+        if [ \"\$BOOT_DIAG\" = 1 ]; then
             P=\$(pidof system_server 2>/dev/null)
             P=\${P%% *}
             if [ -n \"\$P\" ]; then
                 TH=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys thermalservice 2>/dev/null)
                 st=\$(echo \"\$TH\" | sed -n 's/^Thermal Status: *\([0-9][0-9]*\).*/\1/p' | head -n 1)
-                [ -n \"\$sk\" ] || sk=\$(echo \"\$TH\" | sed -n '/^Current temperatures from HAL/,/^[^[:space:]]/p' | sed -n 's/.*mValue=\([-0-9.]*\), mType=[0-9]*, mName=SKIN,.*/\1/p' | head -n 1)
                 if [ \"\$BOOT_DIAG\" = 1 ]; then
                     bl=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys window windows 2>/dev/null | grep -m 1 -o 'mBlurEnabled=[a-z]*' | sed 's/.*=//')
                     dw=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings get global disable_window_blurs 2>/dev/null)
@@ -4129,7 +4099,7 @@ $BB nice -n 19 $BB sh -c "
             IFS= read -r bs < /sys/class/power_supply/battery/status 2>/dev/null
             case \"\$bs\" in *' '*) bs=\$(printf '%s' \"\$bs\" | tr ' ' '_') ;; esac
         fi
-        echo \"\$(date +%T) thermal=\${st:--} skin=\${sk:--} ap=\${ap:--}\$c blur=\${bl:--} disable_window_blurs=\${dw:--} battery=\${bc:-?}%,\${bs:-?}\" >> \$F
+        echo \"\$(date +%T) thermal=\${st:--} battery_c=\${bt:--} ap=\${ap:--}\$c blur=\${bl:--} disable_window_blurs=\${dw:--} battery=\${bc:-?}%,\${bs:-?}\" >> \$F
         if [ \"\$BOOT_DIAG\" = 1 ]; then
             TOP=\$(timeout 10 top -b -n 1 -d 1 -m 6 -s 1 -o %CPU,PID,NAME 2>/dev/null)
             echo \"\$(date +%T) \$(echo \"\$TOP\" | grep -m 1 'cpu ' | tr -s ' ') |\$(echo \"\$TOP\" | awk '\$1 ~ /^[0-9.]+\$/ && \$2 ~ /^[0-9]+\$/ { printf \" %s %s\", \$1, \$3 }')\" >> \$T
@@ -4138,33 +4108,38 @@ $BB nice -n 19 $BB sh -c "
         sleep \$s
     done
 " </dev/null >/dev/null 2>&1 &
-echo "Session sampler: every 60 s to $STAGE/diag_series.txt (skin sysfs: ${SKIN_NODE:-thermal_core/dumpsys fallback})"
+echo "Session sampler: every 60 s to $STAGE/diag_series.txt (battery sysfs: ${BATT_NODE:-none})"
 
 # Heat cap (S25 Ultra af6c2b17; owner 2026-10-27: cap only when hot). One UI's
 # heat control (SSRM) stops with One UI's system_server, and nothing in the
-# guest caps the CPU: that session ran both clusters at full clock up to 54 C
-# skin. Every 10 s the guest's SKIN temperature (its thermal service on the
-# shared HAL, read as the sampler reads it) sets a level: from 45 C (Samsung's
-# SEVERE) every cpufreq policy's scaling_max_freq is 80% of its
-# cpuinfo_max_freq, from 47 C 65%, from 50 C 50%; a level ends 2 C under where
-# it began. The first reading under 45 C lifts a cap One UI left (run 45: half
-# clock for a whole session); after that the policies are written only when the
-# level changes, each change logged in $STAGE/heat_cap.log. Only scaling_max_freq
-# (the sysfs request) is written: the kernel's own thermal limits stay. It stops
-# with the return (data/oneos_rec_stop) or when the guest's namespace record is
-# gone, giving the policies their full clock back if it had capped them;
-# return_to_oneui.sh stops it as well and does the same (heat_cap.active), for
-# One UI's SSRM to set its own. ONEOS_HEAT_CAP=0 (Advanced: Cool down when hot
-# off): no cap. Out of the app cgroup, like the sampler.
+# guest caps the CPU: that session ran both clusters at full clock up to 54 C.
+# Every 10 s the BATTERY temperature (/sys/class/power_supply/battery/temp, a
+# plain file read) sets a level: from 42 C every cpufreq policy's scaling_max_freq
+# is 85% of its cpuinfo_max_freq, from 44 C 75%, from 46 C 62%, from 48 C 48% (GPU
+# the same share); a level ends 2 C under where it began. Owner 2026-11-17: the
+# battery is the temperature that matters (what you feel, what wears out, what
+# Samsung's own control follows), and the phone's skin sensor was never readable
+# here: its value came from a logcat scan or a dumpsys call every 10 s, and it
+# lagged the battery by minutes (44 C battery, 41 C skin: "not throttling"). So the
+# skin is not read at all any more. The first reading under 42 C lifts a cap
+# One UI left (run 45: half clock for a whole session); after that the policies
+# are written only when the level changes, each change logged in
+# $STAGE/heat_cap.log. Only scaling_max_freq (the sysfs request) is written: the
+# kernel's own thermal limits stay. It stops with the return
+# (data/oneos_rec_stop) or when the guest's namespace record is gone, giving the
+# policies their full clock back if it had capped them; return_to_oneui.sh stops
+# it as well and does the same (heat_cap.active), for One UI's SSRM to set its
+# own. ONEOS_HEAT_CAP=0 (Advanced: Cool down when hot off): no cap. Out of the
+# app cgroup, like the sampler.
 # Guest thermal status (every guest system; originally Pixel, extended after S25
 # ColorOS 8f5752ca89e7388d). Samsung's thermal HAL reports MODERATE at 44.2 C
 # skin, SEVERE at 46.3 C, and CRITICAL at 45.5 C from AP-die / virtual sensors:
 # WindowManager's BlurController disabled all cross-window blur at 44.2 C skin
 # (mDisabledByThermal: true), ColorOS capped display refresh to 60 Hz, and
 # JobScheduler held background jobs from SEVERE on. The same loop gives every
-# guest a status purely from the SKIN temperature instead: NONE under 47 C,
-# LIGHT from 47, MODERATE from 50, SEVERE from 53 (1 C hysteresis), and from
-# 56 C the HAL's own again, CRITICAL and SHUTDOWN included (cmd thermalservice
+# guest a status purely from the BATTERY temperature instead: NONE under 46 C,
+# LIGHT from 46, MODERATE from 48, SEVERE from 50 (1 C hysteresis), and from
+# 53 C the HAL's own again, CRITICAL and SHUTDOWN included (cmd thermalservice
 # override-status / reset; again after a guest system_server restart). The
 # kernel's thermal limits and the cap above stay. It runs without the cap too
 # (only the status then); ONEOS_GUEST_THERMAL_MAP=0 leaves the HAL's.
@@ -4210,8 +4185,7 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
     F=$STAGE/heat_cap.log
     CFL=/sys/devices/system/cpu/cpufreq_limit/cpufreq_max_limit
     GCLK=/sys/kernel/gpu/gpu_max_clock
-    SKIN_NODE='$SKIN_NODE'
-    SKIN_SCALE='$SKIN_SCALE'
+    BATT_NODE='$BATT_NODE'
     AP_NODES='$AP_NODES'
     GFREQS=''
     if [ -r /sys/class/kgsl/kgsl-3d0/gpu_available_frequencies ]; then
@@ -4233,11 +4207,11 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
         }'
     }
     if [ $HEAT_CAP = 1 ]; then
-        echo \"# \$(date) OneOS heat cap: from 43, 45, 47, 50 C skin or 42, 44, 46, 48 C battery (whichever is hotter) CPU+GPU at [85,75,62,48]% of top clock (2 C hysteresis; skin: \${SKIN_NODE:-thermal_core/HAL})\" > \$F
+        echo \"# \$(date) OneOS heat cap: from 42, 44, 46, 48 C battery CPU+GPU at [85,75,62,48]% of top clock (2 C hysteresis; battery: \${BATT_NODE:-none})\" > \$F
     else
         echo \"# \$(date) OneOS heat cap off (Cool down when hot): the guest thermal status only\" > \$F
     fi
-    [ $GUEST_THERMAL_MAP = 1 ] && echo \"# guest thermal status from skin: NONE, LIGHT 47, MODERATE 50, SEVERE 53, the HAL status from 56 C (1 C hysteresis)\" >> \$F
+    [ $GUEST_THERMAL_MAP = 1 ] && echo \"# guest thermal status from the battery: NONE, LIGHT 46, MODERATE 48, SEVERE 50, the HAL status from 53 C (1 C hysteresis)\" >> \$F
     release_host_vote() {
         if [ \"$HOST_LOW_POWER\" = 0 ] && [ -w \$CFL ] && [ \"\$(cat \$CFL 2>/dev/null)\" != -1 ]; then
             v=\$(cat \$CFL 2>/dev/null)
@@ -4268,59 +4242,33 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
             echo \"# \$(date +%T) stopped (the return started, or no guest namespace record)\" >> \$F
             exit 0
         fi
-        sk=''
-        if [ -n \"\$SKIN_NODE\" ] && [ -r \"\$SKIN_NODE\" ]; then
-            raw=''
-            IFS= read -r raw < \"\$SKIN_NODE\" 2>/dev/null
-            case \"\$raw\" in
-                -*|''|*[!0-9.]*) ;;
-                *.*) sk=\"\$raw\" ;;
-                *)
-                    if [ \"\$SKIN_SCALE\" = 10 ] && [ \"\$raw\" -gt 100 ] && [ \"\$raw\" -le 1200 ] 2>/dev/null; then
-                        sk=\"\$((raw / 10)).\$((raw % 10))\"
-                    elif [ \"\$raw\" -gt 1200 ] 2>/dev/null; then
-                        sk=\"\$((raw / 1000)).\$(( (raw % 1000) / 100 ))\"
-                    elif [ \"\$raw\" -gt 100 ] 2>/dev/null; then
-                        sk=\"\$((raw / 10)).\$((raw % 10))\"
-                    elif [ \"\$raw\" -gt 0 ] 2>/dev/null; then
-                        sk=\"\$raw.0\"
-                    fi ;;
-            esac
-        fi
-        if [ -z \"\$sk\" ]; then
-            tc=\$(timeout 2 logcat -d -t 80 -s thermal_core:I 2>/dev/null | sed -n 's/.* skin : \([1-9][0-9]*\).*/\1/p' | tail -n 1)
-            [ -n \"\$tc\" ] && sk=\"\$((tc / 10)).\$((tc % 10))\"
-        fi
-        P=''
-        if [ -z \"\$sk\" ] || [ $GUEST_THERMAL_MAP = 1 ]; then
-            P=\$(pidof system_server 2>/dev/null)
-            P=\${P%% *}
-        fi
-        if [ -z \"\$sk\" ] && [ -n \"\$P\" ]; then
-            sk=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys thermalservice 2>/dev/null | sed -n '/^Current temperatures from HAL/,/^[^[:space:]]/p' | sed -n 's/.*mValue=\([-0-9.]*\), mType=[0-9]*, mName=SKIN,.*/\1/p' | head -n 1)
-        fi
-        if [ -n \"\$sk\" ] && [ $GUEST_THERMAL_MAP = 1 ] && [ -n \"\$P\" ]; then
-            [ \"\$P\" = \"\$lp\" ] || tl=-1
-            lp=\$P
-            nt=\$(awk -v s=\"\$sk\" -v l=\$tl 'BEGIN { t[1] = 47; t[2] = 50; t[3] = 53; t[4] = 56; if (l < 0) l = 0; while (l < 4 && s >= t[l + 1]) l++; while (l > 0 && s < t[l] - 1) l--; print l }')
-            if [ \"\$nt\" != \"\$tl\" ]; then
-                if [ \"\$nt\" = 4 ]; then a=reset; w=\"the HAL status again\"; else a=\"override-status \$nt\"; w=\$nt; fi
-                r=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/cmd thermalservice \$a 2>&1 | head -n 2 | tr '\\n' ' ')
-                echo \"\$(date +%T) skin \$sk C: guest thermal status \$w (cmd thermalservice \$a: \${r:-ok})\" >> \$F
-                tl=\$nt
-            fi
-        fi
         bt=''
-        if [ $HEAT_CAP = 1 ]; then
-            IFS= read -r bt < /sys/class/power_supply/battery/temp 2>/dev/null
+        if [ -n \"\$BATT_NODE\" ]; then
+            IFS= read -r bt < \"\$BATT_NODE\" 2>/dev/null
             case \"\$bt\" in
                 ''|*[!0-9]*) bt='' ;;
                 *) [ \"\$bt\" -gt 1500 ] && bt=\$((bt / 100)); bt=\"\$((bt / 10)).\$((bt % 10))\" ;;
             esac
         fi
-        if { [ -n \"\$sk\" ] || [ -n \"\$bt\" ]; } && [ $HEAT_CAP = 1 ]; then
-            tag=\"skin \${sk:--} C, battery \${bt:--} C\"
-            new=\$(awk -v s=\"\${sk:-0}\" -v b=\"\${bt:-0}\" -v l=\$lvl 'BEGIN { t[1] = 43; t[2] = 45; t[3] = 47; t[4] = 50; u[1] = 42; u[2] = 44; u[3] = 46; u[4] = 48; while (l < 4 && (s >= t[l + 1] || b >= u[l + 1])) l++; while (l > 0 && s < t[l] - 2 && b < u[l] - 2) l--; print l }')
+        P=''
+        if [ -n \"\$bt\" ] && [ $GUEST_THERMAL_MAP = 1 ]; then
+            P=\$(pidof system_server 2>/dev/null)
+            P=\${P%% *}
+        fi
+        if [ -n \"\$bt\" ] && [ -n \"\$P\" ]; then
+            [ \"\$P\" = \"\$lp\" ] || tl=-1
+            lp=\$P
+            nt=\$(awk -v s=\"\$bt\" -v l=\$tl 'BEGIN { t[1] = 46; t[2] = 48; t[3] = 50; t[4] = 53; if (l < 0) l = 0; while (l < 4 && s >= t[l + 1]) l++; while (l > 0 && s < t[l] - 1) l--; print l }')
+            if [ \"\$nt\" != \"\$tl\" ]; then
+                if [ \"\$nt\" = 4 ]; then a=reset; w=\"the HAL status again\"; else a=\"override-status \$nt\"; w=\$nt; fi
+                r=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/cmd thermalservice \$a 2>&1 | head -n 2 | tr '\\n' ' ')
+                echo \"\$(date +%T) battery \$bt C: guest thermal status \$w (cmd thermalservice \$a: \${r:-ok})\" >> \$F
+                tl=\$nt
+            fi
+        fi
+        if [ -n \"\$bt\" ] && [ $HEAT_CAP = 1 ]; then
+            tag=\"battery \$bt C\"
+            new=\$(awk -v b=\"\$bt\" -v l=\$lvl 'BEGIN { u[1] = 42; u[2] = 44; u[3] = 46; u[4] = 48; while (l < 4 && b >= u[l + 1]) l++; while (l > 0 && b < u[l] - 2) l--; print l }')
             if [ \"\$new\" = 0 ] && [ \$first = 1 ]; then
                 capped=''
                 [ \"$HOST_LOW_POWER\" = 0 ] && [ -r \$CFL ] && [ \"\$(cat \$CFL 2>/dev/null)\" != -1 ] && capped=1
@@ -4357,9 +4305,9 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
         sleep 10
     done
 " </dev/null >/dev/null 2>&1 &
-    [ $HEAT_CAP = 1 ] && echo "Heat cap: on (from 43 C skin or 42 C battery, CPU + GPU + bg uclamp; every 10 s to $STAGE/heat_cap.log)" 
+    [ $HEAT_CAP = 1 ] && echo "Heat cap: on (from 42 C battery, CPU + GPU + bg uclamp; every 10 s to $STAGE/heat_cap.log)"
     [ $HEAT_CAP = 1 ] || echo "Heat cap: off (ONEOS_HEAT_CAP=0, Cool down when hot off in Advanced)"
-    [ $GUEST_THERMAL_MAP = 1 ] && echo "Guest thermal status: from the skin temperature, the HAL status from 56 C ($STAGE/heat_cap.log)"
+    [ $GUEST_THERMAL_MAP = 1 ] && echo "Guest thermal status: from the battery temperature, the HAL status from 53 C ($STAGE/heat_cap.log)"
 else
     echo "Heat cap: off (ONEOS_HEAT_CAP=0, Cool down when hot off in Advanced); guest thermal status: the HAL's"
 fi

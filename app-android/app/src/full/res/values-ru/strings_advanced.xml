@@ -23,7 +23,7 @@
     <string name="advanced_logs_summary">Отправьте их команде OneOS. Личные данные сначала удаляются.</string>
     <string name="advanced_restore_summary">Нужно только после принудительной перезагрузки во время сеанса</string>
     <string name="advanced_heat_cap_title">Охлаждение при нагреве</string>
-    <string name="advanced_heat_cap_summary">Контроль нагрева One UI не работает в другой системе. Начиная с 45 °C OneOS замедляет там процессор, пока телефон не остынет.</string>
+    <string name="advanced_heat_cap_summary">Контроль нагрева One UI не работает в другой системе. Начиная с 42 °C температуры батареи OneOS замедляет там процессор, пока телефон не остынет.</string>
     <string name="advanced_full_logs_title">Полные журналы сеансов</string>
     <string name="advanced_full_logs_summary">Записывает всё, что делают системы, для отчётов об ошибках. По умолчанию выключено: из-за этого телефон греется и расходуется память. Включите, когда что-то идёт не так, и отправьте отчёт.</string>
     <string name="advanced_card_help">Справка</string>
