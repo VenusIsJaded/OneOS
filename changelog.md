@@ -66,6 +66,16 @@ Unreleased: cooler and quicker, from the 11-16 logs.
 - **The switch no longer waits ~20 s on properties the system will not take** (11 `debug.sf.*_phase_offset_ns`
   names): after two stalled calls the rest of the retry skips the slow path.
 - Three more per-frame log storms are silenced for the session (about 10k lines in 6 minutes).
+- **A log flood that kept a system_server thread spinning is silenced**: `libprocessgroup` was 185k of 767k log
+  lines in one session, 58k "Unable to remove cgroup ... busy" triples in a 2 s burst, plus a line per process
+  created or removed. Every line is a logd write; the thread retries without a pause, and the log tag is now
+  silent for the session (the return restores it).
+- **The heat cap no longer reacts to battery sensor glitches**: the battery reading jumped 30.0 -> 42.9 C and
+  down to 18.5 C between two samples while charging, which dropped CPU and GPU to 85% or 62% for no reason. It now
+  acts on the median of the last three reads (real heating still passes within about 20 s).
+- **Samsung Camera gets compiled code**: its compile (an 864 MB swap file, then the odex) ran out of room in the
+  overlay's 1 MB tmpfs and died with SIGBUS twice per session, so the camera ran from the interpreter and the
+  JIT. Its oat folder now lives on the stage's own storage and is kept across sessions.
 
 New in 0.5.19: Nothing OS on the Galaxy S23s, Turn it off that lasts.
 - **Nothing OS on the Galaxy S23, S23+ and S23 Ultra**, untested: it **might not boot**. If it does not, the phone
