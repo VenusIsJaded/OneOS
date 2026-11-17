@@ -5998,6 +5998,115 @@ exit 0
 NETFIX
 chmod 755 "$STAGE/data/local/tmp/net_fix.sh" 2>/dev/null || true
 
+cat > "$STAGE/data/local/tmp/oneos_compile.sh" <<'COMPILEEOF'
+#!/system/bin/sh
+# OneOS: compiles the guest's apps (guest_prepare.sh writes this file, app_storage_loop.sh starts it).
+#   auto  once per framework, two minutes after boot, the way Android does it: the apps that matter at once are
+#         compiled fully right away (the ones you installed, launcher, SystemUI, Settings, Phone), the rest of
+#         the system's apps only while the phone is idle (screen off or charging, Android's "idle maintenance"),
+#         every one paced (it rests as long as it worked) and paused while the heat cap is on.
+#   now   the Optimize apps button in the OneOS app: every app, one after the other, without pacing or idle
+#         waiting; it only pauses while the battery is hot (heat level 3, 46 C and up) and goes on by itself.
+# Why at all: a guest's apps run uncompiled otherwise (217 of 242 at verify in a 0.5.18 session): the images' own
+# precompiled code does not hold with OneOS's patched framework, and the background dexopt job waits for an idle
+# phone on a charger and compiles only apps with a usage profile.
+# Heat (oneos-logs-49a4bcbbfa659c09, 16:23:05): flat out, 69 apps took 229 s of CPU in 88 s and the AP die went
+# from 48 C to 56-60 C until the return: hence the pacing and the pause.
+# State for the app, in /data/oneos_compile (world readable):
+#   status   "<state> <total> <index> <package> <mode> <epoch>", state running|cooling|waiting|done|stopped
+#   results  one line per finished app: "<package> ok|fail <seconds>"
+#   lock (pid), mode, stop (create it to stop after the app being compiled)
+MODE=${1:-auto}
+DATA=${ONEOS_COMPILE_DATA:-/data}
+SYS=${ONEOS_COMPILE_SYS:-/sys}
+FW=${ONEOS_COMPILE_FW:-/system/framework}
+D=$DATA/oneos_compile
+umask 022
+mkdir -p "$D" 2>/dev/null; chmod 755 "$D" 2>/dev/null
+if [ -f "$D/lock" ]; then
+    op=''; IFS= read -r op < "$D/lock" 2>/dev/null
+    [ -n "$op" ] && [ -d "/proc/$op" ] && exit 0
+fi
+echo $$ > "$D/lock"; echo "$MODE" > "$D/mode"
+key=$(cat "$FW/framework.jar" "$FW/services.jar" 2>/dev/null | md5sum | cut -d' ' -f1)
+if [ "$MODE" = auto ]; then
+    if [ -z "$key" ] || [ "$(cat "$DATA/oneos_dexopt.done" 2>/dev/null)" = "$key" ]; then rm -f "$D/lock"; exit 0; fi
+fi
+note() { [ "$MODE" = auto ] && cmd notification post -S bigtext -t "$1" oneos_dexopt "$2" > /dev/null 2>&1; }
+st() { printf '%s %s %s %s %s %s\n' "$1" "${total:-0}" "${i:-0}" "${2:--}" "$MODE" "$(date +%s)" > "$D/.status" && mv -f "$D/.status" "$D/status"; }
+halt() { st stopped -; rm -f "$D/stop" "$D/lock"; echo "$(date) compile ($MODE): stopped at $i / $total" >> "$DATA/app_storage.log"; exit 0; }
+want_stop() { [ -f "$D/stop" ] || [ -f "$DATA/oneos_rec_stop" ]; }
+idle_ok() {
+    bs=''; IFS= read -r bs < "$SYS/class/power_supply/battery/status" 2>/dev/null
+    case "$bs" in Charging|Full) return 0 ;; esac
+    for dp in "$SYS/class/drm/card0-DSI-1/dpms" "$SYS/class/drm/card0-DSI-2/dpms"; do
+        [ -r "$dp" ] || continue
+        v=On; IFS= read -r v < "$dp" 2>/dev/null
+        [ "$v" = Off ] && return 0
+        return 1
+    done
+    for b in "$SYS/class/backlight/panel0-backlight/brightness" "$SYS/class/backlight/panel/brightness"; do
+        [ -r "$b" ] || continue
+        v=1; IFS= read -r v < "$b" 2>/dev/null
+        [ "$v" = 0 ] && return 0
+        return 1
+    done
+    return 1
+}
+all=$(pm list packages 2>/dev/null | sed -n 's/^package://p')
+total=$(printf '%s\n' "$all" | grep -c .)
+{ pm list packages -3 2>/dev/null | sed -n 's/^package://p'
+  echo com.android.launcher; echo com.android.systemui; echo com.android.settings; echo com.android.phone; } > "$D/first.tmp"
+printf '%s\n' "$all" > "$D/all.tmp"
+pri=$(grep -xFf "$D/all.tmp" "$D/first.tmp")
+rest=$(grep -vxFf "$D/first.tmp" "$D/all.tmp")
+rm -f "$D/first.tmp" "$D/all.tmp"
+npri=$(printf '%s\n' "$pri" | grep -c .)
+heat_limit=1; [ "$MODE" = now ] && heat_limit=3
+echo "$(date) compile ($MODE): $total apps, $npri first" >> "$DATA/app_storage.log"
+: > "$D/results"; : > "$DATA/oneos_dexopt.log"
+rm -f "$D/stop"
+i=0
+st running -
+note "Optimizing apps for this system" "0 / $total · paced to keep the phone cool"
+for p in $pri $rest; do
+    i=$((i + 1))
+    want_stop && halt
+    if [ "$MODE" = auto ] && [ $i -gt $npri ]; then
+        while ! idle_ok; do
+            want_stop && halt
+            st waiting "$p"; sleep 30
+        done
+    fi
+    w=0
+    while [ $w -lt 60 ]; do
+        lv=''; [ -r "$DATA/oneos_heat_level" ] && IFS= read -r lv < "$DATA/oneos_heat_level" 2>/dev/null
+        case "$lv" in ''|*[!0-9]*) break ;; esac
+        [ "$lv" -lt $heat_limit ] && break
+        want_stop && halt
+        [ $w -eq 0 ] && note "Optimizing apps for this system" "$i / $total · paused while the phone is warm"
+        st cooling "$p"; sleep 10; w=$((w + 1))
+    done
+    st running "$p"
+    t0=$(date +%s)
+    out=$(cmd package compile -m speed "$p" 2>&1)
+    el=$(( $(date +%s) - t0 ))
+    case "$out" in *Success*) r=ok ;; *) r=fail ;; esac
+    echo "$p $r $el" >> "$D/results"
+    echo "$p: $out" >> "$DATA/oneos_dexopt.log"
+    if [ "$MODE" = auto ]; then
+        [ $el -gt 0 ] && sleep $el
+        [ $((i % 5)) -eq 0 ] && note "Optimizing apps for this system" "$i / $total · paced to keep the phone cool"
+    fi
+done
+[ -n "$key" ] && echo "$key" > "$DATA/oneos_dexopt.done"
+st done -
+note "Apps optimized ✓" "All $total apps are compiled for this system."
+echo "$(date) compile ($MODE): done" >> "$DATA/app_storage.log"
+rm -f "$D/lock"
+COMPILEEOF
+chmod 755 "$STAGE/data/local/tmp/oneos_compile.sh" 2>/dev/null || true
+
 cat > "$STAGE/data/local/tmp/app_storage_loop.sh" <<'APPLOOP'
 #!/system/bin/sh
 # Watches for installs/removals, gives the new package its data dirs, and makes
@@ -6009,56 +6118,29 @@ up=0
 while true; do
     sleep 10
     case "$(getprop sys.boot_completed)" in 1) ;; *) continue ;; esac
-    # 0.5.18 (owner, A36: Nothing OS sluggish, "on Nothing Phone 3a it's smooth"): 217 of 242 guest apps ran
-    # uncompiled (dexopt status verify): a guest's apps are compiled by the background dexopt job, which waits for
-    # an idle phone on its charger, rare in a session, and compiles only apps with a usage profile (22 of 242);
-    # the images' own precompiled code does not hold with OneOS's patched framework. Owner: "It should compile apps
-    # fully for all OS'es and all devices": once per framework (a set update changes it), two minutes after boot,
-    # every app is compiled fully (speed), in the background so the network fix below keeps its pace.
+    # 0.5.18 (owner, A36: Nothing OS sluggish, "on Nothing Phone 3a it's smooth"): every app compiled fully, once
+    # per framework (a set update changes it), two minutes after boot. 0.5.20: the job is oneos_compile.sh, shared
+    # with the Optimize apps button of the guest's OneOS app (which leaves a request, below), and paced like
+    # Android's own: see that script.
     up=$((up + 1))
-    if [ $up -eq 12 ]; then
-        key=$(cat /system/framework/framework.jar /system/framework/services.jar 2>/dev/null | md5sum | cut -d' ' -f1)
-        if [ -n "$key" ] && [ "$(cat /data/oneos_dexopt.done 2>/dev/null)" != "$key" ]; then
-            # App by app, with its progress in a notification (owner: show that it is optimizing); the last one
-            # says it is done and is swiped away (a shell notification cannot be withdrawn).
-            # Heat (oneos-logs-49a4bcbbfa659c09, 16:23:05): started flat out, 69 apps took 229 s of CPU in 88 s of wall
-            # clock and the AP die went from 48 C to 56-60 C (battery 42 C and falling) until the return. Same compile, paced:
-            #  - the apps people open first (the ones they installed, the launcher, SystemUI), the system's rest after;
-            #  - nothing while the heat cap is on (data/oneos_heat_level, written by the host's heat cap, 0 or absent when
-            #    cool), re-checked every 10 s for 10 min at most per app;
-            #  - after every app that took a second or more, the CPU rests for as long as it worked: half duty, so the
-            #    die cools between apps and the foreground keeps its clocks. Apps already compiled cost no pause.
-            ( note() { cmd notification post -S bigtext -t "$1" oneos_dexopt "$2" > /dev/null 2>&1; }
-              all=$(pm list packages 2>/dev/null | sed -n 's/^package://p')
-              total=$(printf '%s\n' "$all" | grep -c .)
-              { pm list packages -3 2>/dev/null | sed -n 's/^package://p'; echo com.android.launcher; echo com.android.systemui; } > /data/oneos_dexopt.first
-              pri=$(printf '%s\n' "$all" | grep -xFf /data/oneos_dexopt.first)
-              rest=$(printf '%s\n' "$all" | grep -vxFf /data/oneos_dexopt.first)
-              rm -f /data/oneos_dexopt.first
-              echo "$(date) dexopt: compiling all $total apps fully for this framework (paced, heat-aware)" >> /data/app_storage.log
-              note "Optimizing apps for this system" "0 / $total · paced to keep the phone cool"
-              i=0; : > /data/oneos_dexopt.log
-              for p in $pri $rest; do
-                  i=$((i + 1))
-                  [ -f /data/oneos_rec_stop ] && break
-                  w=0
-                  while [ $w -lt 60 ]; do
-                      lv=''; [ -r /data/oneos_heat_level ] && IFS= read -r lv < /data/oneos_heat_level 2>/dev/null
-                      case "$lv" in ''|0|*[!0-9]*) break ;; esac
-                      [ $w -eq 0 ] && note "Optimizing apps for this system" "$i / $total · paused while the phone is warm"
-                      sleep 10; w=$((w + 1))
-                  done
-                  t0=$(date +%s)
-                  cmd package compile -m speed "$p" >> /data/oneos_dexopt.log 2>&1
-                  el=$(( $(date +%s) - t0 ))
-                  [ $el -gt 0 ] && sleep $el
-                  [ $((i % 5)) -eq 0 ] && note "Optimizing apps for this system" "$i / $total · paced to keep the phone cool"
-              done
-              [ $i -ge $total ] || exit 0
-              echo "$key" > /data/oneos_dexopt.done
-              note "Apps optimized ✓" "All $total apps are compiled for this system."
-              echo "$(date) dexopt: done" >> /data/app_storage.log ) < /dev/null > /dev/null 2>&1 &
-        fi
+    if [ $up -eq 12 ] && [ -f /data/local/tmp/oneos_compile.sh ]; then
+        ( /system/bin/sh /data/local/tmp/oneos_compile.sh auto < /dev/null > /dev/null 2>&1 & )
+    fi
+    # The button: files/oneos_compile in the app's own folder holds "now" or "stop" (read as root here, like the
+    # return request is read on the host); "now" takes over from a running automatic job.
+    CREQ=/data/user/0/com.fahadali.oneos.guest/files/oneos_compile
+    if [ -f "$CREQ" ] && [ ! -L "$CREQ" ]; then
+        rq=''; IFS= read -r rq < "$CREQ" 2>/dev/null; rm -f "$CREQ"
+        case "$rq" in
+            stop*) : > /data/oneos_compile/stop ;;
+            now*)
+                if [ -f /data/oneos_compile/lock ]; then
+                    cm=''; IFS= read -r cm < /data/oneos_compile/mode 2>/dev/null
+                    cp=''; IFS= read -r cp < /data/oneos_compile/lock 2>/dev/null
+                    if [ "$cm" = auto ] && [ -n "$cp" ] && [ -d "/proc/$cp" ]; then kill "$cp" 2>/dev/null; rm -f /data/oneos_compile/lock; fi
+                fi
+                ( /system/bin/sh /data/local/tmp/oneos_compile.sh now < /dev/null > /dev/null 2>&1 & ) ;;
+        esac
     fi
     # Skip redundant net_fix.sh when host net_watch ran within the last 25 s (fork perf change).
     now=$(date +%s 2>/dev/null); nstamp=0
