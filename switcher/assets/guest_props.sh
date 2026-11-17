@@ -95,6 +95,20 @@ store_off() {
 prop_store_isolated() {
     [ -f "$STORE_MARK" ] && [ "$(cat "$STORE_MARK" 2>/dev/null)" = "$BOOT_ID" ] && pd_mounted
 }
+# Calls that go through init's property service (resetprop without -n, setprop) wait for its
+# reply, and for a name init will not take that wait runs out its timeout: oneos-logs-49a4bcbbfa659c09
+# (16:18:47) lost 22 s in the per-property retry for 11 debug.sf.*_phase_offset_ns names that never
+# landed (2 s each, the switch waiting on it). After two failures that took a second or more the
+# service is not answering in time, so the rest of this run skips those calls (the mmap resetprop -n
+# step before them still runs for every name). A name that lands, or fails fast, costs what it did.
+ps_set() {
+    [ "${PS_SLOW:-0}" -ge 2 ] && return 1
+    _st=$(date +%s)
+    if "$RP" "$1" "$2" 2>/dev/null && [ "$(getprop "$1")" = "$2" ]; then return 0; fi
+    if setprop "$1" "$2" 2>/dev/null && [ "$(getprop "$1")" = "$2" ]; then return 0; fi
+    [ $(( $(date +%s) - _st )) -ge 1 ] && PS_SLOW=$(( ${PS_SLOW:-0} + 1 ))
+    return 1
+}
 rp_set_mem() {
     _rk="$1"; _rv="$2"
     if "$RP" -n "$_rk" "$_rv" 2>/dev/null && [ "$(getprop "$_rk")" = "$_rv" ]; then
@@ -110,14 +124,12 @@ rp_set_mem() {
             # absent is added through the service; one that exists is never
             # touched (write-once: the service would refuse it anyway).
             [ -z "$(getprop "$_rk")" ] || return 1
+            [ "${PS_SLOW:-0}" -ge 2 ] && return 1
             setprop "$_rk" "$_rv" 2>/dev/null && [ "$(getprop "$_rk")" = "$_rv" ]
             return ;;
         persist.*) prop_store_isolated || return 1 ;;
     esac
-    if "$RP" "$_rk" "$_rv" 2>/dev/null && [ "$(getprop "$_rk")" = "$_rv" ]; then
-        return 0
-    fi
-    setprop "$_rk" "$_rv" 2>/dev/null && [ "$(getprop "$_rk")" = "$_rv" ]
+    ps_set "$_rk" "$_rv"
 }
 
 drop_stale_memory_lists() {
