@@ -6021,17 +6021,40 @@ while true; do
         if [ -n "$key" ] && [ "$(cat /data/oneos_dexopt.done 2>/dev/null)" != "$key" ]; then
             # App by app, with its progress in a notification (owner: show that it is optimizing); the last one
             # says it is done and is swiped away (a shell notification cannot be withdrawn).
+            # Heat (oneos-logs-49a4bcbbfa659c09, 16:23:05): started flat out, 69 apps took 229 s of CPU in 88 s of wall
+            # clock and the AP die went from 48 C to 56-60 C (skin 42 C and falling) until the return. Same compile, paced:
+            #  - the apps people open first (the ones they installed, the launcher, SystemUI), the system's rest after;
+            #  - nothing while the heat cap is on (data/oneos_heat_level, written by the host's heat cap, 0 or absent when
+            #    cool), re-checked every 10 s for 10 min at most per app;
+            #  - after every app that took a second or more, the CPU rests for as long as it worked: half duty, so the
+            #    die cools between apps and the foreground keeps its clocks. Apps already compiled cost no pause.
             ( note() { cmd notification post -S bigtext -t "$1" oneos_dexopt "$2" > /dev/null 2>&1; }
-              pkgs=$(pm list packages 2>/dev/null | sed -n 's/^package://p')
-              total=$(printf '%s\n' "$pkgs" | grep -c .)
-              echo "$(date) dexopt: compiling all $total apps fully for this framework" >> /data/app_storage.log
-              note "Optimizing apps for this system" "0 / $total · the phone may be warm and slower until it is done"
+              all=$(pm list packages 2>/dev/null | sed -n 's/^package://p')
+              total=$(printf '%s\n' "$all" | grep -c .)
+              { pm list packages -3 2>/dev/null | sed -n 's/^package://p'; echo com.android.launcher; echo com.android.systemui; } > /data/oneos_dexopt.first
+              pri=$(printf '%s\n' "$all" | grep -xFf /data/oneos_dexopt.first)
+              rest=$(printf '%s\n' "$all" | grep -vxFf /data/oneos_dexopt.first)
+              rm -f /data/oneos_dexopt.first
+              echo "$(date) dexopt: compiling all $total apps fully for this framework (paced, heat-aware)" >> /data/app_storage.log
+              note "Optimizing apps for this system" "0 / $total · paced to keep the phone cool"
               i=0; : > /data/oneos_dexopt.log
-              for p in $pkgs; do
+              for p in $pri $rest; do
                   i=$((i + 1))
+                  [ -f /data/oneos_rec_stop ] && break
+                  w=0
+                  while [ $w -lt 60 ]; do
+                      lv=''; [ -r /data/oneos_heat_level ] && IFS= read -r lv < /data/oneos_heat_level 2>/dev/null
+                      case "$lv" in ''|0|*[!0-9]*) break ;; esac
+                      [ $w -eq 0 ] && note "Optimizing apps for this system" "$i / $total · paused while the phone is warm"
+                      sleep 10; w=$((w + 1))
+                  done
+                  t0=$(date +%s)
                   cmd package compile -m speed "$p" >> /data/oneos_dexopt.log 2>&1
-                  [ $((i % 5)) -eq 0 ] && note "Optimizing apps for this system" "$i / $total · the phone may be warm and slower until it is done"
+                  el=$(( $(date +%s) - t0 ))
+                  [ $el -gt 0 ] && sleep $el
+                  [ $((i % 5)) -eq 0 ] && note "Optimizing apps for this system" "$i / $total · paced to keep the phone cool"
               done
+              [ $i -ge $total ] || exit 0
               echo "$key" > /data/oneos_dexopt.done
               note "Apps optimized ✓" "All $total apps are compiled for this system."
               echo "$(date) dexopt: done" >> /data/app_storage.log ) < /dev/null > /dev/null 2>&1 &
