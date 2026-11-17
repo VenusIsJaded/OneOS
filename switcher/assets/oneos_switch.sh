@@ -4259,7 +4259,7 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
         # outlier either way, real heating still passes within 10 s.
         if [ -n \"\$bt\" ]; then
             rb=\$bt
-            bt=\$(awk -v a=\"\$bt\" -v b=\"\${b1:-\$bt}\" -v c=\"\${b2:-\$bt}\" 'BEGIN { if (a + 0 > b + 0) { t = a; a = b; b = t } if (b + 0 > c + 0) { t = b; b = c; c = t } if (a + 0 > b + 0) { t = a; a = b; b = t } print b }')
+            bt=\$(awk -v a=\"\$bt\" -v b=\"\${b1:-\$bt}\" -v c=\"\${b2:-\${b1:-\$bt}}\" 'BEGIN { if (a + 0 > b + 0) { t = a; a = b; b = t } if (b + 0 > c + 0) { t = b; b = c; c = t } if (a + 0 > b + 0) { t = a; a = b; b = t } print b }')
             b2=\$b1; b1=\$rb
         fi
         P=''
