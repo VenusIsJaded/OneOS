@@ -1312,6 +1312,10 @@ fi
 # guest system_server's UserAwareMgr logs every OPPO resource request and
 # release (8684 lines, about 10/s; its urcc HAL is not declared here), and
 # OplusUIFirst_TS "Failed to connect bpf bin" (396).
+# Run 49 (oneos-logs-49a4bcbbfa659c09, 6 min after boot): UniRenderCanvasContext "flushDeferredUniTransactions"
+# on every frame (7241 lines, SystemUI and launcher), UAH-UahAdaptHelper "uah urcc service = null" (1855, the
+# urcc HAL is not declared here) and OplusBatteryServiceFeature "getIChargerService fail" (1627, no OPPO
+# charger HAL on this phone): about 10.7k lines of no information, each one a logd write and a wake-up.
 for t in CaptureStateTracker libbinder.Parcel Parcel ResourcesManager MediaCodecList AString BOOTPROF GED \
          PerformanceManager ProjectManager SchedAssist GestureLog_OplusPenGestureManager HoraeHelper OsenseResManagerService postman \
          UserAwareMgr OplusUIFirst_TS SDM \
@@ -1322,7 +1326,8 @@ for t in CaptureStateTracker libbinder.Parcel Parcel ResourcesManager MediaCodec
          qcc_file_aidl QCC minksocket PluginSeedling--Origin PluginSeedling--Capsule PluginSeedling--Template \
          PluginSeedling--CapsuleCard PluginSeedling--Base DigitalClock OplusSecurePayManager COUIVerticalSeekBar \
          GSLog.AppNameCutter metis_v2_AppConfigUtil OplusRequestedLayerState \
-         OplusStartingWindowManager OplusAppStartupManager ULELite Athena; do
+         OplusStartingWindowManager OplusAppStartupManager ULELite Athena \
+         UniRenderCanvasContext UAH-UahAdaptHelper OplusBatteryServiceFeature; do
     setprop "log.tag.$t" SILENT 2>/dev/null
 done
 if [ "${ONEOS_SOUND_VERBOSE:-0}" != 1 ]; then
