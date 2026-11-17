@@ -1316,6 +1316,10 @@ fi
 # on every frame (7241 lines, SystemUI and launcher), UAH-UahAdaptHelper "uah urcc service = null" (1855, the
 # urcc HAL is not declared here) and OplusBatteryServiceFeature "getIChargerService fail" (1627, no OPPO
 # charger HAL on this phone): about 10.7k lines of no information, each one a logd write and a wake-up.
+# Run 55 (oneos-logs-1231e2314f2f3b94, 767k lines): libprocessgroup was 185k of them, 58k "Unable to remove cgroup
+# ... busy" + "Could not read cgroup.events" triples in one 2 s spin of a system_server thread on a stuck isolated-uid
+# cgroup (the kill loop retries it without a sleep), plus a Created/Removed line per process and CfqWeight/
+# BfqWeight/SetClamps profile warnings this kernel does not have.
 for t in CaptureStateTracker libbinder.Parcel Parcel ResourcesManager MediaCodecList AString BOOTPROF GED \
          PerformanceManager ProjectManager SchedAssist GestureLog_OplusPenGestureManager HoraeHelper OsenseResManagerService postman \
          UserAwareMgr OplusUIFirst_TS SDM \
@@ -1327,7 +1331,7 @@ for t in CaptureStateTracker libbinder.Parcel Parcel ResourcesManager MediaCodec
          PluginSeedling--CapsuleCard PluginSeedling--Base DigitalClock OplusSecurePayManager COUIVerticalSeekBar \
          GSLog.AppNameCutter metis_v2_AppConfigUtil OplusRequestedLayerState \
          OplusStartingWindowManager OplusAppStartupManager ULELite Athena \
-         UniRenderCanvasContext UAH-UahAdaptHelper OplusBatteryServiceFeature; do
+         UniRenderCanvasContext UAH-UahAdaptHelper OplusBatteryServiceFeature libprocessgroup; do
     setprop "log.tag.$t" SILENT 2>/dev/null
 done
 if [ "${ONEOS_SOUND_VERBOSE:-0}" != 1 ]; then
@@ -4234,7 +4238,7 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
         fi
         echo \"\$(date +%T) \$1: full clock:\$c\" >> \$F
     }
-    lvl=0; first=1; tl=-1; lp=''
+    lvl=0; first=1; tl=-1; lp=''; b1=''; b2=''
     while true; do
         if [ -f $STAGE/data/oneos_rec_stop ] || [ ! -s $STAGE/guest_mntns ]; then
             [ \$lvl = 0 ] || full stopped
@@ -4249,6 +4253,14 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
                 ''|*[!0-9]*) bt='' ;;
                 *) [ \"\$bt\" -gt 1500 ] && bt=\$((bt / 100)); bt=\"\$((bt / 10)).\$((bt % 10))\" ;;
             esac
+        fi
+        # The battery sensor glitches (30.0 to 42.9 C and 18.5 C between two samples on the S25 Ultra while
+        # charging, which capped the clocks for no reason): the median of the last three reads drops a single
+        # outlier either way, real heating still passes within 10 s.
+        if [ -n \"\$bt\" ]; then
+            rb=\$bt
+            bt=\$(awk -v a=\"\$bt\" -v b=\"\${b1:-\$bt}\" -v c=\"\${b2:-\$bt}\" 'BEGIN { if (a + 0 > b + 0) { t = a; a = b; b = t } if (b + 0 > c + 0) { t = b; b = c; c = t } if (a + 0 > b + 0) { t = a; a = b; b = t } print b }')
+            b2=\$b1; b1=\$rb
         fi
         P=''
         if [ -n \"\$bt\" ] && [ $GUEST_THERMAL_MAP = 1 ]; then
