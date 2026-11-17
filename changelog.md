@@ -76,6 +76,10 @@ Unreleased: cooler and quicker, from the 11-16 logs.
 - **Samsung Camera gets compiled code**: its compile (an 864 MB swap file, then the odex) ran out of room in the
   overlay's 1 MB tmpfs and died with SIGBUS twice per session, so the camera ran from the interpreter and the
   JIT. Its oat folder now lives on the stage's own storage and is kept across sessions.
+- **Apps you install or update get compiled too**: Android leaves a new or updated app at "verify" (uncompiled), and
+  the compile pass ran once per system. About 30 s after the package list changes, only the new or updated
+  versions are compiled, quietly (no notification, no idle wait); an app that fails is not retried until its
+  version changes. The first full pass and the Optimize apps button work as before.
 
 New in 0.5.19: Nothing OS on the Galaxy S23s, Turn it off that lasts.
 - **Nothing OS on the Galaxy S23, S23+ and S23 Ultra**, untested: it **might not boot**. If it does not, the phone

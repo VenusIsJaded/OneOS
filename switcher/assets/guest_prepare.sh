@@ -6025,6 +6025,9 @@ cat > "$STAGE/data/local/tmp/oneos_compile.sh" <<'COMPILEEOF'
 # phone on a charger and compiles only apps with a usage profile.
 # Heat (oneos-logs-49a4bcbbfa659c09, 16:23:05): flat out, 69 apps took 229 s of CPU in 88 s and the AP die went
 # from 48 C to 56-60 C until the return: hence the pacing and the pause.
+# After that first pass, auto only compiles what is new or updated (an install or a Play update leaves an app at
+# "verify" otherwise), quietly, 30 s after the package list changed (app_storage_loop.sh); `attempted` holds the
+# "<package> <versionCode>" pairs already tried, so a failing app is not retried every time.
 # State for the app, in /data/oneos_compile (world readable):
 #   status   "<state> <total> <index> <package> <mode> <epoch>", state running|cooling|waiting|done|stopped
 #   results  one line per finished app: "<package> ok|fail <seconds>"
@@ -6042,10 +6045,13 @@ if [ -f "$D/lock" ]; then
 fi
 echo $$ > "$D/lock"; echo "$MODE" > "$D/mode"
 key=$(cat "$FW/framework.jar" "$FW/services.jar" 2>/dev/null | md5sum | cut -d' ' -f1)
+FULL=1
 if [ "$MODE" = auto ]; then
-    if [ -z "$key" ] || [ "$(cat "$DATA/oneos_dexopt.done" 2>/dev/null)" = "$key" ]; then rm -f "$D/lock"; exit 0; fi
+    if [ -z "$key" ]; then rm -f "$D/lock"; exit 0; fi
+    [ "$(cat "$DATA/oneos_dexopt.done" 2>/dev/null)" = "$key" ] && FULL=0
 fi
-note() { [ "$MODE" = auto ] && cmd notification post -S bigtext -t "$1" oneos_dexopt "$2" > /dev/null 2>&1; }
+QUIET=0; [ $FULL = 0 ] && QUIET=1
+note() { [ "$MODE" = auto ] && [ $QUIET = 0 ] && cmd notification post -S bigtext -t "$1" oneos_dexopt "$2" > /dev/null 2>&1; }
 st() { printf '%s %s %s %s %s %s\n' "$1" "${total:-0}" "${i:-0}" "${2:--}" "$MODE" "$(date +%s)" > "$D/.status" && mv -f "$D/.status" "$D/status"; }
 halt() { st stopped -; rm -f "$D/stop" "$D/lock"; echo "$(date) compile ($MODE): stopped at $i / $total" >> "$DATA/app_storage.log"; exit 0; }
 want_stop() { [ -f "$D/stop" ] || [ -f "$DATA/oneos_rec_stop" ]; }
@@ -6066,18 +6072,30 @@ idle_ok() {
     done
     return 1
 }
-all=$(pm list packages 2>/dev/null | sed -n 's/^package://p')
-total=$(printf '%s\n' "$all" | grep -c .)
-{ pm list packages -3 2>/dev/null | sed -n 's/^package://p'
-  echo com.android.launcher; echo com.android.systemui; echo com.android.settings; echo com.android.phone; } > "$D/first.tmp"
-printf '%s\n' "$all" > "$D/all.tmp"
-pri=$(grep -xFf "$D/all.tmp" "$D/first.tmp")
-rest=$(grep -vxFf "$D/first.tmp" "$D/all.tmp")
-rm -f "$D/first.tmp" "$D/all.tmp"
-npri=$(printf '%s\n' "$pri" | grep -c .)
+pm list packages --show-versioncode 2>/dev/null | sed -n 's/^package:\([^ ]*\) versionCode:\([0-9]*\).*/\1 \2/p' > "$D/ver"
+[ -f "$D/attempted" ] || : > "$D/attempted"
+if [ $FULL = 1 ]; then
+    all=$(pm list packages 2>/dev/null | sed -n 's/^package://p')
+    total=$(printf '%s\n' "$all" | grep -c .)
+    { pm list packages -3 2>/dev/null | sed -n 's/^package://p'
+      echo com.android.launcher; echo com.android.systemui; echo com.android.settings; echo com.android.phone; } > "$D/first.tmp"
+    printf '%s\n' "$all" > "$D/all.tmp"
+    pri=$(grep -xFf "$D/all.tmp" "$D/first.tmp")
+    rest=$(grep -vxFf "$D/first.tmp" "$D/all.tmp")
+    rm -f "$D/first.tmp" "$D/all.tmp"
+    npri=$(printf '%s\n' "$pri" | grep -c .)
+    [ "$MODE" = auto ] && : > "$D/attempted"
+else
+    # Only packages whose version was not tried yet, all of them at once (no waiting for an idle phone).
+    pri=$(grep -vxFf "$D/attempted" "$D/ver" | cut -d' ' -f1)
+    total=$(printf '%s\n' "$pri" | grep -c .)
+    if [ "$total" -eq 0 ]; then rm -f "$D/lock"; exit 0; fi
+    rest=''; npri=$total
+fi
 heat_limit=1; [ "$MODE" = now ] && heat_limit=3
-echo "$(date) compile ($MODE): $total apps, $npri first" >> "$DATA/app_storage.log"
-: > "$D/results"; : > "$DATA/oneos_dexopt.log"
+echo "$(date) compile ($MODE): $total apps, $npri first$([ $FULL = 0 ] && echo ', new or updated only')" >> "$DATA/app_storage.log"
+: > "$D/results"
+[ $FULL = 1 ] && : > "$DATA/oneos_dexopt.log"
 rm -f "$D/stop"
 i=0
 st running -
@@ -6107,12 +6125,14 @@ for p in $pri $rest; do
     case "$out" in *Success*) r=ok ;; *) r=fail ;; esac
     echo "$p $r $el" >> "$D/results"
     echo "$p: $out" >> "$DATA/oneos_dexopt.log"
+    pv=$(awk -v p="$p" '$1 == p { print $2; exit }' "$D/ver")
+    echo "$p ${pv:-0}" >> "$D/attempted"
     if [ "$MODE" = auto ]; then
-        [ $el -gt 0 ] && sleep $el
+        [ $el -gt 0 ] && [ $i -lt $total ] && sleep $el
         [ $((i % 5)) -eq 0 ] && note "Optimizing apps for this system" "$i / $total · paced to keep the phone cool"
     fi
 done
-[ -n "$key" ] && echo "$key" > "$DATA/oneos_dexopt.done"
+[ -n "$key" ] && [ $FULL = 1 ] && echo "$key" > "$DATA/oneos_dexopt.done"
 st done -
 note "Apps optimized ✓" "All $total apps are compiled for this system."
 echo "$(date) compile ($MODE): done" >> "$DATA/app_storage.log"
@@ -6128,6 +6148,7 @@ cat > "$STAGE/data/local/tmp/app_storage_loop.sh" <<'APPLOOP'
 # 30 ticks as a safety sweep (0.5.18 upstream; supersedes the fork's stat-signature skip).
 last=""
 up=0
+pend=0
 # The OneOS app's Optimize apps screen reads this folder (it shows "not available" when it is missing, i.e. under an older session).
 mkdir -p /data/oneos_compile 2>/dev/null; chmod 755 /data/oneos_compile 2>/dev/null
 while true; do
@@ -6140,6 +6161,14 @@ while true; do
     up=$((up + 1))
     if [ $up -eq 12 ] && [ -f /data/local/tmp/oneos_compile.sh ]; then
         ( /system/bin/sh /data/local/tmp/oneos_compile.sh auto < /dev/null > /dev/null 2>&1 & )
+    fi
+    # An install or an update leaves the app at "verify": once the first full pass is done, a package-list change
+    # (settled for about 30 s) starts the worker, which compiles only what is new or updated, quietly.
+    if [ $pend -gt 0 ]; then
+        pend=$((pend - 1))
+        if [ $pend -eq 0 ] && [ $up -gt 12 ] && [ -f /data/oneos_dexopt.done ] && [ -f /data/local/tmp/oneos_compile.sh ]; then
+            ( /system/bin/sh /data/local/tmp/oneos_compile.sh auto < /dev/null > /dev/null 2>&1 & )
+        fi
     fi
     # The button: files/oneos_compile in the app's own folder holds "now" or "stop" (read as root here, like the
     # return request is read on the host); "now" takes over from a running automatic job.
@@ -6183,6 +6212,7 @@ while true; do
     elif [ -n "$out" ]; then
         echo "$(date) $out" >> /data/app_storage.log
     fi
+    [ -n "$last" ] && [ "$cur" != "$last" ] && pend=3
     last=$cur
 done
 APPLOOP

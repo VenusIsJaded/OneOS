@@ -24,9 +24,15 @@ def worker_text():
 
 
 PM = """#!/bin/sh
+# the package list: $ROOTD/pkgs when a test wrote one; versionCodes from $ROOTD/vers ("pkg code"), default 1
+pk() { if [ -f "$ROOTD/pkgs" ]; then cat "$ROOTD/pkgs"; else printf 'com.sys.x\\ncom.user.a\\ncom.android.systemui\\ncom.user.b\\ncom.android.launcher\\ncom.sys.y\\n'; fi; }
 case "$3" in
   -3) printf 'package:com.user.a\\npackage:com.user.b\\n' ;;
-  *) printf 'package:com.sys.x\\npackage:com.user.a\\npackage:com.android.systemui\\npackage:com.user.b\\npackage:com.android.launcher\\npackage:com.sys.y\\n' ;;
+  --show-versioncode)
+    pk | while read -r n; do
+      v=$(awk -v p="$n" '$1 == p { print $2 }' "$ROOTD/vers" 2>/dev/null); echo "package:$n installer=x versionCode:${v:-1}" | sed 's/ installer=x//'
+    done ;;
+  *) pk | sed 's/^/package:/' ;;
 esac
 """
 # cmd package compile -m speed <pkg>; "cmd notification ..." is ignored. FAILPKG makes one app fail.
@@ -173,6 +179,60 @@ class Compile(unittest.TestCase):
         os.makedirs(self.p("data/oneos_compile"))
         open(self.p("data/oneos_compile/lock"), "w").write("%d\n" % os.getpid())
         self.run_worker("now")
+        self.assertEqual(self.order(), [])
+
+    def test_after_done_auto_compiles_only_new_or_updated_versions_quietly(self):
+        self.battery("Charging")
+        self.run_worker("auto")
+        self.assertEqual(len(self.order()), 6)
+        os.remove(self.p("order"))
+        # nothing changed: no compile, no lock left, status untouched
+        self.run_worker("auto")
+        self.assertEqual(self.order(), [])
+        self.assertFalse(os.path.exists(self.p("data/oneos_compile/lock")))
+        # an update (com.user.a v2) and an install (com.new.z)
+        open(self.p("vers"), "w").write("com.user.a 2\ncom.new.z 7\n")
+        open(self.p("pkgs"), "w").write("com.sys.x\ncom.user.a\ncom.user.b\ncom.new.z\n")
+        self.battery("Discharging")
+        self.dpms("On")
+        r = self.run_worker("auto")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(sorted(self.order()), ["com.new.z", "com.user.a"])
+        # no idle wait, and no pacing after the last one
+        self.assertNotIn("30", self.lines("sleeps"))
+        self.assertEqual(self.status()[0], "done")
+        # tried versions are not tried again, even though one of them failed before
+        os.remove(self.p("order"))
+        self.run_worker("auto", FAILPKG="com.new.z")
+        self.assertEqual(self.order(), [])
+        # a further update of the same package is compiled again
+        open(self.p("vers"), "w").write("com.user.a 3\ncom.new.z 7\n")
+        self.run_worker("auto")
+        self.assertEqual(self.order(), ["com.user.a"])
+
+    def test_incremental_pass_keeps_the_full_pass_mark_and_log(self):
+        self.battery("Charging")
+        self.run_worker("auto")
+        done = open(self.p("data/oneos_dexopt.done")).read()
+        log = open(self.p("data/oneos_dexopt.log")).read()
+        open(self.p("vers"), "w").write("com.sys.y 5\n")
+        self.run_worker("auto")
+        self.assertEqual(open(self.p("data/oneos_dexopt.done")).read(), done)
+        self.assertTrue(open(self.p("data/oneos_dexopt.log")).read().startswith(log))
+
+    def test_framework_change_runs_a_full_pass_again(self):
+        self.battery("Charging")
+        self.run_worker("auto")
+        open(self.p("fw/services.jar"), "w").write("changed")
+        os.remove(self.p("order"))
+        self.run_worker("auto")
+        self.assertEqual(len(self.order()), 6)
+
+    def test_failing_app_is_not_retried_by_incremental_passes(self):
+        self.battery("Charging")
+        self.run_worker("auto", FAILPKG="com.sys.y")
+        os.remove(self.p("order"))
+        self.run_worker("auto")
         self.assertEqual(self.order(), [])
 
 
