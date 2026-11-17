@@ -122,6 +122,9 @@ class MainActivity : AppCompatActivity() {
         cards.row(apps, getString(R.string.bring_entry_title), getString(R.string.bring_entry_summary)) {
             startActivity(Intent(this, BringAppsActivity::class.java))
         }
+        cards.row(apps, getString(R.string.optimize_entry_title), getString(R.string.optimize_entry_summary)) {
+            startActivity(Intent(this, OptimizeAppsActivity::class.java))
+        }
         fullLogsCard(list)
         val root = cards.section(list, "Root", getColor(R.color.preboot_card))
         cards.row(root, "Root status", if (state.root) "Active · OneOS guest runtime" else state.error ?: "Inactive")

@@ -6115,6 +6115,8 @@ cat > "$STAGE/data/local/tmp/app_storage_loop.sh" <<'APPLOOP'
 # 30 ticks as a safety sweep (0.5.18 upstream; supersedes the fork's stat-signature skip).
 last=""
 up=0
+# The OneOS app's Optimize apps screen reads this folder (it shows "not available" when it is missing, i.e. under an older session).
+mkdir -p /data/oneos_compile 2>/dev/null; chmod 755 /data/oneos_compile 2>/dev/null
 while true; do
     sleep 10
     case "$(getprop sys.boot_completed)" in 1) ;; *) continue ;; esac
