@@ -903,6 +903,7 @@ fi
 # ONEOS_GUEST_SAMSUNG_CAMERA=0 leaves it out.
 SAMCAM=0
 SAMCAM_SRC="$STAGE/samcam_build"
+SAMCAM_OAT="$STAGE/samcam_oat"
 SAMCAM_BOUND=0
 SAMCAM_LIST="$STAGE/samcam_files.txt"
 SAMCAM_SH=${ONEOS_TEST_SH:-/system/bin/sh}
@@ -1006,6 +1007,12 @@ samcam_files() {
     # "Feature file is not valid", the camera's feature list in
     # /system/cameradata), so those go onto the guest's /system as they are.
     echo "sysext priv-app/SamsungCamera/SamsungCamera.apk $SAMCAM_SRC/SamsungCamera.apk"
+    # Its oat folder on the stage's own storage. Left to the overlay, oat/arm64 is made in that overlay's 1 MB
+    # tmpfs layer: artd's dex2oat of the camera (an 864 MB swap file, then the odex) ran out of backing store
+    # there and died of SIGBUS in fault_handler.cc twice in a session (oneos-logs-1231e2314f2f3b94), so the
+    # camera never got compiled code. Here the odex is kept across sessions too (artd checks it against the
+    # apk and the boot image, and compiles again when either changed).
+    if [ -d "$SAMCAM_OAT" ]; then echo "sysext priv-app/SamsungCamera/oat $SAMCAM_OAT"; fi
     # An empty Filter Provider (scripts/samsung-camera/filter_stub): the camera
     # observes One UI's at start and stopped without it (run 16: "Failed to
     # find provider com.samsung.android.provider.filterprovider").
@@ -1098,6 +1105,12 @@ samcam_prepare() {
             rm -f "$SAMCAM_SRC/.selinux"
             echo "Samsung Camera: SELinux labels not applied; retrying next start"
         fi
+    fi
+    if [ ! -L "$SAMCAM_OAT" ] && mkdir -p "$SAMCAM_OAT" 2>/dev/null && chmod 755 "$SAMCAM_OAT" 2>/dev/null; then
+        $BB chcon u:object_r:system_file:s0 "$SAMCAM_OAT" 2>/dev/null || true
+    else
+        rm -rf "$SAMCAM_OAT" 2>/dev/null
+        echo "Samsung Camera: no persistent oat folder; its compile goes to the overlay's small tmpfs as before"
     fi
     samcam_files > "$SAMCAM_LIST"
     [ -s "$SAMCAM_LIST" ] || return 1
