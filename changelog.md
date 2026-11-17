@@ -51,11 +51,18 @@ read-only there, and the guest now has its own), **no more boot failures from fa
 Find X9 Ultra's own firmware is in ColorOS too), and the **Samsung Camera on the A56** (its sensor crop).
 
 Unreleased: cooler and quicker, from the 11-16 logs.
-- **The heat cap now throttles on the battery's temperature too** (from 42 C), not only on the skin sensor that
-  lags it: a battery at 44 C with a skin at 41 C used to leave the cap idle ("not throttling").
-- **The one-time full compile of all apps no longer heats the phone for minutes**: it runs paced (half duty),
-  pauses while the heat cap is active, does your apps, the launcher and SystemUI first, and stops when you return
-  to One UI. Before, it ran flat out and took the processor from 48 C to 56-60 C until the return.
+- **The heat cap goes by the battery's temperature only** (42 C and up), not the skin sensor: the battery is the
+  number that matters for the phone's health and the one the charger and the system's own limits use, and the
+  skin sensor lagged it (a battery at 44 C with a skin at 41 C left the cap idle, "not throttling"). The guest's
+  thermal status follows the battery too.
+- **Apps are compiled the way Android does it**, instead of all at once: your apps, the launcher, SystemUI,
+  Settings and Phone first, the rest of the system's apps only while the phone is idle (screen off or charging),
+  each one paced (it rests as long as it worked) and paused while the heat cap is on, and stopped when you return
+  to One UI. Before, everything ran flat out and took the processor from 48 C to 56-60 C until the return.
+- **New: Optimize apps in the OneOS app inside the system** (like Galaxy App Booster): a button that compiles every
+  app now, one after the other, with a progress bar, the app being compiled with its icon, and the ones done;
+  Stop ends it after the current app. ColorOS has no such button of its own. It needs a session started with this
+  version (older ones show "Not available in this session").
 - **The switch no longer waits ~20 s on properties the system will not take** (11 `debug.sf.*_phase_offset_ns`
   names): after two stalled calls the rest of the retry skips the slow path.
 - Three more per-frame log storms are silenced for the session (about 10k lines in 6 minutes).
