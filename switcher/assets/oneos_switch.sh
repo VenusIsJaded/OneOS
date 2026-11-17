@@ -4172,7 +4172,7 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
     # Preserve cpufreq_max_limit.released if [4b/6] already released a stale
     # One UI SSRM vote for switch & boot; otherwise ensure no stale marker stays.
     [ $HEAT_CAP = 1 ] || rm -f "$STAGE/cpufreq_max_limit.released"
-    rm -f "$STAGE/gpu_max_clock.capped" "$STAGE/bg_uclamp.saved"
+    rm -f "$STAGE/gpu_max_clock.capped" "$STAGE/bg_uclamp.saved" "$STAGE/data/oneos_heat_level"
     # Clamp background / system-background cgroups so background syncs, dexopt,
     # and keeper workers stay in efficient DVFS OPP states instead of triggering
     # Prime-core voltage spikes; foreground and top-app stay completely uncapped.
@@ -4228,7 +4228,7 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
         }'
     }
     if [ $HEAT_CAP = 1 ]; then
-        echo \"# \$(date) OneOS heat cap: from 43, 45, 47, 50 C skin CPU+GPU at [85,75,62,48]% of top clock (2 C hysteresis; skin: \${SKIN_NODE:-thermal_core/HAL})\" > \$F
+        echo \"# \$(date) OneOS heat cap: from 43, 45, 47, 50 C skin or 42, 44, 46, 48 C battery (whichever is hotter) CPU+GPU at [85,75,62,48]% of top clock (2 C hysteresis; skin: \${SKIN_NODE:-thermal_core/HAL})\" > \$F
     else
         echo \"# \$(date) OneOS heat cap off (Cool down when hot): the guest thermal status only\" > \$F
     fi
@@ -4259,6 +4259,7 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
     while true; do
         if [ -f $STAGE/data/oneos_rec_stop ] || [ ! -s $STAGE/guest_mntns ]; then
             [ \$lvl = 0 ] || full stopped
+            rm -f $STAGE/data/oneos_heat_level
             echo \"# \$(date +%T) stopped (the return started, or no guest namespace record)\" >> \$F
             exit 0
         fi
@@ -4304,8 +4305,17 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
                 tl=\$nt
             fi
         fi
-        if [ -n \"\$sk\" ] && [ $HEAT_CAP = 1 ]; then
-            new=\$(awk -v s=\"\$sk\" -v l=\$lvl 'BEGIN { t[1] = 43; t[2] = 45; t[3] = 47; t[4] = 50; while (l < 4 && s >= t[l + 1]) l++; while (l > 0 && s < t[l] - 2) l--; print l }')
+        bt=''
+        if [ $HEAT_CAP = 1 ]; then
+            IFS= read -r bt < /sys/class/power_supply/battery/temp 2>/dev/null
+            case \"\$bt\" in
+                ''|*[!0-9]*) bt='' ;;
+                *) [ \"\$bt\" -gt 1500 ] && bt=\$((bt / 100)); bt=\"\$((bt / 10)).\$((bt % 10))\" ;;
+            esac
+        fi
+        if { [ -n \"\$sk\" ] || [ -n \"\$bt\" ]; } && [ $HEAT_CAP = 1 ]; then
+            tag=\"skin \${sk:--} C, battery \${bt:--} C\"
+            new=\$(awk -v s=\"\${sk:-0}\" -v b=\"\${bt:-0}\" -v l=\$lvl 'BEGIN { t[1] = 43; t[2] = 45; t[3] = 47; t[4] = 50; u[1] = 42; u[2] = 44; u[3] = 46; u[4] = 48; while (l < 4 && (s >= t[l + 1] || b >= u[l + 1])) l++; while (l > 0 && s < t[l] - 2 && b < u[l] - 2) l--; print l }')
             if [ \"\$new\" = 0 ] && [ \$first = 1 ]; then
                 capped=''
                 [ \"$HOST_LOW_POWER\" = 0 ] && [ -r \$CFL ] && [ \"\$(cat \$CFL 2>/dev/null)\" != -1 ] && capped=1
@@ -4313,10 +4323,10 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
                     [ \"\$(cat \$p/scaling_max_freq 2>/dev/null)\" = \"\$(cat \$p/cpuinfo_max_freq 2>/dev/null)\" ] || capped=1
                 done
                 [ \"\$GMAX\" -gt 0 ] && [ -r \$GCLK ] && [ \"\$(cat \$GCLK 2>/dev/null)\" != \"\$GMAX\" ] && capped=1
-                if [ -n \"\$capped\" ]; then full \"skin \$sk C, a cap from before the switch lifted\"
-                else echo \"\$(date +%T) skin \$sk C: no cap\" >> \$F; fi
+                if [ -n \"\$capped\" ]; then full \"\$tag, a cap from before the switch lifted\"
+                else echo \"\$(date +%T) \$tag: no cap\" >> \$F; fi
             elif [ \"\$new\" = 0 ] && [ \$lvl != 0 ]; then
-                full \"skin \$sk C, level \$lvl to 0\"
+                full \"\$tag, level \$lvl to 0\"
             elif [ \"\$new\" != 0 ] && { [ \"\$new\" != \$lvl ] || [ \$first = 1 ]; }; then
                 case \$new in 1) pct=85 ;; 2) pct=75 ;; 3) pct=62 ;; *) pct=48 ;; esac
                 c=\$(release_host_vote)
@@ -4334,14 +4344,15 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
                         c=\"\$c gpu=\$(cat \$GCLK 2>/dev/null)/\$GMAX\"
                     fi
                 fi
-                echo \"\$(date +%T) skin \$sk C, level \$lvl to \$new: \$pct%:\$c\" >> \$F
+                echo \"\$(date +%T) \$tag, level \$lvl to \$new: \$pct%:\$c\" >> \$F
             fi
+            [ \"\$new\" = \"\$lvl\" ] && [ \$first = 0 ] || echo \$new > $STAGE/data/oneos_heat_level 2>/dev/null
             lvl=\$new; first=0
         fi
         sleep 10
     done
 " </dev/null >/dev/null 2>&1 &
-    [ $HEAT_CAP = 1 ] && echo "Heat cap: on (from 43 C skin, CPU + GPU + bg uclamp; every 10 s to $STAGE/heat_cap.log)" 
+    [ $HEAT_CAP = 1 ] && echo "Heat cap: on (from 43 C skin or 42 C battery, CPU + GPU + bg uclamp; every 10 s to $STAGE/heat_cap.log)" 
     [ $HEAT_CAP = 1 ] || echo "Heat cap: off (ONEOS_HEAT_CAP=0, Cool down when hot off in Advanced)"
     [ $GUEST_THERMAL_MAP = 1 ] && echo "Guest thermal status: from the skin temperature, the HAL status from 56 C ($STAGE/heat_cap.log)"
 else
