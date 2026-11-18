@@ -6264,7 +6264,11 @@ idle_ok() {
     done
     return 1
 }
-pm list packages --show-versioncode 2>/dev/null | sed -n 's/^package:\([^ ]*\) versionCode:\([0-9]*\).*/\1 \2/p' > "$D/ver"
+# "<package> <versionCode>#<install dir>": the install directory is random per install, so a reinstall of the very same
+# version is a new entry too. (An older pm without -f, or one that fails with it: the versionCode alone.)
+pm list packages -f --show-versioncode 2>/dev/null | sed -n 's/^package:\(.*\)=\([^= ]*\) versionCode:\([0-9]*\).*/\2 \3 \1/p' |
+    awk '{ n = split($3, a, "/"); tag = (n >= 2 ? a[n - 1] : ""); print $1, $2 (tag != "" ? "#" tag : "") }' > "$D/ver"
+[ -s "$D/ver" ] || pm list packages --show-versioncode 2>/dev/null | sed -n 's/^package:\([^ ]*\) versionCode:\([0-9]*\).*/\1 \2/p' > "$D/ver"
 [ -f "$D/attempted" ] || : > "$D/attempted"
 if [ $FULL = 1 ]; then
     awk '{ print $1 }' "$D/ver" > "$D/all.tmp"
@@ -6285,7 +6289,11 @@ if [ $FULL = 1 ]; then
     [ "$MODE" = auto ] && : > "$D/attempted"
 else
     # Only packages whose version was not tried yet, all of them at once (no waiting for an idle phone).
-    pri=$(grep -vxFf "$D/attempted" "$D/ver" | cut -d' ' -f1)
+    # (a line of the older "<package> <versionCode>" form also counts for that version)
+    pri=$(awk -v af="$D/attempted" '
+        FILENAME == af { a[$0] = 1; next }
+        { split($2, t, "#"); if (!($0 in a) && !(($1 " " t[1]) in a)) print $1 }
+    ' "$D/attempted" "$D/ver")
     total=$(printf '%s\n' "$pri" | grep -c .)
     if [ "$total" -eq 0 ]; then unlock; exit 0; fi
     rest=''; npri=$total
@@ -6336,7 +6344,9 @@ while read -r p pv; do
     if [ -n "$TMO" ] && { [ $rc = 124 ] || [ $rc = 137 ]; }; then r=fail; out="$out (timed out after ${TMO}s)"; fi
     echo "$p $r $el" >> "$D/results"
     echo "$p: $out" >> "$DATA/oneos_dexopt.log"
-    echo "$p ${pv:-0}" >> "$D/attempted"
+    # Only what says something about the app counts as tried: not a timeout (the package service, not the app, hung),
+    # not an app whose version could not be read (it would be "tried" under a version that is not its own).
+    if [ "$rc" != 124 ] && [ "$rc" != 137 ] && [ -n "$pv" ] && [ "$pv" != 0 ]; then echo "$p $pv" >> "$D/attempted"; fi
     if [ "$MODE" = auto ]; then
         [ $el -gt 0 ] && [ $i -lt $total ] && sleep $el
         [ $((i % 5)) -eq 0 ] && note "Optimizing apps for this system" "$i / $total · paced to keep the phone cool"

@@ -35,6 +35,15 @@ PM = """#!/bin/sh
 pk() { if [ -f "$ROOTD/pkgs" ]; then cat "$ROOTD/pkgs"; else printf 'com.sys.x\\ncom.user.a\\ncom.android.systemui\\ncom.user.b\\ncom.android.launcher\\ncom.sys.y\\n'; fi; }
 case "$3" in
   -3) printf 'package:com.user.a\\npackage:com.user.b\\n' ;;
+  -f)
+    # package:<apk path>=<package> versionCode:<n>; the install directory is $ROOTD/tags ("pkg tag"), default t1
+    [ -n "$NOVC" ] && exit 1
+    [ -n "$NOF" ] && exit 1
+    pk | while read -r n; do
+      v=$(awk -v p="$n" '$1 == p { print $2 }' "$ROOTD/vers" 2>/dev/null)
+      t=$(awk -v p="$n" '$1 == p { print $2 }' "$ROOTD/tags" 2>/dev/null)
+      echo "package:/data/app/~~r==/$n-${t:-t1}==/base.apk=$n versionCode:${v:-1}"
+    done ;;
   --show-versioncode)
     [ -n "$NOVC" ] && exit 1
     pk | while read -r n; do
@@ -417,6 +426,46 @@ class Compile(unittest.TestCase):
         self.takeover("{pid} {start}")
         self.run_worker("now")
         self.assertEqual(len(self.order()), 6)
+
+    def test_reinstall_of_the_same_version_is_compiled_again(self):
+        self.battery("Charging")
+        self.run_worker("auto")
+        os.remove(self.p("order"))
+        open(self.p("tags"), "w").write("com.user.a t2\n")   # reinstalled: same versionCode, new install directory
+        self.run_worker("auto")
+        self.assertEqual(self.order(), ["com.user.a"])
+        os.remove(self.p("order"))
+        self.run_worker("auto")
+        self.assertEqual(self.order(), [], "an unchanged install was compiled again")
+
+    def test_old_attempted_lines_without_an_install_tag_still_count(self):
+        self.battery("Charging")
+        self.run_worker("auto")
+        d = self.p("data/oneos_compile/attempted")
+        old = open(d).read().split("\n")
+        self.assertTrue(any("#" in l for l in old))
+        open(d, "w").write("".join(l.split("#")[0] + "\n" for l in old if l))
+        os.remove(self.p("order"))
+        self.run_worker("auto")
+        self.assertEqual(self.order(), [])
+
+    def test_pm_without_the_path_listing_falls_back_to_version_only(self):
+        self.battery("Charging")
+        self.run_worker("auto", NOF="1")
+        os.remove(self.p("order"))
+        open(self.p("vers"), "w").write("com.user.b 7\n")
+        self.run_worker("auto", NOF="1")
+        self.assertEqual(self.order(), ["com.user.b"])
+
+    def test_a_timed_out_compile_is_tried_again_by_the_next_pass(self):
+        self.battery("Charging")
+        self.run_worker("auto", TMOFAIL="com.sys.y")
+        self.assertNotIn("com.sys.y", [l.split()[0] for l in open(self.p("data/oneos_compile/attempted"))])
+
+    def test_an_app_whose_version_could_not_be_read_is_not_marked_as_tried(self):
+        self.battery("Charging")
+        self.run_worker("auto", NOVC="1")
+        self.assertEqual(self.lines("data/oneos_compile/attempted"), [])
 
 
 if __name__ == "__main__":
