@@ -438,7 +438,13 @@ pre)
         fi
         [ ! -f "$m/.oneos-framework" ] || continue
         for hook in post-fs-data.sh post-mount.sh; do
-            [ ! -f "$m/$hook" ] || timeout 30 "$B" sh "$m/$hook" >> "$A/oneos/run/session.log" 2>&1
+            if [ -f "$m/$hook" ]; then
+                timeout 30 "$B" sh "$m/$hook" >> "$A/oneos/run/session.log" 2>&1
+                # A hook may have created or changed properties: the cached listing is stale for the next module's
+                # system.prop, which would take such a property for one that never existed (and delete it on restore
+                # instead of putting the earlier value back). Read again, when one is next needed.
+                MOD_ALL_PROPS_SET=
+            fi
         done
     done
     selected=$(cat "$A/oneos/framework")
