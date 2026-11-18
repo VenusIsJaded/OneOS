@@ -31,6 +31,11 @@ async function bytes(value) {
 function d1(db) {
   const live = '(exp IS NULL OR exp > ?)'
   return {
+    async has(key) {
+      const row = await db.prepare(`SELECT n, (SELECT COUNT(*) FROM kv_chunk WHERE k = ?) AS cn FROM kv WHERE k = ? AND ${live}`)
+        .bind(key, key, now()).first()
+      return row != null && (row.n === 0 || row.cn === row.n)
+    },
     async get(key, opts) {
       const row = await db.prepare(`SELECT v, n FROM kv WHERE k = ? AND ${live}`).bind(key, now()).first()
       if (!row) return null
@@ -92,6 +97,7 @@ export function store(env) {
   // 11-18: the old KV namespace is no longer touched (its deletes and fallback reads used up the daily KV limit).
   const old = null
   return {
+    has: (key) => a.has(key),
     async get(key, opts) {
       const v = await a.get(key, opts)
       return v != null || !old ? v : old.get(key, opts)

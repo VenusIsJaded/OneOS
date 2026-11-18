@@ -60,13 +60,23 @@ public final class OneOSBootStatus {
         if (icon == null) throw new IllegalStateException("OneOS icon missing");
         Typeface.class.getMethod("loadPreinstalledSystemFontMap").invoke(null);
         Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        Typeface fontBold = Typeface.create("sec", Typeface.BOLD);
+        Typeface fontNormal = Typeface.create("sec", Typeface.NORMAL);
+        RectF iconRect = new RectF();
+        File stopFile = new File(dir, "stop");
+        File readyTmp = new File(dir, "ready." + Process.myPid());
+        File readyFile = new File(dir, "ready");
+        String readyText = Process.myPid() + " " + generation + "\n";
         long deadline = android.os.SystemClock.elapsedRealtime() + 600_000;
+        int frame = 0;
         try {
-            while (generation.equals(read(dir, "generation", "")) && !new File(dir, "stop").exists() && android.os.SystemClock.elapsedRealtime() < deadline) {
-                int[] current = dimensions();
-                if (current[0] != size[0] || current[1] != size[1]) {
-                    size = current;
-                    call(queue, "update", new Class<?>[]{sc, int.class, int.class, int.class}, layer, size[0], size[1], 1);
+            while (generation.equals(read(dir, "generation", "")) && !stopFile.exists() && android.os.SystemClock.elapsedRealtime() < deadline) {
+                if ((frame++ & 3) == 0) {
+                    int[] current = dimensions();
+                    if (current[0] != size[0] || current[1] != size[1]) {
+                        size = current;
+                        call(queue, "update", new Class<?>[]{sc, int.class, int.class, int.class}, layer, size[0], size[1], 1);
+                    }
                 }
                 Canvas canvas = surface.lockCanvas(null);
                 try {
@@ -77,16 +87,17 @@ public final class OneOSBootStatus {
                     float group = (verbose ? 327 : 274) * unit;
                     float top = (size[1] - group) / 2f;
                     float edge = 180 * unit;
-                    canvas.drawBitmap(icon, null, new RectF((size[0]-edge)/2, top, (size[0]+edge)/2, top+edge), paint);
+                    iconRect.set((size[0]-edge)/2, top, (size[0]+edge)/2, top+edge);
+                    canvas.drawBitmap(icon, null, iconRect, paint);
                     paint.setColor(Color.WHITE);
                     paint.setTextAlign(Paint.Align.CENTER);
-                    paint.setTypeface(Typeface.create("sec", Typeface.BOLD));
+                    paint.setTypeface(fontBold);
                     paint.setTextSize(36 * unit);
                     String title = read(dir, "title", "Returning to One UI");
                     fit(paint, title, size[0] - 40 * unit);
                     canvas.drawText(title, size[0]/2f, top + 267*unit, paint);
                     if (verbose) {
-                        paint.setTypeface(Typeface.create("sec", Typeface.NORMAL));
+                        paint.setTypeface(fontNormal);
                         paint.setTextSize(24 * unit);
                         String status = read(dir, "status", "Waiting for boot events");
                         if (status.length() > 120) status = status.substring(0, 117) + "…";
@@ -96,10 +107,9 @@ public final class OneOSBootStatus {
                 } finally { surface.unlockCanvasAndPost(canvas); }
                 // Readiness is published only after posting a real frame.
                 if (!generation.equals(read(dir, "generation", ""))) break;
-                File ready = new File(dir, "ready." + Process.myPid());
-                try (FileWriter out = new FileWriter(ready)) { out.write(Process.myPid() + " " + generation + "\n"); }
-                if (!ready.renameTo(new File(dir, "ready"))) throw new IllegalStateException("Cannot publish live frame readiness");
                 if (!published) {
+                    try (FileWriter out = new FileWriter(readyTmp)) { out.write(readyText); }
+                    if (!readyTmp.renameTo(readyFile)) throw new IllegalStateException("Cannot publish live frame readiness");
                     System.err.println("First frame posted after " + (android.os.SystemClock.elapsedRealtime() - started) + " ms; pid " + Process.myPid());
                     published = true;
                 }

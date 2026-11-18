@@ -132,7 +132,7 @@ int main(int argc, char **argv) {
         struct dirent *se;
         while (sd && (se = readdir(sd))) {
             if (strncmp(se->d_name, "event", 5)) continue;
-            char np[400], mm[32] = "";
+            char np[512], mm[32] = "";
             snprintf(np, sizeof np, "%s/%s/dev", dp, se->d_name);
             FILE *f = fopen(np, "r");
             if (f) { if (fgets(mm, sizeof mm, f)) mm[strcspn(mm, "\n")] = 0; fclose(f); }

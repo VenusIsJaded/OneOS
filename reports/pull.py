@@ -128,7 +128,14 @@ def implausible(data, logs):
     return None
 
 
-def collect(svc, name, dest, keep):
+def load_seen_ids(db):
+    if not os.path.exists(db):
+        return set()
+    with open(db) as f:
+        return {json.loads(line).get("reportId") for line in f if line.strip()}
+
+
+def collect(svc, name, dest, keep, seen=None):
     record = json.loads(svc.call("GET", "/v1/get", key=name))
     rid = record.get("reportId", "")
     if not rid or set(rid) - ID_OK:
@@ -183,13 +190,12 @@ def collect(svc, name, dest, keep):
         f.write("\n")
     db = os.path.join(dest, "db", "reports.jsonl")
     os.makedirs(os.path.dirname(db), exist_ok=True)
-    seen = set()
-    if os.path.exists(db):
-        with open(db) as f:
-            seen = {json.loads(line).get("reportId") for line in f if line.strip()}
+    if seen is None:
+        seen = load_seen_ids(db)
     if rid not in seen:
         with open(db, "a") as f:
             f.write(json.dumps(record, separators=(",", ":")) + "\n")
+        seen.add(rid)
     if not keep:
         svc.call("POST", "/v1/delete", key=name)
         for key in parts:
@@ -220,9 +226,10 @@ def main():
     ap.add_argument("--keep", action="store_true", help="leave the reports in the service")
     a = ap.parse_args()
     svc = Service(read_secret(".oneos-reports-url"), read_secret(".oneos-reports-admin-key"))
+    seen = load_seen_ids(os.path.join(a.dest, "db", "reports.jsonl"))
     for name in svc.keys("report:"):
         try:
-            print(collect(svc, name, a.dest, a.keep), flush=True)
+            print(collect(svc, name, a.dest, a.keep, seen=seen), flush=True)
         except (urllib.error.URLError, ValueError, KeyError) as e:
             print(f"error {name}: {e}", flush=True)
 

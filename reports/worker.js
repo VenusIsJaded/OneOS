@@ -113,10 +113,11 @@ function reply(status, body) {
 // Constant time, so the keys cannot be guessed a character at a time.
 function same(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string' || !b) return false
-  const x = new TextEncoder().encode(a)
-  const y = new TextEncoder().encode(b)
+  const x = TEXT_ENC.encode(a)
+  const y = TEXT_ENC.encode(b)
   let d = x.length ^ y.length
-  for (let i = 0; i < Math.max(x.length, y.length); i++) d |= (x[i] ?? 0) ^ (y[i] ?? 0)
+  const m = Math.max(x.length, y.length)
+  for (let i = 0; i < m; i++) d |= (x[i] ?? 0) ^ (y[i] ?? 0)
   return d === 0
 }
 
@@ -174,21 +175,38 @@ async function floodBan(env, user) {
 
 // --- Sign-in through the bot, the pass, the group check (0.5.16) ---
 
-const enc = (s) => new TextEncoder().encode(s)
+const TEXT_ENC = new TextEncoder()
+const TEXT_DEC = new TextDecoder()
+const enc = (s) => TEXT_ENC.encode(s)
+
+let cachedPassSecret = null
+let cachedPassKey = null
+
+async function passKey(secret) {
+  if (secret === cachedPassSecret && cachedPassKey) return cachedPassKey
+  const k = await crypto.subtle.importKey('raw', enc(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+  cachedPassSecret = secret
+  cachedPassKey = k
+  return k
+}
 
 function b64url(bytes) {
   let s = ''
-  for (const b of bytes) s += String.fromCharCode(b)
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    s += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+  }
   return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
 function unb64url(s) {
   const t = atob(s.replace(/-/g, '+').replace(/_/g, '/'))
-  return Uint8Array.from(t, (c) => c.charCodeAt(0))
+  const out = new Uint8Array(t.length)
+  for (let i = 0; i < t.length; i++) out[i] = t.charCodeAt(i)
+  return out
 }
 
 async function hmac(env, data) {
-  const key = await crypto.subtle.importKey('raw', enc(env.PASS_KEY), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+  const key = await passKey(env.PASS_KEY)
   return b64url(new Uint8Array(await crypto.subtle.sign('HMAC', key, enc(data))))
 }
 
@@ -202,7 +220,7 @@ async function readPass(env, pass) {
   const [body, sig] = pass.split('.')
   if (!same(sig, await hmac(env, body))) return null
   let p
-  try { p = JSON.parse(new TextDecoder().decode(unb64url(body))) } catch { return null }
+  try { p = JSON.parse(TEXT_DEC.decode(unb64url(body))) } catch { return null }
   if (!Number.isSafeInteger(p?.id) || p.id <= 0 || !(p.exp > Date.now() / 1000)) return null
   return { id: p.id, username: typeof p.u === 'string' && TG_USER.test(p.u) ? p.u : null }
 }
@@ -387,16 +405,23 @@ async function report(req, env, ctx) {
     held = Date.now() - seen < HOLD_SECONDS * 1000
   }
   // Every part must be there before the record is: the app sends them again otherwise.
-  const missing = []
-  for (let i = 0; i < (r.logs?.parts ?? 0); i++) {
-    const v = await store(env).get(`part:${r.reportId}:${i}`, { type: 'stream' })
-    if (v == null) missing.push(i)
-    else await v.cancel()
-  }
+  const st = store(env)
+  const partCount = r.logs?.parts ?? 0
+  const checks = await Promise.all(
+    Array.from({ length: partCount }, async (_, i) => {
+      const k = `part:${r.reportId}:${i}`
+      if (typeof st.has === 'function') return (await st.has(k)) ? -1 : i
+      const v = await st.get(k, { type: 'stream' })
+      if (v == null) return i
+      await v.cancel()
+      return -1
+    }),
+  )
+  const missing = checks.filter((i) => i >= 0)
   if (missing.length) return reply(409, { error: 'missing parts', missing })
   const receivedAt = new Date().toISOString()
-  await store(env).put(`report:${receivedAt}:${r.reportId}`, JSON.stringify({ ...r, receivedAt, ...(held ? { held: true } : {}) }), { expirationTtl: TTL })
-  if (dayKey) await store(env).put(dayKey, String(dayCount + 1), { expirationTtl: 2 * 24 * 3600 })
+  await st.put(`report:${receivedAt}:${r.reportId}`, JSON.stringify({ ...r, receivedAt, ...(held ? { held: true } : {}) }), { expirationTtl: TTL })
+  if (dayKey) await st.put(dayKey, String(dayCount + 1), { expirationTtl: 2 * 24 * 3600 })
   if (!held && env.TG_TOKEN && env.TG_CHAT) ctx.waitUntil(ping(env, r).catch(() => {}))
   return reply(200, { ok: true, reportId: r.reportId })
 }

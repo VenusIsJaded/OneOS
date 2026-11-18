@@ -43,24 +43,72 @@ static int safe_package(const char *s) {
     for(;*s;s++)if(!((*s>='a'&&*s<='z')||(*s>='A'&&*s<='Z')||(*s>='0'&&*s<='9')||*s=='_'||*s=='.'))return 0;
     return 1;
 }
+static int parse_pkg_uid(const char *line, char p[256], unsigned *uid) {
+    while (*line == ' ' || *line == '\t') line++;
+    size_t i = 0;
+    while (line[i] && line[i] != ' ' && line[i] != '\t' && line[i] != '\n' && line[i] != '\r') {
+        if (i >= 255) return 0;
+        p[i] = line[i];
+        i++;
+    }
+    if (!i || (line[i] != ' ' && line[i] != '\t')) return 0;
+    p[i] = 0;
+    char *end = NULL;
+    errno = 0;
+    unsigned long v = strtoul(line + i + 1, &end, 10);
+    if (errno || end == line + i + 1 || v > 0xffffffffUL) return 0;
+    if (*end && *end != ' ' && *end != '\t' && *end != '\n' && *end != '\r') return 0;
+    *uid = (unsigned)v;
+    return 1;
+}
+struct grant_row { char p[256]; unsigned u; };
+static size_t load_grants(struct grant_row **out) {
+    *out = NULL;
+    FILE *f = fopen(GRANTS, "re");
+    if (!f) return 0;
+    size_t n = 0, cap = 16;
+    struct grant_row *rows = malloc(cap * sizeof(*rows));
+    if (!rows) { fclose(f); return 0; }
+    char line[512], p[256];
+    unsigned u;
+    while (fgets(line, sizeof(line), f)) {
+        if (!parse_pkg_uid(line, p, &u)) continue;
+        if (n == cap) {
+            size_t next = cap * 2;
+            struct grant_row *grown = realloc(rows, next * sizeof(*rows));
+            if (!grown) break;
+            rows = grown;
+            cap = next;
+        }
+        memcpy(rows[n].p, p, strlen(p) + 1);
+        rows[n].u = u;
+        n++;
+    }
+    fclose(f);
+    *out = rows;
+    return n;
+}
+static int in_grants(const struct grant_row *rows, size_t n, const char *package, unsigned uid) {
+    for (size_t i = 0; i < n; i++) if (rows[i].u == uid && !strcmp(rows[i].p, package)) return 1;
+    return 0;
+}
 static int package_uid(const char *package, unsigned *uid) {
     FILE *f=fopen(PACKAGES,"re"); if(!f)return 0;
     char line[8192],p[256];unsigned u;int found=0;
-    while(fgets(line,sizeof(line),f))if(sscanf(line,"%255s %u",p,&u)==2&&!strcmp(p,package)){*uid=u;found=1;break;}
-    fclose(f);return found;
-}
-static int granted(const char *package,unsigned uid) {
-    FILE *f=fopen(GRANTS,"re"); if(!f)return 0;
-    char p[256];unsigned u;int found=0;
-    while(fscanf(f,"%255s %u\n",p,&u)==2)if(u==uid&&!strcmp(package,p)){found=1;break;}
+    while(fgets(line,sizeof(line),f))if(parse_pkg_uid(line,p,&u)&&!strcmp(p,package)){*uid=u;found=1;break;}
     fclose(f);return found;
 }
 static int allowed(unsigned uid) {
     if(uid==0)return 1; /* already-root guest boot helpers */
-    FILE *f=fopen(PACKAGES,"re");if(!f)return 0;
+    struct grant_row *grants=NULL;size_t ng=load_grants(&grants);
+    if(!ng){free(grants);return 0;}
+    int has_uid=0;
+    for(size_t i=0;i<ng;i++)if(grants[i].u==uid){has_uid=1;break;}
+    if(!has_uid){free(grants);return 0;}
+    FILE *f=fopen(PACKAGES,"re");if(!f){free(grants);return 0;}
     char line[8192],p[256];unsigned u;int found=0;
-    while(fgets(line,sizeof(line),f))if(sscanf(line,"%255s %u",p,&u)==2&&u==uid&&granted(p,u)){found=1;break;}
-    fclose(f);return found;
+    while(fgets(line,sizeof(line),f))if(parse_pkg_uid(line,p,&u)&&u==uid&&in_grants(grants,ng,p,u)){found=1;break;}
+    fclose(f);free(grants);return found;
 }
 static int same_root(pid_t pid) {
     char p[64];struct stat peer,own;
@@ -109,9 +157,33 @@ static int edit_grant(const char *package,int add) {
 }
 static void list_apps(int out) {
     FILE *f=fopen(PACKAGES,"re");if(!f)return;
-    char line[8192],p[256];unsigned u;
-    while(fgets(line,sizeof(line),f))if(sscanf(line,"%255s %u",p,&u)==2&&safe_package(p)&&strcmp(p,MANAGER))
-        dprintf(out,"%s %u %d\n",p,u,granted(p,u));
+    #ifdef GRANTS
+    struct grant_row *grants=NULL;size_t ng=load_grants(&grants);
+    #endif
+    char line[8192],p[256],buf[16384];unsigned u;size_t off=0;
+    while(fgets(line,sizeof(line),f)){
+        #ifdef GRANTS
+        if(!parse_pkg_uid(line,p,&u)||!safe_package(p)||!strcmp(p,MANAGER))continue;
+        int ok=in_grants(grants,ng,p,u);
+        #else
+        if(sscanf(line,"%255s %u",p,&u)!=2||!safe_package(p)||!strcmp(p,MANAGER))continue;
+        int ok=granted(p,u);
+        #endif
+        int n=snprintf(buf+off,sizeof(buf)-off,"%s %u %d\n",p,u,ok);
+        if(n<0)continue;
+        if((size_t)n>=sizeof(buf)-off){
+            ssize_t w=0;while(w<(ssize_t)off){ssize_t k=write(out,buf+w,off-(size_t)w);if(k<=0)break;w+=k;}
+            if(w<(ssize_t)off)break;
+            off=0;
+            n=snprintf(buf,sizeof(buf),"%s %u %d\n",p,u,ok);
+            if(n<=0||(size_t)n>=sizeof(buf))continue;
+        }
+        off+=(size_t)n;
+    }
+    if(off){ssize_t w=0;while(w<(ssize_t)off){ssize_t k=write(out,buf+w,off-(size_t)w);if(k<=0)break;w+=k;}}
+    #ifdef GRANTS
+    free(grants);
+    #endif
     fclose(f);
 }
 /* Take exactly three stdio descriptors; close every delivered surplus fd,

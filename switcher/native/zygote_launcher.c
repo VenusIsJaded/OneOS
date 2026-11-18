@@ -21,12 +21,14 @@
  * (dex2oat64 --compiler-filter=verify) and runs framework code JIT-compiled
  * only. ONEOS_GUEST_JIT_ZYGOTE itself is not passed on to zygote.
  */
+#define _GNU_SOURCE
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -105,7 +107,12 @@ int main(void) {
         dup3(null_fd, 2, 0);
         if (null_fd > 4) close(null_fd);
     }
-    for (int fd = 5; fd < 1024; fd++) close(fd);
+    #ifdef SYS_close_range
+    if (syscall(SYS_close_range, 5U, ~0U, 0U) != 0)
+    #endif
+    {
+        for (int fd = 5; fd < 1024; fd++) close(fd);
+    }
 
     char *argv[8];
     int a = 0;
