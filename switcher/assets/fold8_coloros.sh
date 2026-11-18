@@ -56,11 +56,23 @@ perf_supported() {
 }
 perf_state() { echo "$STAGE/performance_handover"; }
 perf_log() { echo "$(date +%T) $*" >> "$STAGE/performance_handover.log"; }
+# Field 22 of /proc/<pid>/stat: with the pid, what tells one process from the next that got the same number.
+perf_pstart() {
+    pp_=''; IFS= read -r pp_ < "/proc/$1/stat" 2>/dev/null || return 1
+    pp_=${pp_##*\) }; set -- $pp_; [ $# -ge 20 ] || return 1
+    shift 19; echo "$1"
+}
 perf_guest() {
     stage_di=$(stat -Lc %d:%i "$STAGE/data" 2>/dev/null) || return 1
-    if [ -n "${LAST_PERF_GP:-}" ] && [ -r "/proc/$LAST_PERF_GP/comm" ] &&
-       [ "$(stat -Lc %d:%i "/proc/$LAST_PERF_GP/root/data" 2>/dev/null)" = "$stage_di" ]; then
-        echo "$LAST_PERF_GP"; return
+    # The cached pid counts only while it is still that very system_server: its name, its start time and the
+    # guest's /data (a recycled number can land on another process of the guest, whose /data matches too).
+    if [ -n "${LAST_PERF_GP:-}" ] && [ -r "/proc/$LAST_PERF_GP/comm" ]; then
+        pc_=''; IFS= read -r pc_ < "/proc/$LAST_PERF_GP/comm" 2>/dev/null
+        if [ "$pc_" = system_server ] && [ -n "${LAST_PERF_GP_START:-}" ] &&
+           [ "$(perf_pstart "$LAST_PERF_GP")" = "$LAST_PERF_GP_START" ] &&
+           [ "$(stat -Lc %d:%i "/proc/$LAST_PERF_GP/root/data" 2>/dev/null)" = "$stage_di" ]; then
+            echo "$LAST_PERF_GP"; return
+        fi
     fi
     for q in $(pidof system_server); do
         [ "$(stat -Lc %d:%i /proc/$q/root/data 2>/dev/null)" = "$stage_di" ] && { echo "$q"; return; }
@@ -147,9 +159,11 @@ perf_worker() {
     case "$gpu_top" in ''|0|*[!0-9]*) return 1;; esac
     mode=''; { IFS= read -r mode < "$PSTATE/mode"; } 2>/dev/null || true
     power_save=''; { IFS= read -r power_save < "$PSTATE/power_save"; } 2>/dev/null || true
-    released=0; level=-1; LAST_PERF_GP=$gp
+    released=0; level=-1; LAST_PERF_GP=$gp; LAST_PERF_GP_START=$(perf_pstart "$gp" || true)
     while [ ! -f "$PSTATE/stop" ] && [ ! -f "$STAGE/data/oneos_rec_stop" ]; do
         gp=$(perf_guest) || return 0
+        # (the start time is read again only when the pid changed: the cache check above is what vouched for the old one)
+        [ "$gp" = "$LAST_PERF_GP" ] || LAST_PERF_GP_START=$(perf_pstart "$gp" || true)
         LAST_PERF_GP=$gp
         skin=$(timeout 3 "$BB" nsenter -t "$gp" -m -r -- /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys thermalservice 2>/dev/null |
           awk '/^Current temperatures from HAL:/{in_s=1;next} /^Current cooling devices/{in_s=0} in_s && /mType=3,/ && match($0,/mValue=[0-9.]+/){v=substr($0,RSTART+7,RLENGTH-7)+0; if(!seen||v>max){max=v;seen=1}} END{if(seen)print max}')
