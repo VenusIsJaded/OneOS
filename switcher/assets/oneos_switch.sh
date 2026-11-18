@@ -1041,7 +1041,10 @@ if [ -r "$CHB/current_now" ]; then
     esac
     pkill -f "session \\(charge_watch\\)" 2>/dev/null || true
     CHB="$CHB" STAGE="$STAGE" $BB setsid $BB timeout 7200 $BB sh -c '
-        echo $$ > "$STAGE/charge_watch.pid" 2>/dev/null
+        # The PID file holds the process GROUP id (setsid made timeout the leader),
+        # not this shell: the stops do kill -- -<id>, which reaches the sleep too.
+        _s=$(cat /proc/$$/stat 2>/dev/null); _s=${_s##*) }; set -- $_s
+        echo "${3:-$$}" > "$STAGE/charge_watch.pid" 2>/dev/null
         rf() { local _v=""; [ -r "$1" ] && IFS= read -r _v < "$1" 2>/dev/null; printf "%s" "$_v"; }
         echo "=== $(date "+%F %T") session (charge_watch): status charging_type direct current(mA) voltage(mV) temp"
         while :; do
