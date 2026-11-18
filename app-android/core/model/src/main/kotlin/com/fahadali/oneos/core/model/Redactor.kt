@@ -508,6 +508,13 @@ class Redactor(private val salt: ByteArray) {
     companion object {
         const val RULES = "oneos.redact/1"
 
+        /**
+         * Words that make an unlabelled decimal pair a location (`persist.vendor.gnss.lastfix`).
+         * Declared before [VALUE_RULES]: a rule takes it as a constructor argument, and companion
+         * properties initialize in source order (declared after, it was still null: a compile error).
+         */
+        private val LOCATION_CONTEXT = Regex("""(?i)(location|gps|gnss|fused|fix|latitude|longitude|\blat\b|\blon\b|\blng\b|coord|geo)""")
+
         private val VALUE_RULES: List<ValueRule> = listOf(
             // Not a link of an `a@b@c` chain (oat files: system@framework@services.jar@classes.odex)
             // or a file name (samsung.software.media.c2@1.0-service.rc).
@@ -725,9 +732,6 @@ class Redactor(private val salt: ByteArray) {
             val r = m.value
             r.count { it.isDigit() } >= 4 && r.any { it.isLetter() } && r.toSet().size >= 8
         }
-
-        /** Words that make an unlabelled decimal pair a location (`persist.vendor.gnss.lastfix`). */
-        private val LOCATION_CONTEXT = Regex("""(?i)(location|gps|gnss|fused|fix|latitude|longitude|\blat\b|\blon\b|\blng\b|coord|geo)""")
 
         /** File name endings that are also letters-only "top-level domains" after an `@`. */
         private val FILE_EXTENSIONS = setOf(

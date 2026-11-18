@@ -105,6 +105,11 @@ class ProbeListTest {
         assertTrue(violations("magisk -v; magisk -V; /data/adb/ksud -V").isEmpty())
         assertTrue(violations("dumpsys SurfaceFlinger --display-id").isEmpty())
         assertTrue(violations("service list").isEmpty())
+        // status.list builds one sha256sum call from positional parameters; any other `set` stays refused.
+        assertTrue(violations("set --; for f in /a/*; do set -- \"\$@\" \"\$f\"; done; [ \"\$#\" = 0 ] || sha256sum \"\$@\"").isEmpty())
+        for (bad in listOf("set", "set -e", "set +f", "set -x", "set -o pipefail", "set -f -- a")) {
+            assertTrue("allowed: $bad", violations(bad).isNotEmpty())
+        }
         assertTrue(violations("cmd overlay lookup android android:string/config_mainBuiltInDisplayCutout").isEmpty())
         for (bad in listOf(
             "cmd overlay enable com.example.overlay",

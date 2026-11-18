@@ -244,9 +244,13 @@ class ProbeStreamParser(
         val maxOut = (usable ushr 2) * 3
         if (outBuf.size < maxOut) outBuf = ByteArray(maxOf(maxOut, outBuf.size shl 1))
         val decodedLen = try {
-            val dst = java.nio.ByteBuffer.wrap(outBuf)
-            decoder.decode(java.nio.ByteBuffer.wrap(inBuf, 0, usable), dst)
-            dst.position()
+            // java.util.Base64.Decoder has no decode(ByteBuffer, ByteBuffer): decode(ByteBuffer)
+            // returns a new buffer, copied here into the reused outBuf.
+            val decoded = decoder.decode(java.nio.ByteBuffer.wrap(inBuf, 0, usable))
+            val n = decoded.remaining()
+            if (outBuf.size < n) outBuf = ByteArray(n)
+            decoded.get(outBuf, 0, n)
+            n
         } catch (e: IllegalArgumentException) {
             running?.notes?.add("bad base64 in ${o.path}")
             return

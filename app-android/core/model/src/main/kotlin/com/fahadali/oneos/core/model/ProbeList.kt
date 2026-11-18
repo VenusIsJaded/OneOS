@@ -148,7 +148,7 @@ object ProbeAudit {
         "getprop", "cat", "ls", "sha256sum", "stat", "grep", "sed", "awk", "sort", "uniq", "wc", "head", "tail",
         "cut", "tr", "printf", "echo", "dumpsys", "getevent", "service", "uname", "df", "id", "unzip", "basename",
         "dirname", "readlink", "pidof", "getenforce", "test", "[", "true", "false", "exit", "command", "break",
-        "continue", "magisk", "/data/adb/ksud", "/data/adb/apd", "cmd",
+        "continue", "magisk", "/data/adb/ksud", "/data/adb/apd", "cmd", "set",
     )
 
     /** Commands the runner (probe.sh) itself runs, besides calling the entries. */
@@ -288,6 +288,9 @@ object ProbeAudit {
             "magisk", "/data/adb/ksud", "/data/adb/apd" ->
                 if (a != listOf("-v") && a != listOf("-V")) out += "$name ${a.joinToString(" ")} (only -v / -V)"
             "command" -> if (a.firstOrNull() != "-v") out += "command ${a.joinToString(" ")} (only command -v)"
+            // Only the positional-parameter form (`set -- "$@" "$f"`, status.list batches its sha256sum
+            // calls with it). It writes nothing; `set -e`, `set +o`, a bare `set` and the rest stay refused.
+            "set" -> if (a.firstOrNull() != "--") out += "set ${a.joinToString(" ")} (only set -- to build an argument list)"
             "cmd" -> if (a.size != 4 || a.subList(0, 3) != listOf("overlay", "lookup", "android") ||
                 !CMD_LOOKUP_RESOURCE.matches(a[3])
             ) {
