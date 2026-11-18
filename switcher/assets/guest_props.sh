@@ -1959,9 +1959,21 @@ restore-persist)
     sed -n 's/^B \(.*\)$/\1=/p' "$plan" > "$plan.blank"
     batch_blank_ok=0
     if [ -s "$plan.blank" ] && "$RP" -n -f "$plan.blank" 2>/dev/null; then
-        batch_blank_ok=1
-        sed -n 's/^B //p' "$plan" > "$BLANKED.persist"
-        blanked_p=$(wc -l < "$BLANKED.persist")
+        # resetprop -n -f has exited 0 without changing a thing (see the verified writer above): the batch counts
+        # only when getprop shows every one of those properties empty. Otherwise each is written one by one below.
+        getprop | sed -n 's/^\[\(persist\.[^]]*\)\]: \[\(.*\)\]$/\1=\2/p' > "$NOW.after"
+        left=$(awk -F= -v bf="$plan.blank" '
+            BEGIN { while ((getline l < bf) > 0) { k = substr(l, 1, index(l, "=") - 1); want[k] = 1 } }
+            { k = substr($0, 1, index($0, "=") - 1); if ((k in want) && substr($0, index($0, "=") + 1) != "") n++ }
+            END { print n + 0 }' "$NOW.after")
+        rm -f "$NOW.after"
+        if [ "$left" = 0 ]; then
+            batch_blank_ok=1
+            sed -n 's/^B //p' "$plan" > "$BLANKED.persist"
+            blanked_p=$(wc -l < "$BLANKED.persist")
+        else
+            echo "guest_props: resetprop -n -f reported success but $left blanked persist props still hold values; writing them one by one"
+        fi
     fi
     rm -f "$plan.blank"
     # The whole line as it is: a restored value keeps its own leading and trailing spaces.
@@ -1969,9 +1981,9 @@ restore-persist)
         op=${line%% *}; val=${line#* }
         case "$op" in
             B) [ $batch_blank_ok = 1 ] && continue
-               if "$RP" -n "$val" "" 2>/dev/null; then echo "$val" >> "$BLANKED.persist"; blanked_p=$((blanked_p + 1)); else failed=$((failed + 1)); fi ;;
-            D) if "$RP" -p --delete "$val" 2>/dev/null; then deleted=$((deleted + 1)); else failed=$((failed + 1)); fi ;;
-            R) if "$RP" -p "${val%%=*}" "${val#*=}" 2>/dev/null; then restored=$((restored + 1)); else failed=$((failed + 1)); fi ;;
+               if "$RP" -n "$val" "" 2>/dev/null && [ -z "$(getprop "$val")" ]; then echo "$val" >> "$BLANKED.persist"; blanked_p=$((blanked_p + 1)); else failed=$((failed + 1)); fi ;;
+            D) if "$RP" -p --delete "$val" 2>/dev/null && [ -z "$(getprop "$val")" ]; then deleted=$((deleted + 1)); else failed=$((failed + 1)); fi ;;
+            R) if "$RP" -p "${val%%=*}" "${val#*=}" 2>/dev/null && [ "$(getprop "${val%%=*}")" = "${val#*=}" ]; then restored=$((restored + 1)); else failed=$((failed + 1)); fi ;;
         esac
     done < "$plan"
     if [ -s "$BLANKED.persist" ]; then
