@@ -108,6 +108,50 @@ if [ -d "$LEGACY_STAGE" ] && [ ! -L "$LEGACY_STAGE" ]; then
 fi
 [ -d "$STAGE" ] && [ ! -L "$STAGE" ] || refuse "$STAGE is missing or not a directory"
 root_only "$STAGE" || app_refuse "$STAGE is not root's or is writable by others ($(stat -c '%U:%G %A' "$STAGE" 2>/dev/null))"
+# One switch at a time. The root script's own lock ends when it has the switch's
+# "Preflight passed" and persist_session.active (what a second launch is refused
+# on) is written much later, by the snapshot: a launch in between passed the same
+# checks and two switches raced for the snapshot, the mounts, the properties and
+# the watchers. The switch holds this lock from here to its last line (the
+# snapshot is long written by then); a second one is refused like any other
+# preflight failure. Created exclusively (noclobber), owner = pid + start time (a
+# pid alone is reused), a dead owner's lock is taken over by an atomic rename.
+# --- switch lock begin
+SW_LOCK="$STAGE/.switch.lock"
+sw_pstart() {
+    sw_s=''; IFS= read -r sw_s < "/proc/$1/stat" 2>/dev/null || return 1
+    sw_s=${sw_s##*) }; set -- $sw_s; [ $# -ge 20 ] || return 1
+    shift 19; echo "$1"
+}
+sw_alive() {
+    [ -n "$1" ] && [ -d "/proc/$1" ] || return 1
+    sw_z=''; IFS= read -r sw_z < "/proc/$1/stat" 2>/dev/null || return 1
+    sw_z=${sw_z##*) }; [ "${sw_z%% *}" = Z ] && return 1
+    [ -n "$2" ] || return 0
+    [ "$(sw_pstart "$1")" = "$2" ]
+}
+sw_mklock() { ( set -C; echo "$$ $(sw_pstart $$)" > "$SW_LOCK" ) 2>/dev/null; }
+sw_unlock() { sw_o=''; read -r sw_o _ < "$SW_LOCK" 2>/dev/null; [ "$sw_o" = "$$" ] && rm -f "$SW_LOCK"; return 0; }
+if ! sw_mklock; then
+    sw_op=''; sw_ost=''; read -r sw_op sw_ost < "$SW_LOCK" 2>/dev/null
+    [ -n "$sw_op" ] || { sleep 1; read -r sw_op sw_ost < "$SW_LOCK" 2>/dev/null; }
+    if sw_alive "$sw_op" "$sw_ost"; then
+        refuse "another OneOS switch is starting or running (pid $sw_op): wait for it, or return to One UI first"
+    fi
+    # Stale: one starter takes it away (a rename is atomic, the second finds nothing).
+    mv "$SW_LOCK" "$SW_LOCK.stale.$$" 2>/dev/null || refuse "another OneOS switch is starting: try again"
+    sw_mo=''; sw_mst=''; read -r sw_mo sw_mst < "$SW_LOCK.stale.$$" 2>/dev/null
+    if [ "$sw_mo" != "$sw_op" ] || [ "$sw_mst" != "$sw_ost" ]; then
+        # That was another starter's new lock: put it back and leave.
+        ln "$SW_LOCK.stale.$$" "$SW_LOCK" 2>/dev/null
+        rm -f "$SW_LOCK.stale.$$"
+        refuse "another OneOS switch is starting: try again"
+    fi
+    rm -f "$SW_LOCK.stale.$$"
+    sw_mklock || refuse "another OneOS switch is starting: try again"
+fi
+trap sw_unlock EXIT
+# --- switch lock end
 [ -f "$STAGE/system.raw" ] || refuse "the guest image ($STAGE/system.raw) is not staged"
 for f in oneos_switch.sh guest_prepare.sh guest_start.sh guest_props.sh return_to_oneui.sh libsec-ril-patch.sh \
          check_host_apex.sh bridges.sh fold8_coloros.sh guest_google.sh zygote_exec guards.txt services_patched.jar; do
