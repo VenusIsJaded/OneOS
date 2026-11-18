@@ -46,18 +46,46 @@ control)
             for m in "$A/$base/"*; do
                 [ -d "$m" ] && [ ! -L "$m" ] || continue
                 enabled=1; [ ! -f "$m/disable" ] || enabled=0
-                kind=module; [ ! -f "$m/.oneos-framework" ] || kind=$(cat "$m/.oneos-framework")
-                namehex=$(sed -n 's/^name=//p' "$m/module.prop" | head -n 1 | head -c 256 | tr -d '\r\n' | od -An -v -tx1 | tr -d ' \n')
-                deschex=$(sed -n 's/^description=//p' "$m/module.prop" | head -n 1 | head -c 1024 | tr -d '\r\n' | od -An -v -tx1 | tr -d ' \n')
-                verhex=$(sed -n 's/^version=//p' "$m/module.prop" | head -n 1 | head -c 128 | tr -d '\r\n' | od -An -v -tx1 | tr -d ' \n')
-                authorhex=$(sed -n 's/^author=//p' "$m/module.prop" | head -n 1 | head -c 256 | tr -d '\r\n' | od -An -v -tx1 | tr -d ' \n')
-                codehex=$(sed -n 's/^versionCode=//p' "$m/module.prop" | head -n 1 | head -c 32 | tr -d '\r\n' | od -An -v -tx1 | tr -d ' \n')
-                updatehex=$(sed -n 's/^updateJson=//p' "$m/module.prop" | head -n 1 | head -c 1024 | tr -d '\r\n' | od -An -v -tx1 | tr -d ' \n')
+                kind=module
+                if [ -f "$m/.oneos-framework" ]; then
+                    { IFS= read -r kind < "$m/.oneos-framework"; } 2>/dev/null || true
+                fi
+                set -- $(LC_ALL=C awk '
+                BEGIN {
+                    for (i = 1; i < 256; i++) ord[sprintf("%c", i)] = i
+                    lim["version"] = 128; lim["name"] = 256; lim["description"] = 1024
+                    lim["author"] = 256; lim["versionCode"] = 32; lim["updateJson"] = 1024
+                }
+                {
+                    sub(/\r$/, "")
+                    eq = index($0, "=")
+                    if (eq > 1) {
+                        k = substr($0, 1, eq - 1)
+                        if ((k in lim) && !(k in seen)) {
+                            seen[k] = 1
+                            v = substr($0, eq + 1, lim[k])
+                            h = ""; n = length(v)
+                            for (i = 1; i <= n; i++) h = h sprintf("%02x", ord[substr(v, i, 1)])
+                            val[k] = (h != "" ? h : "-")
+                        }
+                    }
+                }
+                END {
+                    printf "%s %s %s %s %s %s\n",
+                        (val["version"] ? val["version"] : "-"),
+                        (val["name"] ? val["name"] : "-"),
+                        (val["description"] ? val["description"] : "-"),
+                        (val["author"] ? val["author"] : "-"),
+                        (val["versionCode"] ? val["versionCode"] : "-"),
+                        (val["updateJson"] ? val["updateJson"] : "-")
+                }' "$m/module.prop" 2>/dev/null)
+                verhex=${1:--}; namehex=${2:--}; deschex=${3:--}
+                authorhex=${4:--}; codehex=${5:--}; updatehex=${6:--}
                 caps=-
                 [ ! -f "$m/action.sh" ] || caps=action
                 [ ! -f "$m/webroot/index.html" ] || caps="$caps,webui"
                 removed=0; [ ! -f "$m/remove" ] || removed=1
-                echo "@@RESULT module-info ${m##*/} $enabled $base $kind ${verhex:--} ${namehex:--} ${deschex:--} ${authorhex:--} ${codehex:--} ${updatehex:--} $caps $removed"
+                echo "@@RESULT module-info ${m##*/} $enabled $base $kind $verhex $namehex $deschex $authorhex $codehex $updatehex $caps $removed"
             done
         done
         ;;
@@ -382,16 +410,28 @@ pre)
         fi
         if [ -f "$m/system.prop" ]; then
             # OneOS snapshots/restores persistent properties on either return path.
+            snapshot="$A/oneos/run/module-props"
+            if [ -z "${MOD_ALL_PROPS_SET:-}" ]; then
+                MOD_ALL_PROPS=$(getprop)
+                MOD_ALL_PROPS_SET=1
+                MOD_SEEN_KEYS="|"
+                if [ -f "$snapshot" ]; then
+                    while IFS='|' read -r sk _rest; do
+                        [ -n "$sk" ] && MOD_SEEN_KEYS="${MOD_SEEN_KEYS}${sk}|"
+                    done < "$snapshot"
+                fi
+            fi
             while IFS= read -r line; do
                 case "$line" in ''|'#'*) continue ;; *=*)
                     key=${line%%=*}
                     case "$key" in ''|*[!A-Za-z0-9._-]*) exit 1 ;; esac
                     [ -x "$A/ksu/bin/resetprop" ] || { echo 'Module properties require reversible resetprop support'; exit 1; }
-                    snapshot="$A/oneos/run/module-props"
-                    if ! cut -d '|' -f 1 "$snapshot" 2>/dev/null | grep -Fxq "$key"; then
-                        present=0; getprop | grep -Fq "[$key]:" && present=1
+                    case "$MOD_SEEN_KEYS" in *"|$key|"*) ;; *)
+                        MOD_SEEN_KEYS="${MOD_SEEN_KEYS}${key}|"
+                        present=0
+                        case "$MOD_ALL_PROPS" in *"[$key]:"*) present=1 ;; esac
                         printf '%s|%s|%s\n' "$key" "$present" "$(getprop "$key")" >> "$snapshot"
-                    fi
+                    ;; esac
                     "$A/ksu/bin/resetprop" -n "$key" "${line#*=}"
                     ;; *) exit 1 ;; esac
             done < "$m/system.prop"

@@ -57,8 +57,13 @@ perf_supported() {
 perf_state() { echo "$STAGE/performance_handover"; }
 perf_log() { echo "$(date +%T) $*" >> "$STAGE/performance_handover.log"; }
 perf_guest() {
+    stage_di=$(stat -Lc %d:%i "$STAGE/data" 2>/dev/null) || return 1
+    if [ -n "${LAST_PERF_GP:-}" ] && [ -r "/proc/$LAST_PERF_GP/comm" ] &&
+       [ "$(stat -Lc %d:%i "/proc/$LAST_PERF_GP/root/data" 2>/dev/null)" = "$stage_di" ]; then
+        echo "$LAST_PERF_GP"; return
+    fi
     for q in $(pidof system_server); do
-        [ "$(stat -Lc %d:%i /proc/$q/root/data 2>/dev/null)" = "$(stat -Lc %d:%i "$STAGE/data")" ] && { echo "$q"; return; }
+        [ "$(stat -Lc %d:%i /proc/$q/root/data 2>/dev/null)" = "$stage_di" ] && { echo "$q"; return; }
     done
     return 1
 }
@@ -137,14 +142,18 @@ perf_worker() {
         sleep 2
     done
     [ -n "${gp:-}" ] || return 1
-    gpu_top=$(gpu_max)
+    gpu_table=$(gpu_freqs)
+    gpu_top=$(printf '%s\n' "$gpu_table" | awk '{for(i=1;i<=NF;i++)if($i>m)m=$i}END{print m+0}')
     case "$gpu_top" in ''|0|*[!0-9]*) return 1;; esac
-    mode=$(cat "$PSTATE/mode"); released=0; level=-1
+    mode=''; { IFS= read -r mode < "$PSTATE/mode"; } 2>/dev/null || true
+    power_save=''; { IFS= read -r power_save < "$PSTATE/power_save"; } 2>/dev/null || true
+    released=0; level=-1; LAST_PERF_GP=$gp
     while [ ! -f "$PSTATE/stop" ] && [ ! -f "$STAGE/data/oneos_rec_stop" ]; do
         gp=$(perf_guest) || return 0
+        LAST_PERF_GP=$gp
         skin=$(timeout 3 "$BB" nsenter -t "$gp" -m -r -- /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys thermalservice 2>/dev/null |
-          sed -n '/^Current temperatures from HAL:/,/^Current cooling devices/p' | sed -n 's/.*mValue=\([0-9.]*\), mType=3,.*/\1/p' | awk 'NF {if(!seen || $1>max) max=$1; seen=1} END {if(seen) print max}')
-        gpu_t=$(cat /sys/kernel/gpu/gpu_tmu)
+          awk '/^Current temperatures from HAL:/{in_s=1;next} /^Current cooling devices/{in_s=0} in_s && /mType=3,/ && match($0,/mValue=[0-9.]+/){v=substr($0,RSTART+7,RLENGTH-7)+0; if(!seen||v>max){max=v;seen=1}} END{if(seen)print max}')
+        gpu_t=''; { IFS= read -r gpu_t < /sys/kernel/gpu/gpu_tmu; } 2>/dev/null || true
         case "$gpu_t" in ''|*[!0-9]*) skin='';; esac
         if [ -z "$skin" ]; then
             # No new headroom without a valid temperature reading. Once active,
@@ -156,11 +165,10 @@ perf_worker() {
         fi
         if [ "$released" = 0 ]; then
             [ -n "$skin" ] && awk -v s="$skin" -v g="$gpu_t" 'BEGIN{exit !(s<38&&g<65000)}' || { sleep 2; continue; }
-            before=$(cat "$PSTATE/cpu.before")
-            prime=$(cat /sys/devices/system/cpu/cpufreq/policy*/cpuinfo_max_freq | awk '$1>m{m=$1} END{print m}')
+            before=''; { IFS= read -r before < "$PSTATE/cpu.before"; } 2>/dev/null || true
+            prime=$(awk '$1>m{m=$1} END{print m}' /sys/devices/system/cpu/cpufreq/policy*/cpuinfo_max_freq)
             # A deliberately restricted host is preserved. Live repair is an
             # explicit diagnostic command for the already observed stale vote.
-            power_save=$(cat "$PSTATE/power_save")
             if [ "$mode" != live ] && { [ "$power_save" = 1 ] || { [ "$power_save" != 0 ] && [ "$before" != -1 ] && [ "$before" -lt "$prime" ]; }; }; then
                 perf_log 'host power saving or unknown restricted policy; preserving limits'; return 0
             fi
@@ -170,15 +178,17 @@ perf_worker() {
         if [ "$new" != "$level" ]; then
             case "$new" in 0) pct=100;; 1) pct=80;; 2) pct=65;; *) pct=50;; esac
             for p in /sys/devices/system/cpu/cpufreq/policy*; do
-                hw=$(cat "$p/cpuinfo_max_freq"); ceiling=$(cat "$PSTATE/${p##*/}.before")
-                if [ "$mode" = live ] || [ "$(cat "$PSTATE/power_save")" = 0 ]; then ceiling=$hw; fi
+                hw=''; { IFS= read -r hw < "$p/cpuinfo_max_freq"; } 2>/dev/null || true
+                ceiling=''; { IFS= read -r ceiling < "$PSTATE/${p##*/}.before"; } 2>/dev/null || true
+                if [ "$mode" = live ] || [ "$power_save" = 0 ]; then ceiling=$hw; fi
                 target=$((hw / 100 * pct)); [ "$target" -le "$ceiling" ] || target=$ceiling
                 perf_write "$p/scaling_max_freq" "${p##*/}" "$target"
             done
-            ceiling=$(cat "$PSTATE/gpu.before"); if [ "$mode" = live ] || [ "$(cat "$PSTATE/power_save")" = 0 ]; then ceiling=$gpu_top; fi
-            target=$(gpu_freqs | awk -v max="$((gpu_top * pct / 100))" -v ceiling="$ceiling" '{for(i=1;i<=NF;i++){v=$i;if(v<=max&&v<=ceiling&&v>m)m=v}}END{print m}')
+            ceiling=''; { IFS= read -r ceiling < "$PSTATE/gpu.before"; } 2>/dev/null || true
+            if [ "$mode" = live ] || [ "$power_save" = 0 ]; then ceiling=$gpu_top; fi
+            target=$(printf '%s\n' "$gpu_table" | awk -v max="$((gpu_top * pct / 100))" -v ceiling="$ceiling" '{for(i=1;i<=NF;i++){v=$i;if(v<=max&&v<=ceiling&&v>m)m=v}}END{print m}')
             # No table step under this level's cap: the lowest one, never an empty write.
-            case "$target" in ''|0) target=$(gpu_freqs | awk '{for(i=1;i<=NF;i++)if(!m||$i<m)m=$i}END{print m}');; esac
+            case "$target" in ''|0) target=$(printf '%s\n' "$gpu_table" | awk '{for(i=1;i<=NF;i++)if(!m||$i<m)m=$i}END{print m}');; esac
             perf_write /sys/kernel/gpu/gpu_max_clock gpu "$target"
             perf_log "thermal level $level->$new skin=${skin:-unknown} gpu=$gpu_t"
             level=$new

@@ -5,13 +5,21 @@ set -eu
 STAGE=${STAGE:-/data/local/tmp/oneos}
 BB=${BB:-/data/oneos_bin/busybox}
 fail() { echo "Fold8 Pixel: $*" >&2; exit 3; }
+STAGE_JSON=""
+load_stage_json() {
+    [ -n "$STAGE_JSON" ] || STAGE_JSON=$(cat "$STAGE/.oneos_stage" 2>/dev/null || true)
+}
+has_stage_line() {
+    load_stage_json
+    case "$STAGE_JSON" in *"$1"*) return 0 ;; *) return 1 ;; esac
+}
 selected() {
-    if [ "${ONEOS_PROFILE:-}" = f8 ] && grep -q '^  "image": "infinityx41-findx9u",$' "$STAGE/.oneos_stage" && grep -q '^  "set": "infinityx",$' "$STAGE/.oneos_stage" && [ -f "$STAGE/Fold8AngleRelay.dex" ]; then return 0; fi
-    if [ "${ONEOS_PROFILE:-}" = f8 ] && grep -q '^  "image": "lineage24-infiniti",$' "$STAGE/.oneos_stage" && grep -q '^  "set": "lineage",$' "$STAGE/.oneos_stage" && [ -f "$STAGE/Fold8AngleRelay.dex" ]; then return 0; fi
-    grep -q '^  "image": "pixel11fold-yogi",$' "$STAGE/.oneos_stage" || return 1
+    if [ "${ONEOS_PROFILE:-}" = f8 ] && has_stage_line '"image": "infinityx41-findx9u",' && has_stage_line '"set": "infinityx",' && [ -f "$STAGE/Fold8AngleRelay.dex" ]; then return 0; fi
+    if [ "${ONEOS_PROFILE:-}" = f8 ] && has_stage_line '"image": "lineage24-infiniti",' && has_stage_line '"set": "lineage",' && [ -f "$STAGE/Fold8AngleRelay.dex" ]; then return 0; fi
+    has_stage_line '"image": "pixel11fold-yogi",' || return 1
     case "${ONEOS_PROFILE:-}" in
-        f8) grep -q '^  "set": "pixel-f8",$' "$STAGE/.oneos_stage" ;;
-        f8u) grep -q '^  "set": "pixel-f8u",$' "$STAGE/.oneos_stage" ;;
+        f8) has_stage_line '"set": "pixel-f8",' ;;
+        f8u) has_stage_line '"set": "pixel-f8u",' ;;
         *) return 1 ;;
     esac
 }
@@ -36,10 +44,10 @@ bar_prepare() {
     [ "${ONEOS_GUEST_DT2S:-1}" = 1 ] || { echo 'Pixel: double tap to sleep off (ONEOS_GUEST_DT2S=0)'; return 0; }
     SUI="$STAGE/rootfs/system/system_ext/priv-app/SystemUIGoogle/SystemUIGoogle.apk"
     LCH="$STAGE/rootfs/system/system_ext/priv-app/NexusLauncherRelease/NexusLauncherRelease.apk"
-    if grep -q '^  "image": "pixel11pro-kodiak",$' "$STAGE/.oneos_stage" && grep -q '^  "set": "pixel-sultra",$' "$STAGE/.oneos_stage"; then
+    if has_stage_line '"image": "pixel11pro-kodiak",' && has_stage_line '"set": "pixel-sultra",'; then
         bar_bind OneOSPixelSystemUI.apk "$SUI" db35d92ce22e7afcafde19877c4d5f60ec94cf7389bcb140b22902a4ca3e53ec SystemUI
         bar_bind OneOSPixelLauncher.apk "$LCH" 3c0ea0aca798fa54395e619b26527da08037fe4bda145d2f4ab62db55547a62f 'Pixel Launcher'
-    elif grep -q '^  "image": "pixel9proxl-komodo",$' "$STAGE/.oneos_stage" && grep -q '^  "set": "pixel9-sultra",$' "$STAGE/.oneos_stage"; then
+    elif has_stage_line '"image": "pixel9proxl-komodo",' && has_stage_line '"set": "pixel9-sultra",'; then
         bar_bind OneOSPixelSystemUI.apk "$SUI" e2072d91e7fe553256de6b6bfdbce00691e67a0b99fb90db3afb3dff9285c91b SystemUI
         bar_bind OneOSPixelLauncher.apk "$LCH" 28866dd3953784fe154ffcc5c44d76461b12a304e20b9806a1a91338310b4bb0 'Pixel Launcher'
     fi
@@ -51,12 +59,12 @@ prepare)
     target="$STAGE/rootfs/system/system_ext/priv-app/SystemUIGoogle/SystemUIGoogle.apk"
     payload=Fold8PixelSystemUI.apk
     donor=9934d2dac326f56290f459b9e649185cd5531e1b6ae1f5a72b11e88f865f8b03
-    if grep -q '^  "image": "lineage24-infiniti",$' "$STAGE/.oneos_stage"; then
+    if has_stage_line '"image": "lineage24-infiniti",'; then
         target="$STAGE/rootfs/system/system_ext/priv-app/SystemUI/SystemUI.apk"
         payload=Fold8LineageSystemUI.apk
         donor=aa22961855b1f8a9d3dbbbc643922f9b216f6d411313e12eb8b70086287b84c3
     fi
-    if grep -q '^  "image": "infinityx41-findx9u",$' "$STAGE/.oneos_stage"; then
+    if has_stage_line '"image": "infinityx41-findx9u",'; then
         target="$STAGE/rootfs/system/system_ext/priv-app/SystemUI/SystemUI.apk"
         payload=Fold8InfinitySystemUI.apk
         donor=6a99684e831f9635738189d39667debe0f8b798012fa4eb622a7cb87ad9b1ddf

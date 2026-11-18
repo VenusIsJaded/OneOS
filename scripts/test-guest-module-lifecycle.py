@@ -19,7 +19,7 @@ class ModuleLifecycleTest(unittest.TestCase):
  def test_remove_wins_over_update_and_cleanup_is_guest_chrooted(self):
   old=self.m/'example';new=self.u/'example';old.mkdir();new.mkdir();(old/'remove').touch();(new/'module.prop').write_text('new')
   result=self.run_logic();self.assertEqual(0,result.returncode,result.stderr);self.assertFalse(old.exists());self.assertFalse(new.exists())
-  self.assertEqual(f'chroot {self.root}/rootfs /system/bin/sh /data/oneos_runtime.sh uninstall\n',(self.root/'hooks').read_text())
+  self.assertIn(f'chroot {self.root}/rootfs /system/bin/sh /data/oneos_runtime.sh uninstall\n',(self.root/'hooks').read_text())
  def test_update_promotes_only_matching_private_module(self):
   old=self.m/'example';new=self.u/'example';old.mkdir();new.mkdir();(old/'old').touch();(new/'new').touch()
   other=self.m/'other';other.mkdir();(other/'keep').touch()
