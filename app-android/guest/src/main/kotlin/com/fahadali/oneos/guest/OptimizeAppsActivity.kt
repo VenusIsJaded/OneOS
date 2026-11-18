@@ -95,7 +95,7 @@ class OptimizeAppsActivity : AppCompatActivity() {
         list.removeAllViews()
         val color = getColor(R.color.preboot_card)
         val active = snap.active(now())
-        val starting = askedAt > 0 && (s == null || s.epoch < askedAt) && now() - askedAt < 60
+        val starting = askedAt > 0 && (s == null || s.epoch < askedAt) && now() - askedAt in 0 until 60
         val total = s?.total ?: 0
         val done = snap.results.size.coerceAtMost(total.takeIf { it > 0 } ?: Int.MAX_VALUE)
 

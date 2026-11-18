@@ -28,7 +28,9 @@ object CompileState {
         fun active(nowSec: Long): Boolean {
             val s = status ?: return false
             if (s.phase == Phase.DONE || s.phase == Phase.STOPPED) return false
-            return nowSec - s.epoch < STALE_SEC
+            // A status stamped in the future (the clock was set back since) is not fresh either: only 0 until STALE_SEC counts.
+            val age = nowSec - s.epoch
+            return age in 0 until STALE_SEC
         }
     }
 
