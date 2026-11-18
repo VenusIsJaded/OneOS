@@ -50,11 +50,9 @@ def extract(text):
     return res
 def check(body,label,depth,fails,total):
     total[0]+=1
-    with tempfile.NamedTemporaryFile('w',suffix='.sh',delete=False) as f: f.write(body); fn=f.name
-    for sh in (['dash','-n',fn],['busybox','sh','-n',fn]):
-        r=subprocess.run(sh,capture_output=True,text=True)
-        if r.returncode: fails.append(f"{label} depth{depth} [{sh[0]}]: {r.stderr.strip()[:200]}")
-    os.unlink(fn)
+    for name, sh in (('dash',['dash','-n']),('busybox',['busybox','sh','-n'])):
+        r=subprocess.run(sh,input=body,capture_output=True,text=True)
+        if r.returncode: fails.append(f"{label} depth{depth} [{name}]: {r.stderr.strip()[:200]}")
     for q,b,pos in extract(body):
         if q=='!':
             fails.append(f"{label}@{pos}: {b}"); continue

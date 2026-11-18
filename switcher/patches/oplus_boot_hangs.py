@@ -46,9 +46,20 @@ DUMP_START = """    const-string v0, "ctl.start"
 """
 
 
+_SMALI_CACHE = {}
+
+
+def smali_files(root):
+    cached = _SMALI_CACHE.get(root)
+    if cached is None:
+        cached = [os.path.join(d, f) for d, _, fs in os.walk(root)
+                  for f in fs if f.endswith(".smali")]
+        _SMALI_CACHE[root] = cached
+    return cached
+
+
 def find(root, rel_suffix):
-    hits = [os.path.join(d, f) for d, _, fs in os.walk(root) for f in fs
-            if os.path.join(d, f).endswith(rel_suffix)]
+    hits = [p for p in smali_files(root) if p.endswith(rel_suffix)]
     if len(hits) != 1:
         sys.exit(f"expected exactly one {rel_suffix}, found {len(hits)}")
     return hits[0]
@@ -90,20 +101,18 @@ def fix_dump_environment(root):
     from any of them would take system_server down."""
     dirs = set()
     count = 0
-    for dirpath, _, files in os.walk(root):
-        for name in files:
-            if not name.endswith(".smali"):
-                continue
-            path = os.path.join(dirpath, name)
-            smali = open(path).read()
-            n = smali.count(DUMP_START)
-            if not n:
-                continue
-            smali = smali.replace(DUMP_START, "    # OneOS: no dumpenvironment service in the host's init; ctl.start threw.\n")
-            open(path, "w").write(smali)
-            count += n
-            dirs.add(top_dir(root, path))
-            print(f"{name}: ctl.start dumpenvironment dropped ({n})", file=sys.stderr)
+    for path in smali_files(root):
+        smali = open(path).read()
+        if "dumpenvironment" not in smali:
+            continue
+        n = smali.count(DUMP_START)
+        if not n:
+            continue
+        smali = smali.replace(DUMP_START, "    # OneOS: no dumpenvironment service in the host's init; ctl.start threw.\n")
+        open(path, "w").write(smali)
+        count += n
+        dirs.add(top_dir(root, path))
+        print(f"{os.path.basename(path)}: ctl.start dumpenvironment dropped ({n})", file=sys.stderr)
     if count != 4:
         sys.exit(f"expected 4 ctl.start dumpenvironment calls, found {count}")
     return dirs
@@ -165,10 +174,10 @@ def fix_critical_config_updater(root):
     """Short-circuit CriticalConfigUpdater.onConfigUpdate(...)V when present so
     OplusAdditionalService does not stall system_server 5 s on critical.log."""
     dirs = set()
-    for dirpath, _, files in os.walk(root):
-        if "CriticalConfigUpdater.smali" not in files:
+    suffix = os.sep + "CriticalConfigUpdater.smali"
+    for path in smali_files(root):
+        if not path.endswith(suffix):
             continue
-        path = os.path.join(dirpath, "CriticalConfigUpdater.smali")
         lines = open(path).read().split("\n")
         changed = False
         i = 0

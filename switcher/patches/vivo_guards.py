@@ -165,11 +165,16 @@ def die(msg):
     sys.exit(f"vivo_guards: {msg}")
 
 
+_SMALI_CACHE = {}
+
+
 def smali_files(root):
-    for d, _, fs in os.walk(root):
-        for f in fs:
-            if f.endswith(".smali"):
-                yield os.path.join(d, f)
+    cached = _SMALI_CACHE.get(root)
+    if cached is None:
+        cached = [os.path.join(d, f) for d, _, fs in os.walk(root)
+                  for f in fs if f.endswith(".smali")]
+        _SMALI_CACHE[root] = cached
+    return cached
 
 
 def top(root, path):

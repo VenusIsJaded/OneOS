@@ -195,9 +195,14 @@ def early_return(sig):
     ]
 
 
+CLASS_RE = re.compile(r"^\.class (?:[a-z-]+ )*(L\S+;)$")
+SUPER_RE = re.compile(r"^\.super (\S+)$", re.M)
+
+
 def main(root):
     classes = {BASE: [], IMPL: []}
     foreign = []
+    apex_call_tok = APEXD + "->"
     for dirpath, _, files in os.walk(root):
         for name in files:
             if not name.endswith(".smali"):
@@ -205,18 +210,24 @@ def main(root):
             path = os.path.join(dirpath, name)
             with open(path) as f:
                 text = f.read()
-            cls = re.match(r"^\.class (?:[a-z-]+ )*(L\S+;)$", text.split("\n", 1)[0])
+            has_am = "ApexManager" in text
+            has_ax = apex_call_tok in text
+            if not has_am and not has_ax:
+                continue
+            nl = text.find("\n")
+            first = text[:nl] if nl >= 0 else text
+            cls = CLASS_RE.match(first)
             cls = cls.group(1) if cls else None
             if cls in classes:
                 classes[cls].append(path)
                 if cls == IMPL:
                     continue  # its own calls are classified below
-            if "ApexManager" in text and cls not in classes:
-                sup = re.search(r"^\.super (\S+)$", text, re.M)
+            if has_am and cls not in classes:
+                sup = SUPER_RE.search(text)
                 if sup and sup.group(1) in (BASE, IMPL):
                     sys.exit(f"{os.path.relpath(path, root)}: {cls} extends {sup.group(1)}, "
                              "expected ApexManagerImpl to be ApexManager's only subclass")
-            if APEXD + "->" in text and not (cls or "").startswith("Landroid/apex/"):
+            if has_ax and not (cls or "").startswith("Landroid/apex/"):
                 for m in ANY_CALL.finditer(text):
                     if m.group(1) not in READS:
                         foreign.append(f"{os.path.relpath(path, root)}: IApexService.{m.group(1)}")

@@ -7,6 +7,10 @@ Usage: check-oneos-refs.py <dexdump> <jar> [...]   (exit 1 when one is missing)"
 import re, subprocess, sys, tempfile, zipfile, os
 
 INV = re.compile(r"invoke-\w+(?:/range)? \{[^}]*\}, (L[^;]+;)\.([^:]+):(\([^)]*\)\S+)")
+DEX_RE = re.compile(r"classes\d*\.dex")
+CLS_RE = re.compile(r"\s*Class descriptor\s*:\s*'(L[^']+;)'")
+NAME_RE = re.compile(r"\s*name\s*:\s*'([^']+)'")
+TYPE_RE = re.compile(r"\s*type\s*:\s*'(\([^']*\)\S+)'")
 dexdump = sys.argv[1]
 bad = 0
 for jar in sys.argv[2:]:
@@ -14,24 +18,30 @@ for jar in sys.argv[2:]:
     with tempfile.TemporaryDirectory() as td:
         z = zipfile.ZipFile(jar)
         for n in z.namelist():
-            if not re.fullmatch(r"classes\d*\.dex", n):
+            if not DEX_RE.fullmatch(n):
                 continue
             p = z.extract(n, td)
             out = subprocess.run([dexdump, "-d", p], capture_output=True).stdout.decode("utf-8", "replace")
             cls = None
-            for line in out.split("\n"):
-                m = re.match(r"\s*Class descriptor\s*:\s*'(L[^']+;)'", line)
+            name = ""
+            for line in out.splitlines():
+                if "invoke-" in line:
+                    m = INV.search(line)
+                    if m:
+                        calls.add((m.group(1), m.group(2) + m.group(3)))
+                    continue
+                if "'" not in line:
+                    continue
+                m = CLS_RE.match(line)
                 if m:
                     cls = m.group(1); defined.setdefault(cls, set()); continue
-                m = re.match(r"\s*name\s*:\s*'([^']+)'", line)
-                if m and cls:
-                    name = m.group(1); continue
-                m = re.match(r"\s*type\s*:\s*'(\([^']*\)\S+)'", line)
-                if m and cls:
-                    defined[cls].add(name + m.group(1)); continue
-                m = INV.search(line)
-                if m:
-                    calls.add((m.group(1), m.group(2) + m.group(3)))
+                if cls:
+                    m = NAME_RE.match(line)
+                    if m:
+                        name = m.group(1); continue
+                    m = TYPE_RE.match(line)
+                    if m:
+                        defined[cls].add(name + m.group(1)); continue
     missing = sorted({(c, s) for c, s in calls if c in defined and s not in defined[c]
                       and (c.startswith("Loneos/") or True)})
     # Only report calls into oneos helpers or into classes a patcher could have changed

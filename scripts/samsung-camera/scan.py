@@ -130,17 +130,30 @@ def main():
             alldefs[k] = v
     universe = {k: v for k, v in universe.items() if k.startswith(PLATFORM) or k not in camdefs}
 
+    has_cache = {}
+
     def has(cls, member, seen=None):
+        key = (cls, member)
+        if seen is None and key in has_cache:
+            return has_cache[key]
+        if cls not in alldefs:
+            return None
         seen = seen or set()
-        if cls in seen or cls not in alldefs:
-            return None if cls not in alldefs else False
+        if cls in seen:
+            return False
         seen.add(cls)
         sup, ifs, mem = alldefs[cls]
         if member in mem:
+            if len(seen) == 1:
+                has_cache[key] = True
             return True
         for nxt in ([sup] if sup else []) + ifs:
             if nxt and nxt in alldefs and has(nxt, member, seen):
+                if len(seen) == 1:
+                    has_cache[key] = True
                 return True
+        if len(seen) == 1:
+            has_cache[key] = False
         return False
 
     def base(t):

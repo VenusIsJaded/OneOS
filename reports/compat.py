@@ -98,11 +98,12 @@ def render(records, today=None):
     def newest(v):
         return [int(n) for n in re.findall(r"\d+", v)], codes[v]
 
+    by_ver = defaultdict(list)
+    for (rv, phone, system), row in rows.items():
+        by_ver[rv].append((phone, system, row))
     for v in sorted(codes, key=newest, reverse=True):
         out += [f"## OneOS {v}", "", "| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
-        for (rv, phone, system), row in sorted(rows.items()):
-            if rv != v:
-                continue
+        for phone, system, row in sorted(by_ver[v]):
             cells = [phone, system, str(row["n"]), cell(row["home"], row["start"])]
             cells += [cell(*row["items"][key]) if key in row["items"] else "–" for key, _ in ITEMS]
             cells.append(row["last"] or "–")

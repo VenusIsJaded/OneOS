@@ -16,32 +16,39 @@ import glob, os, re, subprocess, sys, tempfile, zipfile
 dexdump = sorted(glob.glob(os.path.join(
     os.environ.get("ANDROID_HOME", "/opt/android-sdk"), "build-tools", "*", "dexdump*"
 )))[-1]
+DEX_NAME = re.compile(r"classes\d*\.dex$")
+METHOD_RE = re.compile(r"\|\[[0-9a-f]+\] (\S+)$")
+OP_RE = re.compile(r"\|([0-9a-f]{4}): (\S+)")
+TRY_RE = re.compile(r"\s+0x([0-9a-f]{4}) - 0x([0-9a-f]{4})\s*$")
+
 bad = []
 for jar in sys.argv[1:]:
     with tempfile.TemporaryDirectory() as tmp, zipfile.ZipFile(jar) as z:
         for name in z.namelist():
-            if not re.match(r"classes\d*\.dex$", name):
+            if not DEX_NAME.match(name):
                 continue
             z.extract(name, tmp)
             out = subprocess.run([dexdump, "-d", os.path.join(tmp, name)], capture_output=True).stdout.decode("utf-8", "replace")
             method = None
             prev = None
-            for line in out.split("\n"):
-                m = re.search(r"\|\[[0-9a-f]+\] (\S+)$", line)
-                if m:
-                    method = m.group(1)
-                    prev = None
-                    continue
-                m = re.search(r"\|([0-9a-f]{4}): (\S+)", line)
-                if m:
-                    op = m.group(2)
-                    if op.startswith("move-result") and not (prev or "").startswith(("invoke-", "filled-new-array")):
-                        bad.append(f"{os.path.basename(jar)}:{name}: {method} {op} at 0x{m.group(1)} after {prev or 'nothing'}")
-                    prev = op
-                    continue
-                m = re.match(r"\s+0x([0-9a-f]{4}) - 0x([0-9a-f]{4})\s*$", line)
-                if m and m.group(1) == m.group(2):
-                    bad.append(f"{os.path.basename(jar)}:{name}: {method} empty try range 0x{m.group(1)}")
+            for line in out.splitlines():
+                if "|" in line:
+                    m = OP_RE.search(line)
+                    if m:
+                        op = m.group(2)
+                        if op.startswith("move-result") and not (prev or "").startswith(("invoke-", "filled-new-array")):
+                            bad.append(f"{os.path.basename(jar)}:{name}: {method} {op} at 0x{m.group(1)} after {prev or 'nothing'}")
+                        prev = op
+                        continue
+                    m = METHOD_RE.search(line)
+                    if m:
+                        method = m.group(1)
+                        prev = None
+                        continue
+                elif " - 0x" in line:
+                    m = TRY_RE.match(line)
+                    if m and m.group(1) == m.group(2):
+                        bad.append(f"{os.path.basename(jar)}:{name}: {method} empty try range 0x{m.group(1)}")
 for b in bad:
     print(b)
 print(f"{len(bad)} empty try ranges or orphan move-results", file=sys.stderr)

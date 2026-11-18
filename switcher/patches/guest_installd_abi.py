@@ -119,14 +119,19 @@ def redirect_callers(root):
             if rel.split(os.sep, 1)[-1].startswith(os.path.join("android", "os", "IInstalld")):
                 continue  # the AIDL classes themselves (shadowed by the boot class path)
             with open(path) as f:
-                lines = f.read().split("\n")
+                raw = f.read()
+            if "IInstalld" not in raw:
+                continue
+            lines = raw.split("\n")
             hits = 0
             for i, line in enumerate(lines):
+                if "IInstalld" not in line:
+                    continue
                 m = STUB_CALL.match(line)
                 if m:
                     lines[i] = m.group(1) + OWN + AS_INTERFACE
                     hits += 1
-            text = "\n".join(lines)
+            text = "\n".join(lines) if hits else raw
             # Fail closed: nothing may reach installd through the boot class path's proxy.
             if "Landroid/os/IInstalld$Stub;->asInterface" in text or PROXY_DESC + "-><init>" in text:
                 sys.exit(f"{rel}: IInstalld proxy reference not redirected")
