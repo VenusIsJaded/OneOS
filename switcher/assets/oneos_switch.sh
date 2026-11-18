@@ -2716,7 +2716,7 @@ while true; do
             if [ -e $STAGE/rootfs/system_ext/framework/nt-telephony-common.jar ] && [ ! -f $STAGE/data/oneos_haptics_default ]; then
                 gsh '
                     for k in haptic_feedback_intensity notification_vibration_intensity ring_vibration_intensity alarm_vibration_intensity media_vibration_intensity; do
-                        /system/bin/settings put system $k 3 2>/dev/null
+                        /system/bin/settings put system \$k 3 2>/dev/null
                     done
                 '
                 touch $STAGE/data/oneos_haptics_default && echo "[UI Activator] Nothing OS vibration intensities at high once (Samsung HAL: STRONG)"
@@ -3285,7 +3285,7 @@ while true; do
                 if [ $GUEST_OPLUS = 1 ]; then
                     gsh '
                         for p in com.google.android.factoryota com.infinity.updater; do
-                            /system/bin/pm disable-user --user 0 "$p" >/dev/null 2>&1 || true
+                            /system/bin/pm disable-user --user 0 "\$p" >/dev/null 2>&1 || true
                         done
                         /system/bin/cmd connectivity set-chain3-enabled true >/dev/null 2>&1
                         /system/bin/cmd connectivity set-package-networking-enabled false com.oplus.ota >/dev/null 2>&1
@@ -3300,7 +3300,7 @@ while true; do
                 else
                     gsh '
                         for p in com.oplus.ota com.google.android.factoryota com.infinity.updater; do
-                            /system/bin/pm disable-user --user 0 "$p" >/dev/null 2>&1 || true
+                            /system/bin/pm disable-user --user 0 "\$p" >/dev/null 2>&1 || true
                         done
                     '
                 fi
