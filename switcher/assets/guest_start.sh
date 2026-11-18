@@ -128,6 +128,7 @@ mkdir -p /data/media/0/Android /data/media/0/Pictures/Screenshots \
     /data/media/0/Download /data/media/0/Documents
 chown -h 1023:1023 /data/media /data/media/0 /data/media/obb /data/media/0/Android 2>/dev/null || true
 chmod 0777 /data/media /data/media/0 /data/media/obb /data/media/0/Android 2>/dev/null || true
+media_ok=1
 for md in /data/media/0/* /data/media/0/.[!.]*; do
     [ -e "$md" ] || [ -L "$md" ] || continue
     case "${md##*/}" in Android|.oneos_media_perms|.oneos_media_label) continue ;; esac
@@ -135,10 +136,11 @@ for md in /data/media/0/* /data/media/0/.[!.]*; do
        [ "$(stat -c '%u:%g:%a' "$md" 2>/dev/null)" = "1023:1023:777" ]; then
         continue
     fi
-    chown -h -R 1023:1023 "$md" 2>/dev/null || true
-    chmod -R 777 "$md" 2>/dev/null || true
+    chown -h -R 1023:1023 "$md" 2>/dev/null || media_ok=0
+    chmod -R 777 "$md" 2>/dev/null || media_ok=0
 done
-: > /data/media/.oneos_media_perms 2>/dev/null || true
+# the sentinel (it lets the next start skip these walks) only after walks that all completed
+if [ "$media_ok" = 1 ]; then : > /data/media/.oneos_media_perms 2>/dev/null || true; else rm -f /data/media/.oneos_media_perms; fi
 for ak in data media obb; do
     [ -d "/data/media/0/Android/$ak" ] || continue
     chown -h 1023:1078 "/data/media/0/Android/$ak" 2>/dev/null || true

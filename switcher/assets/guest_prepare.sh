@@ -5253,6 +5253,13 @@ done
 # instead of resetting all ~1,440 package directories back to 1023:1023 on every
 # boot (which forced ensure_app_storage.sh to re-stat and chown -R 1,440 trees
 # every session).
+# The two sentinels below skip the recursive walks of a tree that was repaired before (the top level is what is
+# compared: a deliberate speed trade, a media library has tens of thousands of files). They are trusted only when
+# the walk that wrote them succeeded, and ONEOS_FORCE_APP_RELABEL=1 drops them (also the one guest_start.sh keeps),
+# so a repair of the whole tree can always be asked for.
+if [ "${ONEOS_FORCE_APP_RELABEL:-0}" = 1 ]; then
+    rm -f "$STAGE/data/media/.oneos_media_perms" "$STAGE/data/media/.oneos_media_label"
+fi
 $BB chown -h 1023:1023 "$STAGE/data/media" "$STAGE/data/media/0" "$STAGE/data/media/obb" "$STAGE/data/media/0/Android" 2>/dev/null || true
 for md in "$STAGE/data/media/0"/* "$STAGE/data/media/0"/.[!.]*; do
     [ -e "$md" ] || [ -L "$md" ] || continue
@@ -5261,7 +5268,8 @@ for md in "$STAGE/data/media/0"/* "$STAGE/data/media/0"/.[!.]*; do
        [ "$(stat -c '%u:%g' "$md" 2>/dev/null)" = "1023:1023" ]; then
         continue
     fi
-    $BB chown -h -R 1023:1023 "$md" 2>/dev/null || true
+    # a failed walk (a file vanished, a read-only part) must not leave the tree looking repaired
+    $BB chown -h -R 1023:1023 "$md" 2>/dev/null || rm -f "$STAGE/data/media/.oneos_media_perms"
 done
 for ak in data media obb; do
     [ -d "$STAGE/data/media/0/Android/$ak" ] && $BB chown -h 1023:1078 "$STAGE/data/media/0/Android/$ak" 2>/dev/null || true
@@ -5269,8 +5277,10 @@ done
 $BB chmod 0770 "$STAGE/data/media" "$STAGE/data/media/0" 2>/dev/null || true
 if [ ! -f "$STAGE/data/media/.oneos_media_label" ] ||
    [ "$(stat -c %C "$STAGE/data/media" 2>/dev/null)" != "u:object_r:media_rw_data_file:s0" ]; then
-    $BB chcon -h -R u:object_r:media_rw_data_file:s0 "$STAGE/data/media" 2>/dev/null || true
-    : > "$STAGE/data/media/.oneos_media_label" 2>/dev/null || true
+    rm -f "$STAGE/data/media/.oneos_media_label"
+    # the sentinel only after a walk that completed
+    $BB chcon -h -R u:object_r:media_rw_data_file:s0 "$STAGE/data/media" 2>/dev/null &&
+        : > "$STAGE/data/media/.oneos_media_label" 2>/dev/null || true
 else
     $BB chcon -h u:object_r:media_rw_data_file:s0 "$STAGE/data/media" "$STAGE/data/media/0" "$STAGE/data/media/obb" "$STAGE/data/media/0/Android" 2>/dev/null || true
 fi
