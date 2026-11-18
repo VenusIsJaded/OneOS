@@ -2174,7 +2174,7 @@ if [ "${ONEOS_GUEST_SAMSUNG_AUDIO:-1}" = 1 ] && [ -d /sys/devices/virtual/audio/
         for kv in g_effect_dolby_enable=1 g_effect_dolby_profile=0 g_effect_dolby_volume_leveler=7; do log "$(param $kv)"; done
         last=""
         while :; do
-            t=$(cat /sys/class/power_supply/battery/temp 2>/dev/null)
+            t=""; [ -r /sys/class/power_supply/battery/temp ] && IFS= read -r t < /sys/class/power_supply/battery/temp 2>/dev/null
             case "$t" in ""|*[!0-9-]*) t=300 ;; esac
             t=$((t / 10))
             [ $t -ge 10 ] && [ $t -le 70 ] || t=30

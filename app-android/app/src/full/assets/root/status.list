@@ -65,12 +65,14 @@ run stage.hashes 120 stage/hashes.txt '
 S=/data/local/tmp/oneos
 [ -e "$S" ] || [ -L "$S" ] || [ ! -d /data/local/tmp/lineage_stage ] || [ -L /data/local/tmp/lineage_stage ] || S=/data/local/tmp/lineage_stage
 [ -d "$S" ] || exit 3
+set --
 for f in "$S"/* "$S"/bin/oneos_root.sh; do
   [ -f "$f" ] || continue
   [ -L "$f" ] && continue
   [ "$f" = "$S/system.raw" ] && continue
-  sha256sum "$f"
+  set -- "$@" "$f"
 done
+[ "$#" = 0 ] || sha256sum "$@"
 true'
 
 #: The image: what was verified when it was staged (system.raw.id) and its size and identity now.
@@ -102,17 +104,13 @@ sha256sum "$f"'
 run stage.mounts 10 stage/mounts.txt '
 S=/data/local/tmp/oneos
 [ -e "$S" ] || [ -L "$S" ] || [ ! -d /data/local/tmp/lineage_stage ] || [ -L /data/local/tmp/lineage_stage ] || S=/data/local/tmp/lineage_stage
-awk -v p="$S" "\$5 == p { print \"init \" \$5 }" /proc/1/mountinfo
-awk -v p="$S/" "index(\$5, p) == 1 { print \"init \" \$5 }" /proc/1/mountinfo
-awk -v p="$S" "\$5 == p { print \"self \" \$5 }" /proc/self/mountinfo
-awk -v p="$S/" "index(\$5, p) == 1 { print \"self \" \$5 }" /proc/self/mountinfo
-awk "\$5 == \"/\" { print \"root ok\" }" /proc/1/mountinfo'
+awk -v p="$S" -v q="$S/" "\$5 == p { print \"init \" \$5 } index(\$5, q) == 1 { print \"init \" \$5 } \$5 == \"/\" { ok = 1 } END { if (ok) print \"root ok\" }" /proc/1/mountinfo
+awk -v p="$S" -v q="$S/" "\$5 == p { print \"self \" \$5 } index(\$5, q) == 1 { print \"self \" \$5 }" /proc/self/mountinfo'
 
 #: Host /data trees of bridges.sh that are mount points now (a session that never returned).
 run stage.bridges 10 stage/bridges.txt '
-for h in app app-staging user user_de dalvik-cache misc/profiles data media misc/user misc_ce/0/sdksandbox misc_de/0/sdksandbox misc_ce/0/rollback misc_de/0/rollback resource-cache; do
-  awk -v p="/data/$h" "\$5 == p { print \$5 }" /proc/1/mountinfo
-done
+B="app app-staging user user_de dalvik-cache misc/profiles data media misc/user misc_ce/0/sdksandbox misc_de/0/sdksandbox misc_ce/0/rollback misc_de/0/rollback resource-cache"
+awk -v list="$B" "BEGIN { n = split(list, a, \" \"); for (i = 1; i <= n; i++) want[\"/data/\" a[i]] = 1 } \$5 in want { print \$5 }" /proc/1/mountinfo
 true'
 
 #: Loop devices whose backing file is in the stage.
@@ -168,9 +166,8 @@ true'
 
 #: Carrier, build and boot-reason properties.
 run stage.props 10 stage/props.txt '
-for p in ro.csc.sales_code ro.boot.sales_code ro.csc.countryiso_code gsm.sim.operator.iso-country ro.build.fingerprint ro.product.model ro.product.device ro.soc.model ro.build.version.sdk sys.boot.reason; do
-  printf "%s=%s\n" "$p" "$(getprop "$p")"
-done
+K="ro.csc.sales_code ro.boot.sales_code ro.csc.countryiso_code gsm.sim.operator.iso-country ro.build.fingerprint ro.product.model ro.product.device ro.soc.model ro.build.version.sdk sys.boot.reason"
+getprop | awk -v keys="$K" "BEGIN { n = split(keys, a, \" \"); for (i = 1; i <= n; i++) { ord[i] = a[i]; want[a[i]] = 1 } } /^\[/ { p = index(\$0, \"]: [\"); if (3 <= p && substr(\$0, length(\$0), 1) == \"]\") { k = substr(\$0, 2, p - 2); if (k in want) val[k] = substr(\$0, p + 4, length(\$0) - p - 4) } } END { for (i = 1; i <= n; i++) print ord[i] \"=\" val[ord[i]] }"
 z=/data/adb/modules/zygisksu
 if [ -f "$z/module.prop" ] && [ ! -e "$z/disable" ] && [ ! -e "$z/remove" ]; then
   printf "zygisksu.versionCode=%s\n" "$(sed -n "s/^versionCode=//p" "$z/module.prop" | head -n 1)"

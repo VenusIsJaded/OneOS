@@ -794,9 +794,10 @@ mounted_under() {
 # /data/data, /data/user and /data/user_de (0.3.0 on the Fold: "still bridged"
 # right after a clean reboot).
 bridged() {
-    for h in $BRIDGE_HOSTS; do
-        awk -v p="$DATA/$h" '$5 == p { print $5 }' "$PROC/1/mountinfo" 2>/dev/null
-    done | sort -u
+    awk -v d="$DATA/" -v list="$BRIDGE_HOSTS" '
+        BEGIN { n = split(list, a, " "); for (i = 1; i <= n; i++) if (a[i] != "") want[d a[i]] = 1 }
+        $5 in want { print $5 }
+    ' "$PROC/1/mountinfo" 2>/dev/null | sort -u
 }
 raw_attached() {
     for b in "$SYSFS"/block/loop*/loop/backing_file; do
@@ -986,13 +987,31 @@ check_files() { # <names>
     expected_names=$1
     s="$STAGE/files.sha256"
     [ -f "$s" ] && mine "$s" || refuse "files.sha256 is missing or not root's"
+    bad_line=$(awk -v list="$expected_names" '
+        BEGIN {
+            wn = split(list, a, " ")
+            for (i = 1; i <= wn; i++) if (a[i] != "") { want[a[i]] = 1; wcnt++ }
+        }
+        /\S/ {
+            rows++
+            if (NF != 2 || $1 !~ /^[0-9a-f]{64}$/ || !($2 in want) || ($2 in seen)) { bad = $2; exit }
+            seen[$2] = 1
+        }
+        END {
+            if (bad != "") { print "missing:" bad; exit }
+            for (k in want) if (!(k in seen)) { print "missing:" k; exit }
+            if (rows != wcnt) print "extra"
+        }
+    ' "$s")
+    case "$bad_line" in
+        missing:*) refuse "files.sha256 does not list ${bad_line#missing:} once" ;;
+        extra) refuse "files.sha256 lists other files" ;;
+    esac
     want=0; batch=""; bnames=""
     for n in $expected_names; do
         want=$((want + 1))
-        sum=$(awk -v n="$n" 'NF == 2 && $2 == n { print $1 }' "$s")
-        is_hex64 "$sum" || refuse "files.sha256 does not list $n once"
         [ -f "$STAGE/$n" ] && mine "$STAGE/$n" || refuse "$n is missing, a link, or not root's"
-        ( [ "$(sha "$STAGE/$n")" = "$sum" ] ) &
+        ( sum=$(awk -v n="$n" 'NF == 2 && $2 == n { print $1; exit }' "$s"); [ "$(sha "$STAGE/$n")" = "$sum" ] ) &
         batch="$batch $!"
         bnames="$bnames $n"
         if [ $((want % 8)) -eq 0 ]; then
@@ -1017,7 +1036,6 @@ check_files() { # <names>
             shift
         done
     fi
-    [ "$(grep -c . "$s")" -eq "$want" ] || refuse "files.sha256 lists other files"
     for f in "$STAGE"/* "$STAGE"/.[!.]*; do
         [ -e "$f" ] || [ -L "$f" ] || continue
         [ -d "$f" ] && [ ! -L "$f" ] && continue
@@ -1220,21 +1238,44 @@ do_keep_files() {
     rm -f "$part"
     head -c "$1" > "$part" || { rm -f "$part"; die "could not read the list"; }
     [ "$(stat -c %s "$part")" = "$1" ] || { rm -f "$part"; refuse "the list arrived incomplete"; }
-    kept=0
+    kept=0; kn=0; kbatch=""; ksums=""; knames=""
+    flush_keep() {
+        [ -n "$kbatch" ] || return 0
+        set -- $knames
+        for kb in $kbatch; do
+            knm=$1; shift
+            ks=${ksums%% *}; ksums=${ksums#* }
+            if wait "$kb"; then
+                printf '%s  %s\n' "$ks" "$knm" >> "$STAGE/incoming/keep-ok.part"
+                say "@@RESULT kept $knm"
+                kept=$((kept + 1))
+            fi
+        done
+        kbatch=""; ksums=""; knames=""
+    }
+    rm -f "$STAGE/incoming/keep-ok.part"
     while read -r sum name rest; do
         [ -n "$sum$name" ] || continue
-        { is_hex64 "$sum" && [ -z "$rest" ]; } || { rm -f "$part"; refuse "the list is not sha256sum lines"; }
-        case "$name" in ''|.*|*[!A-Za-z0-9._+-]*) rm -f "$part"; refuse "the list names '$name'" ;; esac
-        in_list "$name" "$P_FILES" || { rm -f "$part"; refuse "$name is not a file of $P_SET"; }
+        { is_hex64 "$sum" && [ -z "$rest" ]; } || { flush_keep; rm -f "$part" "$STAGE/incoming/keep-ok.part"; refuse "the list is not sha256sum lines"; }
+        case "$name" in ''|.*|*[!A-Za-z0-9._+-]*) flush_keep; rm -f "$part" "$STAGE/incoming/keep-ok.part"; refuse "the list names '$name'" ;; esac
+        in_list "$name" "$P_FILES" || { flush_keep; rm -f "$part" "$STAGE/incoming/keep-ok.part"; refuse "$name is not a file of $P_SET"; }
         kf="$STAGE/$name"
         [ -f "$kf" ] && [ ! -L "$kf" ] && mine "$kf" || continue
         [ "0$(stat -c %a "$kf")" = "$(file_mode "$name")" ] || continue
-        [ "$(sha "$kf")" = "$sum" ] || continue
-        record_received "$sum" "$name"
-        say "@@RESULT kept $name"
-        kept=$((kept + 1))
+        ( [ "$(sha "$kf")" = "$sum" ] ) &
+        kbatch="$kbatch $!"
+        ksums="${ksums:+$ksums }$sum"
+        knames="$knames $name"
+        kn=$((kn + 1))
+        [ $((kn % 8)) -eq 0 ] && flush_keep
     done < "$part"
-    rm -f "$part"
+    flush_keep
+    if [ -s "$STAGE/incoming/keep-ok.part" ]; then
+        { [ -f "$RECEIVED" ] && awk 'NR == FNR { drop[$2] = 1; next } !($2 in drop)' "$STAGE/incoming/keep-ok.part" "$RECEIVED"
+          cat "$STAGE/incoming/keep-ok.part"; } > "$RECEIVED.tmp" &&
+            own "$RECEIVED.tmp" 0644 && mv -f "$RECEIVED.tmp" "$RECEIVED" || { rm -f "$part" "$STAGE/incoming/keep-ok.part"; die "could not record kept files"; }
+    fi
+    rm -f "$part" "$STAGE/incoming/keep-ok.part"
     say "@@INFO $kept files already in the stage"
     say "@@OK keep-files"
 }
@@ -1273,19 +1314,29 @@ do_finish() {
     [ "$1" = "$P_PROFILE" ] && [ "$2" = "$P_IMAGE" ] && [ "$3" = "$P_SET" ] && [ "$4" = "$P_CODE" ] || refuse "finish does not match the plan"
     idle_or_refuse
     step "files"
-    list=""
-    for n in $P_FILES; do
-        sum=$(received_sum "$n")
-        is_hex64 "$sum" || refuse "$n was not received"
-        [ -f "$STAGE/$n" ] && mine "$STAGE/$n" && [ "$(sha "$STAGE/$n")" = "$sum" ] || refuse "$n changed after it was received"
-        list="$list$sum  $n
-"
-    done
+    [ -f "$RECEIVED" ] || refuse "$(printf '%s\n' $P_FILES | head -n 1) was not received"
+    miss=$(awk -v list="$P_FILES" '
+        { if (NF == 2) rec[$2] = $1 }
+        END {
+            n = split(list, a, " ")
+            for (i = 1; i <= n; i++) {
+                if (a[i] == "") continue
+                if (!(a[i] in rec) || rec[a[i]] !~ /^[0-9a-f]{64}$/) { print a[i]; exit }
+            }
+        }
+    ' "$RECEIVED")
+    [ -z "$miss" ] || refuse "$miss was not received"
     [ "$(received_sum system.raw)" = "$P_RAW_SHA" ] || refuse "the image was not received or checked"
     check_raw "$P_RAW_BYTES" "$P_RAW_SHA"
     check_env "$STAGE/session.env" "$P_FORM" "$P_PROFILE" "$P_IMAGE"
     check_table "$STAGE/host_installd.table" "$P_IMAGE"
-    printf '%s' "$list" | LC_ALL=C sort -k2 > "$STAGE/files.sha256.tmp" && own "$STAGE/files.sha256.tmp" 0644 &&
+    awk -v list="$P_FILES" '
+        { if (NF == 2) rec[$2] = $1 }
+        END {
+            n = split(list, a, " ")
+            for (i = 1; i <= n; i++) if (a[i] != "") print rec[a[i]] "  " a[i]
+        }
+    ' "$RECEIVED" | LC_ALL=C sort -k2 > "$STAGE/files.sha256.tmp" && own "$STAGE/files.sha256.tmp" 0644 &&
         mv -f "$STAGE/files.sha256.tmp" "$STAGE/files.sha256" || die "could not write files.sha256"
     # Every other flat file that is not the sessions' own state goes to the
     # attic, so the scripts can never bind a leftover (framework_patched.jar,
@@ -1302,7 +1353,7 @@ do_finish() {
         esac
         to_attic "$n"
     done
-    check_files "$P_FILES"
+    check_files "$P_FILES" || refuse "staged file changed after it was received"
     marker_text "$P_CODE" "$P_PROFILE" "$P_IMAGE" "$P_SET" "$(date +%s)" > "$STAGE/.oneos_stage.tmp" && own "$STAGE/.oneos_stage.tmp" 0644 &&
         mv -f "$STAGE/.oneos_stage.tmp" "$STAGE/.oneos_stage" || die "could not write the marker"
     rm -f "$STAGE/.oneos_update" "$PLAN" "$RECEIVED"

@@ -128,7 +128,7 @@ done
 for f in "$L"/head/boot.log*; do
   [ -f "$f" ] || continue
   i=$(stat -c %i "$f")
-  [ -n "$i" ] && printf "%s\n" "$T" | grep -q " $i " && continue
+  [ -n "$i" ] && [ "${T#* $i }" != "$T" ] && continue
   printf "%s\n" "$f"
   [ -n "$i" ] && T="$T$i "
 done
@@ -137,7 +137,7 @@ c=""
 for f in "$L"/boot.log.[0-9][0-9]; do
   [ -f "$f" ] && [ "$f" != "$L/boot.log.01" ] && [ "$c" != xx ] || continue
   i=$(stat -c %i "$f")
-  [ -n "$i" ] && printf "%s\n" "$T" | grep -q " $i " && continue
+  [ -n "$i" ] && [ "${T#* $i }" != "$T" ] && continue
   grep -q -F -e "FATAL EXCEPTION" -e "am_crash" -e "am_anr" -e "Fatal signal" "$f" || continue
   printf "%s\n" "$f"
   c="${c}x"

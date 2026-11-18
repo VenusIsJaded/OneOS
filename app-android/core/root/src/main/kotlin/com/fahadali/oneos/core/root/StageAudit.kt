@@ -413,7 +413,7 @@ object StageAudit {
         "umask", "[", "echo", "printf", "id", "stat", "awk", "sed", "grep", "sort", "head", "tail", "cut", "tr", "wc",
         "cat", "ls", "mkdir", "mv", "cp", "rm", "chown", "chmod", "sha256sum", "date", "getprop", "pm", "getevent", "du",
         "env", "unset", "export", "set", "read", "exit", "return", "shift", "true", "false", "break", "continue", "exec",
-        "trap", "am", "od", "find", "sleep",
+        "trap", "am", "od", "find", "sleep", "wait",
         // 0.5.17: tool-app off stops the one process whose program is that app's libtimer.so (tool_pids).
         "kill",
     )
