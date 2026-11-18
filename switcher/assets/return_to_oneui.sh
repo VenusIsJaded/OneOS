@@ -278,6 +278,9 @@ kill -9 $(pidof surfaceflinger) 2>/dev/null || true
 # the pkill above may have done it already) before the CPU policies get their
 # full clock back, for One UI's SSRM to set its own.
 pkill -9 -f "oneos_heat_cap" 2>/dev/null || true
+# Killed above before it could clean up: the level file would outlive the session and keep the guest's compile
+# worker waiting in the next one.
+rm -f $S/data/oneos_heat_level $S/data/.oneos_heat_level.tmp
 if [ -f $S/heat_cap.active ]; then
     hc=""
     # Samsung's CPU ceiling vote, if the heat cap released it (power saving was
@@ -293,7 +296,11 @@ if [ -f $S/heat_cap.active ]; then
     for p in /sys/devices/system/cpu/cpufreq/policy*; do
         hw=$(cat "$p/cpuinfo_max_freq" 2>/dev/null)
         case "$hw" in ''|*[!0-9]*) continue ;; esac
-        echo "$hw" > "$p/scaling_max_freq" 2>/dev/null
+        # Power saving was on: the limit the host had before OneOS (heat_cap.pre), not the hardware maximum.
+        tv=''; [ -f "$S/heat_cap.pre/${p##*/}" ] && IFS= read -r tv < "$S/heat_cap.pre/${p##*/}" 2>/dev/null
+        case "$tv" in ''|*[!0-9]*) tv=$hw ;; esac
+        [ "$tv" -le "$hw" ] || tv=$hw
+        echo "$tv" > "$p/scaling_max_freq" 2>/dev/null
         hc="$hc ${p##*/}=$(cat "$p/scaling_max_freq" 2>/dev/null)/$hw"
     done
     GCLK=/sys/kernel/gpu/gpu_max_clock
@@ -309,6 +316,7 @@ if [ -f $S/heat_cap.active ]; then
         rm -f $S/bg_uclamp.saved
         hc="$hc bg_uclamp=restored"
     fi
+    rm -rf $S/heat_cap.pre
     rm -f $S/heat_cap.active
     echo "Heat cap: stopped, CPU/GPU policies at full clock:$hc" 
 fi

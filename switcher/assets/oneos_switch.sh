@@ -1703,7 +1703,9 @@ if [ "${ONEOS_HEAT_CAP:-1}" = 1 ] && [ "$HOST_LOW_POWER" = 0 ]; then
     pre_sk=$(printf '%s\n' "$PRE_STOP_BATT" | awk '{
         for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+(\.[0-9]+)?$/ && ($(i + 1) == "C" || $(i + 1) == "C,")) { print $i; exit }
     }')
-    if [ -z "$pre_sk" ] || awk -v s="$pre_sk" 'BEGIN { exit !(s + 0 < 42) }'; then
+    # Only with a reading that says it is cool: without one (no battery node, an unreadable value) nothing is lifted,
+    # the heat cap has nothing to hold the clocks down with afterwards either.
+    if [ -n "$pre_sk" ] && awk -v s="$pre_sk" 'BEGIN { exit !(s + 0 < 42) }'; then
         CFL_EARLY=/sys/devices/system/cpu/cpufreq_limit/cpufreq_max_limit
         early_lifted=""
         if [ -w "$CFL_EARLY" ]; then
@@ -4307,6 +4309,10 @@ echo "Session sampler: every 60 s to $STAGE/diag_series.txt (battery sysfs: ${BA
 # kernel's thermal limits and the cap above stay. It runs without the cap too
 # (only the status then); ONEOS_GUEST_THERMAL_MAP=0 leaves the HAL's.
 rm -f "$STAGE/heat_cap.active"
+# A level file from an earlier session (its worker was killed by the return, or this session runs without one) would
+# make the guest's compile worker wait for a heat that is long gone.
+rm -f "$STAGE/data/oneos_heat_level" "$STAGE/data/.oneos_heat_level.tmp"
+rm -rf "$STAGE/heat_cap.pre"
 HEAT_CAP=0; [ "${ONEOS_HEAT_CAP:-1}" = 1 ] && HEAT_CAP=1
 GUEST_THERMAL_MAP=0
 [ "${ONEOS_GUEST_THERMAL_MAP:-1}" = 1 ] && GUEST_THERMAL_MAP=1
@@ -4316,6 +4322,18 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
     # One UI SSRM vote for switch & boot; otherwise ensure no stale marker stays.
     [ $HEAT_CAP = 1 ] || rm -f "$STAGE/cpufreq_max_limit.released"
     rm -f "$STAGE/gpu_max_clock.capped" "$STAGE/bg_uclamp.saved" "$STAGE/data/oneos_heat_level"
+    # Power saving on (or unknown): the clocks as they are now are the host's own restriction, not OneOS's to raise.
+    # Recorded per cpufreq policy and for the GPU: the cap never goes above them, and the full clock the worker and
+    # the return give back is that value (the hardware maximum only when power saving is off).
+    if [ $HEAT_CAP = 1 ] && [ "$HOST_LOW_POWER" != 0 ]; then
+        mkdir -p "$STAGE/heat_cap.pre"
+        for p in /sys/devices/system/cpu/cpufreq/policy*; do
+            pv=''; IFS= read -r pv < "$p/scaling_max_freq" 2>/dev/null
+            case "$pv" in ''|*[!0-9]*) ;; *) echo "$pv" > "$STAGE/heat_cap.pre/${p##*/}" ;; esac
+        done
+        pv=''; [ -r /sys/kernel/gpu/gpu_max_clock ] && IFS= read -r pv < /sys/kernel/gpu/gpu_max_clock 2>/dev/null
+        case "$pv" in ''|*[!0-9]*) ;; *) echo "$pv" > "$STAGE/heat_cap.pre/gpu" ;; esac
+    fi
     # Clamp background / system-background cgroups so background syncs, dexopt,
     # and keeper workers stay in efficient DVFS OPP states instead of triggering
     # Prime-core voltage spikes; foreground and top-app stay completely uncapped.
@@ -4375,6 +4393,17 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
         echo \"# \$(date) OneOS heat cap off (Cool down when hot): the guest thermal status only\" > \$F
     fi
     [ $GUEST_THERMAL_MAP = 1 ] && echo \"# guest thermal status from the battery: NONE, LIGHT 46, MODERATE 48, SEVERE 50, the HAL status from 53 C (1 C hysteresis)\" >> \$F
+    PRE=$STAGE/heat_cap.pre
+    cpu_ceil() {
+        _v=''
+        [ \"$HOST_LOW_POWER\" != 0 ] && IFS= read -r _v < \$PRE/\$1 2>/dev/null
+        case \"\$_v\" in ''|*[!0-9]*) echo \$2 ;; *) if [ \$_v -lt \$2 ]; then echo \$_v; else echo \$2; fi ;; esac
+    }
+    gceil=\$GMAX
+    if [ \"$HOST_LOW_POWER\" != 0 ] && [ \"\$GMAX\" -gt 0 ]; then
+        _v=''; IFS= read -r _v < \$PRE/gpu 2>/dev/null
+        case \"\$_v\" in ''|*[!0-9]*) ;; *) [ \$_v -gt 0 ] && [ \$_v -lt \$GMAX ] && gceil=\$_v ;; esac
+    fi
     release_host_vote() {
         if [ \"$HOST_LOW_POWER\" = 0 ] && [ -w \$CFL ] && [ \"\$(cat \$CFL 2>/dev/null)\" != -1 ]; then
             v=\$(cat \$CFL 2>/dev/null)
@@ -4387,21 +4416,21 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
         for p in /sys/devices/system/cpu/cpufreq/policy*; do
             hw=\$(cat \$p/cpuinfo_max_freq 2>/dev/null)
             case \"\$hw\" in ''|*[!0-9]*) continue ;; esac
-            echo \$hw > \$p/scaling_max_freq 2>/dev/null
+            echo \$(cpu_ceil \${p##*/} \$hw) > \$p/scaling_max_freq 2>/dev/null
             c=\"\$c \${p##*/}=\$(cat \$p/scaling_max_freq 2>/dev/null)/\$hw\"
         done
-        if [ \"$HOST_LOW_POWER\" = 0 ] && [ \"\$GMAX\" -gt 0 ] && [ -w \$GCLK ]; then
-            echo \$GMAX > \$GCLK 2>/dev/null
+        if [ \"\$GMAX\" -gt 0 ] && [ -w \$GCLK ]; then
+            echo \$gceil > \$GCLK 2>/dev/null
             rm -f $STAGE/gpu_max_clock.capped
-            c=\"\$c gpu=\$(cat \$GCLK 2>/dev/null)/\$GMAX\"
+            c=\"\$c gpu=\$(cat \$GCLK 2>/dev/null)/\$gceil\"
         fi
         echo \"\$(date +%T) \$1: full clock:\$c\" >> \$F
     }
-    lvl=0; first=1; tl=-1; lp=''; b1=''; b2=''
+    lvl=0; first=1; tl=-1; lp=''; b1=''; b2=''; tw=0; tfail=''
     while true; do
         if [ -f $STAGE/data/oneos_rec_stop ] || [ ! -s $STAGE/guest_mntns ]; then
             [ \$lvl = 0 ] || full stopped
-            rm -f $STAGE/data/oneos_heat_level
+            rm -f $STAGE/data/oneos_heat_level $STAGE/data/.oneos_heat_level.tmp
             echo \"# \$(date +%T) stopped (the return started, or no guest namespace record)\" >> \$F
             exit 0
         fi
@@ -4455,9 +4484,20 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
             done
             if [ \"\$nt\" != \"\$tl\" ]; then
                 if [ \"\$nt\" = 4 ]; then a=reset; w=\"the HAL status again\"; else a=\"override-status \$nt\"; w=\$nt; fi
-                r=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/cmd thermalservice \$a 2>&1 | head -n 2 | tr '\\n' ' ')
-                echo \"\$(date +%T) battery \$bt C: guest thermal status \$w (cmd thermalservice \$a: \${r:-ok})\" >> \$F
-                tl=\$nt
+                # Recorded as done only when the command succeeded (a timeout, a refused call or a service that is not
+                # there yet leaves it undone): it is tried again after a minute, not never.
+                if [ \$tw -gt 0 ]; then tw=\$((tw - 1))
+                else
+                    r=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/cmd thermalservice \$a 2>&1; echo \"@\$?\")
+                    rc=\${r##*@}; r=\$(echo \"\${r%@*}\" | head -n 2 | tr '\\n' ' ')
+                    if [ \"\$rc\" = 0 ]; then
+                        echo \"\$(date +%T) battery \$bt C: guest thermal status \$w (cmd thermalservice \$a: \${r:-ok})\" >> \$F
+                        tl=\$nt; tfail=''
+                    else
+                        [ \"\$tfail\" = \"\$nt\" ] || echo \"\$(date +%T) battery \$bt C: guest thermal status \$w FAILED (cmd thermalservice \$a, exit \$rc: \${r:-no output}); retrying every minute\" >> \$F
+                        tfail=\$nt; tw=6
+                    fi
+                fi
             fi
         fi
         if [ -n \"\$bt_d\" ] && [ $HEAT_CAP = 1 ]; then
@@ -4477,9 +4517,11 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
                 capped=''
                 [ \"$HOST_LOW_POWER\" = 0 ] && [ -r \$CFL ] && [ \"\$(cat \$CFL 2>/dev/null)\" != -1 ] && capped=1
                 for p in /sys/devices/system/cpu/cpufreq/policy*; do
-                    [ \"\$(cat \$p/scaling_max_freq 2>/dev/null)\" = \"\$(cat \$p/cpuinfo_max_freq 2>/dev/null)\" ] || capped=1
+                    hw=\$(cat \$p/cpuinfo_max_freq 2>/dev/null)
+                    case \"\$hw\" in ''|*[!0-9]*) continue ;; esac
+                    [ \"\$(cat \$p/scaling_max_freq 2>/dev/null)\" = \"\$(cpu_ceil \${p##*/} \$hw)\" ] || capped=1
                 done
-                [ \"\$GMAX\" -gt 0 ] && [ -r \$GCLK ] && [ \"\$(cat \$GCLK 2>/dev/null)\" != \"\$GMAX\" ] && capped=1
+                [ \"\$GMAX\" -gt 0 ] && [ -r \$GCLK ] && [ \"\$(cat \$GCLK 2>/dev/null)\" != \"\$gceil\" ] && capped=1
                 if [ -n \"\$capped\" ]; then full \"\$tag, a cap from before the switch lifted\"
                 else echo \"\$(date +%T) \$tag: no cap\" >> \$F; fi
             elif [ \"\$new\" = 0 ] && [ \$lvl != 0 ]; then
@@ -4490,20 +4532,23 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
                 for p in /sys/devices/system/cpu/cpufreq/policy*; do
                     hw=\$(cat \$p/cpuinfo_max_freq 2>/dev/null)
                     case \"\$hw\" in ''|*[!0-9]*) continue ;; esac
-                    echo \$((hw / 100 * pct)) > \$p/scaling_max_freq 2>/dev/null
+                    tg=\$((hw / 100 * pct)); ce=\$(cpu_ceil \${p##*/} \$hw); [ \$tg -le \$ce ] || tg=\$ce
+                    echo \$tg > \$p/scaling_max_freq 2>/dev/null
                     c=\"\$c \${p##*/}=\$(cat \$p/scaling_max_freq 2>/dev/null)/\$hw\"
                 done
                 if [ \"\$GMAX\" -gt 0 ] && [ -w \$GCLK ]; then
                     gt=\$(gpu_step \$pct)
                     if [ -n \"\$gt\" ] && [ \"\$gt\" -gt 0 ]; then
-                        [ -f $STAGE/gpu_max_clock.capped ] || echo \"\$GMAX\" > $STAGE/gpu_max_clock.capped
+                        [ \"\$gt\" -le \"\$gceil\" ] || gt=\$gceil
+                        [ -f $STAGE/gpu_max_clock.capped ] || echo \"\$gceil\" > $STAGE/gpu_max_clock.capped
                         echo \$gt > \$GCLK 2>/dev/null
                         c=\"\$c gpu=\$(cat \$GCLK 2>/dev/null)/\$GMAX\"
                     fi
                 fi
                 echo \"\$(date +%T) \$tag, level \$lvl to \$new: \$pct%:\$c\" >> \$F
             fi
-            [ \"\$new\" = \"\$lvl\" ] && [ \$first = 0 ] || echo \$new > $STAGE/data/oneos_heat_level 2>/dev/null
+            # Published by rename: a reader never sees the file empty (the guest's compile worker read that as cool).
+            [ \"\$new\" = \"\$lvl\" ] && [ \$first = 0 ] || { echo \$new > $STAGE/data/.oneos_heat_level.tmp 2>/dev/null && mv -f $STAGE/data/.oneos_heat_level.tmp $STAGE/data/oneos_heat_level 2>/dev/null; }
             lvl=\$new; first=0
         fi
         sleep 10
