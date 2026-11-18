@@ -15,6 +15,7 @@ class OsArtworkView @JvmOverloads constructor(context: Context, attrs: Attribute
     private var artwork = 0
     private var rendered = 0
     private var family = SystemFamily.COLOROS
+    private val cropMatrix = Matrix()
     internal val artworkFamily: SystemFamily get() = family
     init {
         scaleType = ScaleType.CENTER_CROP
@@ -75,6 +76,8 @@ class OsArtworkView @JvmOverloads constructor(context: Context, attrs: Attribute
         scaleType = ScaleType.MATRIX
         val bottom = if (tag == "heading_progress") minOf(112 * resources.displayMetrics.density, height * .30f) else 0f
         val crop = ArtworkFraming.transform(family, bitmap.width, bitmap.height, width, height, bottom)
-        imageMatrix = Matrix().apply { setScale(crop.scale, crop.scale); postTranslate(crop.x, crop.y) }
+        cropMatrix.setScale(crop.scale, crop.scale)
+        cropMatrix.postTranslate(crop.x, crop.y)
+        imageMatrix = cropMatrix
     }
 }

@@ -43,7 +43,7 @@ class RootPermissionsModel(application: Application) : AndroidViewModel(applicat
         if(state.loading || state.pending.isNotEmpty())return
         publish(state.copy(loading=true,error=null))
         io.execute {
-            val result=runCatching { identity();metadata.clear();load() }
+            val result=runCatching { identity();load() }
             main.post {
                 result.onSuccess { publish(state.copy(groups=it,loading=false,loaded=true,error=null)) }
                     .onFailure { publish(state.copy(loading=false,loaded=true,error=it.message ?: "Could not read root permissions")) }

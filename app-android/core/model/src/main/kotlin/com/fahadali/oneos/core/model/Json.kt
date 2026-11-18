@@ -18,62 +18,103 @@ object Json {
             is Double -> out.append(if (value.isFinite()) value.toString() else "null")
             is Float -> out.append(if (value.isFinite()) value.toString() else "null")
             is Number -> out.append(value.toString())
-            is Map<*, *> -> container(out, depth, '{', '}', value.entries.toList()) { e, d ->
-                string(out, e.key.toString())
-                out.append(": ")
-                write(out, e.value, d)
+            is Map<*, *> -> {
+                if (value.isEmpty()) {
+                    out.append("{}")
+                } else {
+                    out.append("{\n")
+                    val last = value.size - 1
+                    var i = 0
+                    for (e in value.entries) {
+                        indent(out, depth + 1)
+                        string(out, e.key.toString())
+                        out.append(": ")
+                        write(out, e.value, depth + 1)
+                        if (i < last) out.append(',')
+                        out.append('\n')
+                        i++
+                    }
+                    indent(out, depth)
+                    out.append('}')
+                }
             }
-            is Iterable<*> -> container(out, depth, '[', ']', value.toList()) { v, d -> write(out, v, d) }
-            is Array<*> -> write(out, value.toList(), depth)
+            is List<*> -> {
+                if (value.isEmpty()) {
+                    out.append("[]")
+                } else {
+                    out.append("[\n")
+                    val last = value.size - 1
+                    for (i in 0..last) {
+                        indent(out, depth + 1)
+                        write(out, value[i], depth + 1)
+                        if (i < last) out.append(',')
+                        out.append('\n')
+                    }
+                    indent(out, depth)
+                    out.append(']')
+                }
+            }
+            is Iterable<*> -> {
+                val it = value.iterator()
+                if (!it.hasNext()) {
+                    out.append("[]")
+                } else {
+                    out.append("[\n")
+                    while (true) {
+                        indent(out, depth + 1)
+                        write(out, it.next(), depth + 1)
+                        val more = it.hasNext()
+                        if (more) out.append(',')
+                        out.append('\n')
+                        if (!more) break
+                    }
+                    indent(out, depth)
+                    out.append(']')
+                }
+            }
+            is Array<*> -> write(out, value.asList(), depth)
             else -> string(out, value.toString())
         }
     }
 
-    private fun <T> container(
-        out: StringBuilder,
-        depth: Int,
-        open: Char,
-        close: Char,
-        items: List<T>,
-        item: (T, Int) -> Unit,
-    ) {
-        if (items.isEmpty()) {
-            out.append(open).append(close)
-            return
-        }
-        out.append(open).append('\n')
-        items.forEachIndexed { i, v ->
-            indent(out, depth + 1)
-            item(v, depth + 1)
-            if (i < items.size - 1) out.append(',')
-            out.append('\n')
-        }
-        indent(out, depth)
-        out.append(close)
-    }
-
     private fun indent(out: StringBuilder, depth: Int) {
-        repeat(depth) { out.append("  ") }
+        if (depth <= INDENTS.lastIndex) out.append(INDENTS[depth]) else repeat(depth) { out.append("  ") }
     }
 
     fun string(out: StringBuilder, s: String) {
         out.append('"')
-        for (c in s) {
-            when (c) {
-                '"' -> out.append("\\\"")
-                '\\' -> out.append("\\\\")
-                '\n' -> out.append("\\n")
-                '\r' -> out.append("\\r")
-                '\t' -> out.append("\\t")
-                '\b' -> out.append("\\b")
-                '\u000c' -> out.append("\\f")
-                else -> if (c < ' ' || c == ' ' || c == ' ') {
-                    out.append("\\u").append(String.format(java.util.Locale.ROOT, "%04x", c.code))
+        var start = 0
+        for (i in s.indices) {
+            val c = s[i]
+            val esc = when (c) {
+                '"' -> "\\\""
+                '\\' -> "\\\\"
+                '\n' -> "\\n"
+                '\r' -> "\\r"
+                '\t' -> "\\t"
+                '\b' -> "\\b"
+                '\u000c' -> "\\f"
+                else -> if (c < ' ' || c == '\u2028' || c == '\u2029') "" else null
+            }
+            if (esc != null) {
+                if (i > start) out.append(s, start, i)
+                if (esc.isNotEmpty()) {
+                    out.append(esc)
                 } else {
-                    out.append(c)
+                    val code = c.code
+                    out.append("\\u")
+                        .append(HEX[(code ushr 12) and 0xf])
+                        .append(HEX[(code ushr 8) and 0xf])
+                        .append(HEX[(code ushr 4) and 0xf])
+                        .append(HEX[code and 0xf])
                 }
+                start = i + 1
             }
         }
+        if (start < s.length) out.append(s, start, s.length)
         out.append('"')
     }
+
+    private const val HEX = "0123456789abcdef"
+    private val INDENTS = Array(16) { "  ".repeat(it) }
 }

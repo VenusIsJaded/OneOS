@@ -142,6 +142,8 @@ class ProbeStreamParser(
     private var open: Open? = null
     private val results = mutableListOf<ProbeResult>()
     private val decoder = Base64.getDecoder()
+    private var inBuf = ByteArray(1 shl 14)
+    private var outBuf = ByteArray(1 shl 14)
 
     val finishedResults: List<ProbeResult> get() = results.toList()
 
@@ -211,20 +213,47 @@ class ProbeStreamParser(
     }
 
     private fun data(o: Open, chunk: String) {
-        o.carry.append(chunk)
-        val usable = o.carry.length - o.carry.length % 4
-        if (usable == 0) return
-        val text = o.carry.substring(0, usable)
-        o.carry.delete(0, usable)
-        val bytes = try {
-            decoder.decode(text)
+        if (chunk.isEmpty()) return
+        val carryLen = o.carry.length
+        val total = carryLen + chunk.length
+        val usable = total - (total and 3)
+        if (usable == 0) {
+            o.carry.append(chunk)
+            return
+        }
+        if (inBuf.size < usable) inBuf = ByteArray(maxOf(usable, inBuf.size shl 1))
+        var k = 0
+        var badAscii = false
+        for (i in 0 until carryLen) {
+            val c = o.carry[i].code
+            if (c >= 0x80) badAscii = true
+            inBuf[k++] = c.toByte()
+        }
+        val fromChunk = usable - carryLen
+        for (i in 0 until fromChunk) {
+            val c = chunk[i].code
+            if (c >= 0x80) badAscii = true
+            inBuf[k++] = c.toByte()
+        }
+        o.carry.setLength(0)
+        for (i in fromChunk until chunk.length) o.carry.append(chunk[i])
+        if (badAscii) {
+            running?.notes?.add("bad base64 in ${o.path}")
+            return
+        }
+        val maxOut = (usable ushr 2) * 3
+        if (outBuf.size < maxOut) outBuf = ByteArray(maxOf(maxOut, outBuf.size shl 1))
+        val decodedLen = try {
+            val dst = java.nio.ByteBuffer.wrap(outBuf)
+            decoder.decode(java.nio.ByteBuffer.wrap(inBuf, 0, usable), dst)
+            dst.position()
         } catch (e: IllegalArgumentException) {
             running?.notes?.add("bad base64 in ${o.path}")
             return
         }
-        o.md.update(bytes)
-        o.bytes += bytes.size
-        o.out?.write(bytes)
+        o.md.update(outBuf, 0, decodedLen)
+        o.bytes += decodedLen
+        o.out?.write(outBuf, 0, decodedLen)
     }
 
     private fun closeFile(rc: Int?) {

@@ -48,15 +48,52 @@ object CompileState {
         return Status(phase, f[1].toIntOrNull() ?: return null, f[2].toIntOrNull() ?: return null, f[3].takeIf { it != "-" }, f[4] == "now", f[5].toLongOrNull() ?: return null)
     }
 
-    fun parseResults(text: String?): List<Result> = text.orEmpty().lineSequence().mapNotNull { line ->
-        val f = line.trim().split(' ').filter { it.isNotEmpty() }
-        if (f.size < 2 || (f[1] != "ok" && f[1] != "fail")) null else Result(f[0], f[1] == "ok", f.getOrNull(2)?.toIntOrNull() ?: 0)
-    }.toList()
+    fun parseResults(text: String?): List<Result> {
+        if (text.isNullOrEmpty()) return emptyList()
+        val out = ArrayList<Result>()
+        var start = 0
+        val len = text.length
+        while (start < len) {
+            var end = text.indexOf('\n', start)
+            if (end < 0) end = len
+            var p = start
+            while (p < end && text[p].isWhitespace()) p++
+            var e = end
+            while (e > p && text[e - 1].isWhitespace()) e--
+            if (p < e) {
+                val s1 = text.indexOf(' ', p)
+                if (s1 in (p + 1) until e) {
+                    var v0 = s1 + 1
+                    while (v0 < e && text[v0] == ' ') v0++
+                    var s2 = text.indexOf(' ', v0)
+                    if (s2 < 0 || s2 > e) s2 = e
+                    val verdictLen = s2 - v0
+                    val ok = verdictLen == 2 && text[v0] == 'o' && text[v0 + 1] == 'k'
+                    val fail = !ok && verdictLen == 4 && text.regionMatches(v0, "fail", 0, 4)
+                    if (ok || fail) {
+                        var sec = 0
+                        var t0 = s2 + 1
+                        while (t0 < e && text[t0] == ' ') t0++
+                        if (t0 < e) {
+                            var t1 = text.indexOf(' ', t0)
+                            if (t1 < 0 || t1 > e) t1 = e
+                            sec = text.substring(t0, t1).toIntOrNull() ?: 0
+                        }
+                        out.add(Result(text.substring(p, s1), ok, sec))
+                    }
+                }
+            }
+            start = end + 1
+        }
+        return out
+    }
 
     fun read(): Snapshot {
         val dir = File(DIR)
-        fun text(name: String) = runCatching { File(dir, name).takeIf { it.isFile }?.readText() }.getOrNull()
-        return Snapshot(dir.isDirectory, parseStatus(text("status")?.lineSequence()?.firstOrNull()), parseResults(text("results")))
+        if (!dir.isDirectory) return Snapshot(false, null, emptyList())
+        val statusLine = runCatching { File(dir, "status").takeIf { it.isFile }?.useLines { it.firstOrNull() } }.getOrNull()
+        val resultsText = runCatching { File(dir, "results").takeIf { it.isFile }?.readText() }.getOrNull()
+        return Snapshot(true, parseStatus(statusLine), parseResults(resultsText))
     }
 
     fun pending(context: Context): Boolean = File(context.filesDir, REQUEST).isFile

@@ -202,14 +202,15 @@ class Redactor(private val salt: ByteArray) {
 
     private val known = LinkedHashMap<String, Known>()
     private var knownSorted: List<Map.Entry<String, Known>>? = null
+    private val sha256: MessageDigest = MessageDigest.getInstance("SHA-256")
 
     fun token(kind: RedactionKind, value: String): String {
-        val md = MessageDigest.getInstance("SHA-256")
-        md.update(salt)
-        md.update(kind.token.toByteArray(Charsets.UTF_8))
-        md.update(0)
-        md.update(canonical(kind, value).toByteArray(Charsets.UTF_8))
-        return "<${kind.token}:${Hashes.hex(md.digest()).take(6)}>"
+        sha256.reset()
+        sha256.update(salt)
+        sha256.update(kind.token.toByteArray(Charsets.UTF_8))
+        sha256.update(0)
+        sha256.update(canonical(kind, value).toByteArray(Charsets.UTF_8))
+        return "<${kind.token}:${Hashes.hex(sha256.digest()).take(6)}>"
     }
 
     /** One spelling per identifier, so `A4-C3-...`, `a4:c3:...` and `A4C3...` get the same token. */
@@ -296,19 +297,37 @@ class Redactor(private val salt: ByteArray) {
     }
 
     /** Any other text file. `prop.name=value` lines get the key-name rules too. */
-    fun redactText(text: String, file: String): String =
-        if ('\n' !in text) redactLine(text, file) else text.split('\n').joinToString("\n") { redactLine(it, file) }
+    fun redactText(text: String, file: String): String {
+        if ('\n' !in text) return redactLine(text, file)
+        val out = StringBuilder(text.length + 32)
+        var start = 0
+        val len = text.length
+        while (true) {
+            val nl = text.indexOf('\n', start)
+            if (nl < 0) {
+                out.append(redactLine(text.substring(start, len), file))
+                break
+            }
+            out.append(redactLine(text.substring(start, nl), file)).append('\n')
+            start = nl + 1
+        }
+        return out.toString()
+    }
 
     private fun redactLine(line: String, file: String): String {
-        val kv = KEY_VALUE_LINE.matchEntire(line)
-        if (kv != null) {
-            val key = kv.groupValues[1]
-            val value = kv.groupValues[2]
-            val kind = keyKind(key, value.trimEnd('\r'))
-            if (kind != null) {
-                learn(kind, value.trimEnd('\r'))
-                log.propKeys += key
-                return "$key=${whole(kind, value.trimEnd('\r'), file)}" + if (value.endsWith('\r')) "\r" else ""
+        val eq = line.indexOf('=')
+        if (eq > 1 && line.indexOf('.', 0) in 1 until eq) {
+            val kv = KEY_VALUE_LINE.matchEntire(line)
+            if (kv != null) {
+                val key = kv.groupValues[1]
+                val value = kv.groupValues[2]
+                val trimmed = value.trimEnd('\r')
+                val kind = keyKind(key, trimmed)
+                if (kind != null) {
+                    learn(kind, trimmed)
+                    log.propKeys += key
+                    return "$key=${whole(kind, trimmed, file)}" + if (value.endsWith('\r')) "\r" else ""
+                }
             }
         }
         return redactValue(line, file)
@@ -330,7 +349,7 @@ class Redactor(private val salt: ByteArray) {
         var shape = Shape(s)
         for (rule in VALUE_RULES) {
             if (shape.ascii && !rule.could(shape)) continue
-            val t = rule.apply(s, file, context)
+            val t = rule.apply(this, s, file, context)
             if (t != s) {
                 s = t
                 shape = Shape(s)
@@ -452,7 +471,7 @@ class Redactor(private val salt: ByteArray) {
         return null
     }
 
-    private inner class ValueRule(
+    private class ValueRule(
         val kind: RedactionKind,
         val regex: Regex,
         /** Capture group holding the value (0 = the whole match). */
@@ -463,136 +482,136 @@ class Redactor(private val salt: ByteArray) {
         /** False only when [regex] cannot match an ASCII line of this [Shape] (text it needs is not there). */
         val could: (Shape) -> Boolean = { true },
     ) {
-        fun apply(s: String, file: String, context: String? = null): String {
+        fun apply(redactor: Redactor, s: String, file: String, context: String? = null): String {
             if (!regex.containsMatchIn(s)) return s
             if (onlyIn != null && !onlyIn.containsMatchIn(s) && !(context != null && onlyIn.containsMatchIn(context))) {
                 return s
             }
             // Tokens already in the text (`<serial:1a2b3c>` looks like "serial: 1a2b3c") are never touched.
-            val tokens = TOKEN.findAll(s).map { it.range }.toList()
-            return regex.replace(s) { m -> replaceMatch(m, tokens, file) }
+            val tokens = if ('<' in s) TOKEN.findAll(s).map { it.range }.toList() else emptyList()
+            return regex.replace(s) { m -> replaceMatch(redactor, m, tokens, file) }
         }
 
-        private fun replaceMatch(m: MatchResult, tokens: List<IntRange>, file: String): String {
+        private fun replaceMatch(redactor: Redactor, m: MatchResult, tokens: List<IntRange>, file: String): String {
             val g = m.groups[group] ?: return m.value
             val value = g.value
             if (tokens.any { it.first <= g.range.last && g.range.first <= it.last }) return m.value
             if (value.startsWith("<") || !accept(value)) return m.value
-            val t = token(kind, value)
-            log.record(file, kind, t)
+            val t = redactor.token(kind, value)
+            redactor.log.record(file, kind, t)
             val start = g.range.first - m.range.first
             val end = g.range.last + 1 - m.range.first
             return m.value.substring(0, start) + t + m.value.substring(end)
         }
     }
 
-    private val VALUE_RULES: List<ValueRule> = listOf(
-        // Not a link of an `a@b@c` chain (oat files: system@framework@services.jar@classes.odex)
-        // or a file name (samsung.software.media.c2@1.0-service.rc).
-        ValueRule(
-            RedactionKind.EMAIL,
-            Regex("""(?<![A-Za-z0-9._%+@-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![A-Za-z0-9@-]|\.[A-Za-z0-9])"""),
-            group = 0,
-            accept = { it.substringAfterLast('.').lowercase(Locale.ROOT) !in FILE_EXTENSIONS },
-            could = { it.has("@") },
-        ),
-        ValueRule(RedactionKind.ACCOUNT, Regex("""Account \{name=([^,}]+)"""), could = { it.has("Account {name=") }),
-        ValueRule(
-            RedactionKind.ACCOUNT,
-            Regex("""(?i)\b(?:account_?name|account)["']?[ \t]*[=:][ \t]*"?([^\s",}<>\]]+)"""),
-            accept = { it.length >= 3 && !TRIVIAL.matches(it) },
-            could = { it.hasAnyCase("account") },
-        ),
-        ValueRule(
-            RedactionKind.BSSID,
-            Regex("""(?i)\bbssid["']?[ \t]*[=:][ \t]*"?((?:[0-9A-F]{2}[:-]){5}[0-9A-F]{2})"""),
-            could = { it.pairs >= 5 && it.hasAnyCase("bssid") },
-        ),
-        // A prefix such as `wifi:` (Wi-Fi display ids) or `mac:` may touch the address; a
-        // hex pair before it (`11:` of a longer colon run) may not.
-        ValueRule(
-            RedactionKind.MAC,
-            Regex(
-                """(?<![0-9A-Za-z])(?<!\b[0-9A-Fa-f]{2}[:-])((?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2})""" +
-                    """(?![0-9A-Za-z]|[:-][0-9A-Fa-f])""",
-            ),
-            accept = { it.lowercase(Locale.ROOT).replace('-', ':') !in MAC_PLACEHOLDERS },
-            could = { it.pairs >= 5 },
-        ),
-        // Input devices: a USB accessory's serial number (Bluetooth ones hold a MAC, removed above).
-        ValueRule(RedactionKind.SERIAL, Regex("""\bUniq=([^\s<]\S*)"""), could = { it.has("Uniq=") }),
-        // The names of virtual displays (Smart View, a TV's name) and Wi-Fi displays.
-        ValueRule(
-            RedactionKind.DEVICE_NAME,
-            Regex("""\buniqueId[=' "]{1,3}virtual:[^,"'\n]*,\d+,([^"'\n]+),\d+["']"""),
-            could = { it.has("uniqueId") },
-        ),
-        ValueRule(
-            RedactionKind.DEVICE_NAME,
-            Regex("""\{"([^"\n]+)"[:,](?=[^\n]*?\buniqueId[=' "]{1,3}(?:virtual|wifi):)"""),
-            could = { it.has("uniqueId") },
-        ),
-        ValueRule(RedactionKind.EID, Regex("""(?<![0-9A-Za-z])(89\d{30})(?![0-9A-Za-z])"""), could = { it.digits >= 32 }),
-        ValueRule(RedactionKind.ICCID, Regex("""(?<![0-9A-Za-z])(89\d{17,18}[0-9Ff]?)(?![0-9A-Za-z])"""), could = { it.digits >= 19 }),
-        ValueRule(
-            RedactionKind.IMSI,
-            Regex("""(?i)imsi[^0-9\n]{0,20}?(\d{14,15})(?!\d)"""),
-            could = { it.digits >= 14 && it.hasAnyCase("imsi") },
-        ),
-        ValueRule(
-            RedactionKind.MEID,
-            Regex("""(?i)meid[^0-9A-Za-z\n]{0,20}([0-9A-Fa-f]{14}|\d{18})(?![0-9A-Za-z])"""),
-            could = { it.hasAnyCase("meid") },
-        ),
-        ValueRule(
-            RedactionKind.IMEI,
-            Regex("""(?i)imei[^0-9\n]{0,20}?(\d{14,16})(?!\d)"""),
-            could = { it.digits >= 14 && it.hasAnyCase("imei") },
-        ),
-        ValueRule(
-            RedactionKind.IMEI,
-            Regex("""(?<![0-9A-Za-z.])(\d{15})(?![0-9A-Za-z.])"""),
-            accept = { luhn(it) },
-            could = { it.digits >= 15 },
-        ),
-        ValueRule(
-            RedactionKind.SERIAL,
-            Regex("""(?i)\bserial(?:[ _]?no|[ _]?number)?["']?[ \t]*[=:][ \t]*["']?([A-Za-z0-9]{6,})"""),
-            could = { it.hasAnyCase("serial") },
-        ),
-        ValueRule(RedactionKind.PHONE, Regex("""(?<![\w+])(\+[1-9](?:[ -]?\d){7,14})(?!\d)"""), could = { s -> s.hasBefore("+") { it in '1'..'9' } }),
-        ValueRule(RedactionKind.PHONE, Regex("""(?<![\w+])((?:00)?966[ -]?5(?:[ -]?\d){8})(?!\d)"""), could = { s -> s.hasBefore("966") { it == '5' || it == ' ' || it == '-' } }),
-        ValueRule(RedactionKind.PHONE, Regex("""(?<![\w+.])(05\d(?:[ -]?\d){7})(?![\w.])"""), could = { s -> s.hasBefore("05") { it in '0'..'9' } }),
-        ValueRule(
-            RedactionKind.SSID,
-            Regex("""(?i)\bssid["']?[ \t]*[=:][ \t]*("[^"\n]*"|[^\s,}\]]+)"""),
-            accept = { it != "\"\"" },
-            could = { it.hasAnyCase("ssid") },
-        ),
-        // An unlabelled pair only on a line about a location: refresh rates
-        // (60.00001, 48.000008) and cutout paths (192.6666666666667,0) are pairs too.
-        ValueRule(
-            RedactionKind.GEO,
-            Regex("""(?<![\d.])(-?\d{1,3}\.\d{4,}[ \t]*,[ \t]*-?\d{1,3}\.\d{4,})(?![\d.])"""),
-            onlyIn = LOCATION_CONTEXT,
-            accept = { plausibleLatLon(it) },
-            could = { it.decimals >= 4 && it.has(",") },
-        ),
-        ValueRule(
-            RedactionKind.GEO,
-            Regex("""(?i)\b(?:lat|lon|lng|latitude|longitude)["']?[ \t]*[=:][ \t]*(-?\d{1,3}\.\d+)"""),
-            could = { it.decimals >= 1 && (it.hasAnyCase("lat") || it.hasAnyCase("lon") || it.hasAnyCase("lng")) },
-        ),
-        // Cell ids (CellIdentity* toString) place the phone within a few hundred metres.
-        ValueRule(
-            RedactionKind.GEO,
-            Regex("""\bm(?:Ci|Pci|Tac|Lac|Nci|Cid)=(\d{2,})"""),
-            could = { s -> CELL_KEYS.any { s.has(it) } },
-        ),
-    )
-
     companion object {
         const val RULES = "oneos.redact/1"
+
+        private val VALUE_RULES: List<ValueRule> = listOf(
+            // Not a link of an `a@b@c` chain (oat files: system@framework@services.jar@classes.odex)
+            // or a file name (samsung.software.media.c2@1.0-service.rc).
+            ValueRule(
+                RedactionKind.EMAIL,
+                Regex("""(?<![A-Za-z0-9._%+@-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![A-Za-z0-9@-]|\.[A-Za-z0-9])"""),
+                group = 0,
+                accept = { it.substringAfterLast('.').lowercase(Locale.ROOT) !in FILE_EXTENSIONS },
+                could = { it.has("@") },
+            ),
+            ValueRule(RedactionKind.ACCOUNT, Regex("""Account \{name=([^,}]+)"""), could = { it.has("Account {name=") }),
+            ValueRule(
+                RedactionKind.ACCOUNT,
+                Regex("""(?i)\b(?:account_?name|account)["']?[ \t]*[=:][ \t]*"?([^\s",}<>\]]+)"""),
+                accept = { it.length >= 3 && !TRIVIAL.matches(it) },
+                could = { it.hasAnyCase("account") },
+            ),
+            ValueRule(
+                RedactionKind.BSSID,
+                Regex("""(?i)\bbssid["']?[ \t]*[=:][ \t]*"?((?:[0-9A-F]{2}[:-]){5}[0-9A-F]{2})"""),
+                could = { it.pairs >= 5 && it.hasAnyCase("bssid") },
+            ),
+            // A prefix such as `wifi:` (Wi-Fi display ids) or `mac:` may touch the address; a
+            // hex pair before it (`11:` of a longer colon run) may not.
+            ValueRule(
+                RedactionKind.MAC,
+                Regex(
+                    """(?<![0-9A-Za-z])(?<!\b[0-9A-Fa-f]{2}[:-])((?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2})""" +
+                        """(?![0-9A-Za-z]|[:-][0-9A-Fa-f])""",
+                ),
+                accept = { it.lowercase(Locale.ROOT).replace('-', ':') !in MAC_PLACEHOLDERS },
+                could = { it.pairs >= 5 },
+            ),
+            // Input devices: a USB accessory's serial number (Bluetooth ones hold a MAC, removed above).
+            ValueRule(RedactionKind.SERIAL, Regex("""\bUniq=([^\s<]\S*)"""), could = { it.has("Uniq=") }),
+            // The names of virtual displays (Smart View, a TV's name) and Wi-Fi displays.
+            ValueRule(
+                RedactionKind.DEVICE_NAME,
+                Regex("""\buniqueId[=' "]{1,3}virtual:[^,"'\n]*,\d+,([^"'\n]+),\d+["']"""),
+                could = { it.has("uniqueId") },
+            ),
+            ValueRule(
+                RedactionKind.DEVICE_NAME,
+                Regex("""\{"([^"\n]+)"[:,](?=[^\n]*?\buniqueId[=' "]{1,3}(?:virtual|wifi):)"""),
+                could = { it.has("uniqueId") },
+            ),
+            ValueRule(RedactionKind.EID, Regex("""(?<![0-9A-Za-z])(89\d{30})(?![0-9A-Za-z])"""), could = { it.digits >= 32 }),
+            ValueRule(RedactionKind.ICCID, Regex("""(?<![0-9A-Za-z])(89\d{17,18}[0-9Ff]?)(?![0-9A-Za-z])"""), could = { it.digits >= 19 }),
+            ValueRule(
+                RedactionKind.IMSI,
+                Regex("""(?i)imsi[^0-9\n]{0,20}?(\d{14,15})(?!\d)"""),
+                could = { it.digits >= 14 && it.hasAnyCase("imsi") },
+            ),
+            ValueRule(
+                RedactionKind.MEID,
+                Regex("""(?i)meid[^0-9A-Za-z\n]{0,20}([0-9A-Fa-f]{14}|\d{18})(?![0-9A-Za-z])"""),
+                could = { it.hasAnyCase("meid") },
+            ),
+            ValueRule(
+                RedactionKind.IMEI,
+                Regex("""(?i)imei[^0-9\n]{0,20}?(\d{14,16})(?!\d)"""),
+                could = { it.digits >= 14 && it.hasAnyCase("imei") },
+            ),
+            ValueRule(
+                RedactionKind.IMEI,
+                Regex("""(?<![0-9A-Za-z.])(\d{15})(?![0-9A-Za-z.])"""),
+                accept = { luhn(it) },
+                could = { it.digits >= 15 },
+            ),
+            ValueRule(
+                RedactionKind.SERIAL,
+                Regex("""(?i)\bserial(?:[ _]?no|[ _]?number)?["']?[ \t]*[=:][ \t]*["']?([A-Za-z0-9]{6,})"""),
+                could = { it.hasAnyCase("serial") },
+            ),
+            ValueRule(RedactionKind.PHONE, Regex("""(?<![\w+])(\+[1-9](?:[ -]?\d){7,14})(?!\d)"""), could = { s -> s.hasBefore("+") { it in '1'..'9' } }),
+            ValueRule(RedactionKind.PHONE, Regex("""(?<![\w+])((?:00)?966[ -]?5(?:[ -]?\d){8})(?!\d)"""), could = { s -> s.hasBefore("966") { it == '5' || it == ' ' || it == '-' } }),
+            ValueRule(RedactionKind.PHONE, Regex("""(?<![\w+.])(05\d(?:[ -]?\d){7})(?![\w.])"""), could = { s -> s.hasBefore("05") { it in '0'..'9' } }),
+            ValueRule(
+                RedactionKind.SSID,
+                Regex("""(?i)\bssid["']?[ \t]*[=:][ \t]*("[^"\n]*"|[^\s,}\]]+)"""),
+                accept = { it != "\"\"" },
+                could = { it.hasAnyCase("ssid") },
+            ),
+            // An unlabelled pair only on a line about a location: refresh rates
+            // (60.00001, 48.000008) and cutout paths (192.6666666666667,0) are pairs too.
+            ValueRule(
+                RedactionKind.GEO,
+                Regex("""(?<![\d.])(-?\d{1,3}\.\d{4,}[ \t]*,[ \t]*-?\d{1,3}\.\d{4,})(?![\d.])"""),
+                onlyIn = LOCATION_CONTEXT,
+                accept = { plausibleLatLon(it) },
+                could = { it.decimals >= 4 && it.has(",") },
+            ),
+            ValueRule(
+                RedactionKind.GEO,
+                Regex("""(?i)\b(?:lat|lon|lng|latitude|longitude)["']?[ \t]*[=:][ \t]*(-?\d{1,3}\.\d+)"""),
+                could = { it.decimals >= 1 && (it.hasAnyCase("lat") || it.hasAnyCase("lon") || it.hasAnyCase("lng")) },
+            ),
+            // Cell ids (CellIdentity* toString) place the phone within a few hundred metres.
+            ValueRule(
+                RedactionKind.GEO,
+                Regex("""\bm(?:Ci|Pci|Tac|Lac|Nci|Cid)=(\d{2,})"""),
+                could = { s -> CELL_KEYS.any { s.has(it) } },
+            ),
+        )
 
         /** Known values shorter than this are only removed where their key is. */
         const val MIN_KNOWN_LENGTH = 5

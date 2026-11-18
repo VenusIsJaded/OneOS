@@ -4,12 +4,26 @@ import java.util.Locale
 
 /** Parses `getprop` output: one `[key]: [value]` per line. */
 object Getprop {
-    private val LINE = Regex("""^\[([^\]]+)]: \[(.*)]$""")
-
-    fun parse(dump: String): Map<String, String> =
-        dump.lineSequence()
-            .mapNotNull { LINE.matchEntire(it.trimEnd()) }
-            .associate { it.groupValues[1] to it.groupValues[2] }
+    fun parse(dump: String): Map<String, String> {
+        val out = LinkedHashMap<String, String>()
+        var start = 0
+        val len = dump.length
+        while (start <= len) {
+            var end = dump.indexOf('\n', start)
+            if (end < 0) end = len
+            var e = end
+            while (e > start && dump[e - 1].isWhitespace()) e--
+            if (e - start >= 6 && dump[start] == '[' && dump[e - 1] == ']') {
+                val sep = dump.indexOf("]: [", start + 1)
+                if (sep in (start + 2)..(e - 5) && dump.indexOf(']', start + 1) == sep) {
+                    out[dump.substring(start + 1, sep)] = dump.substring(sep + 4, e - 1)
+                }
+            }
+            if (end == len) break
+            start = end + 1
+        }
+        return out
+    }
 }
 
 /** Plain-text helpers for texts that start with a name ("the other system" at the start of a sentence). */

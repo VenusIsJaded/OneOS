@@ -468,7 +468,15 @@ object BringAppsJob : BackgroundJob<BringAppsJob.State>(State(), "oneos-bring-ap
     fun sendCatalog(ctx: Context): Boolean = runCatching {
         val app = ctx.applicationContext
         val pm = app.packageManager
-        val entries = candidates(app).mapNotNull { c -> iconPng(pm, c.pkg)?.let { BringCatalog.Entry(c.pkg, c.label, it) } }
+        val size = 96
+        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        val pngOut = java.io.ByteArrayOutputStream(8192)
+        val entries = try {
+            candidates(app).mapNotNull { c -> iconPng(pm, c.pkg, bmp, canvas, pngOut)?.let { BringCatalog.Entry(c.pkg, c.label, it) } }
+        } finally {
+            bmp.recycle()
+        }
         val bytes = BringCatalog.text(entries).toByteArray()
         su(app)
         val reply = RootVerbs.run(
@@ -478,13 +486,21 @@ object BringAppsJob : BackgroundJob<BringAppsJob.State>(State(), "oneos-bring-ap
         check(reply.ok) { reply.problem ?: "root gave no answer" }
     }.onFailure { android.util.Log.w("OneOS", "bring catalog not written: ${it.message}") }.isSuccess
 
-    private fun iconPng(pm: android.content.pm.PackageManager, pkg: String): ByteArray? = runCatching {
-        val size = 96
-        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    private fun iconPng(
+        pm: android.content.pm.PackageManager,
+        pkg: String,
+        bmp: Bitmap,
+        canvas: Canvas,
+        pngOut: java.io.ByteArrayOutputStream,
+    ): ByteArray? = runCatching {
+        val size = bmp.width
+        bmp.eraseColor(0)
         val d = pm.getApplicationIcon(pkg)
         d.setBounds(0, 0, size, size)
-        d.draw(Canvas(bmp))
-        java.io.ByteArrayOutputStream().also { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
+        d.draw(canvas)
+        pngOut.reset()
+        bmp.compress(Bitmap.CompressFormat.PNG, 100, pngOut)
+        pngOut.toByteArray()
     }.getOrNull()
 
     /** What `bring-status` said. [copies] is null when it could not be asked. */

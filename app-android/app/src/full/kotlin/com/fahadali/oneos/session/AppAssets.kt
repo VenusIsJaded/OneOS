@@ -28,13 +28,22 @@ object AppAssets {
 
     private fun read(ctx: Context, path: String): ByteArray = ctx.applicationContext.assets.open(path).use { it.readBytes() }
 
+    @Volatile private var cachedRootScript: ByteArray? = null
+    private val cachedLists = java.util.concurrent.ConcurrentHashMap<String, Map<String, String>>()
+    @Volatile private var cachedSizes: Map<String, Long>? = null
+    @Volatile private var cachedRemoteIds: Map<String, List<String>>? = null
+    @Volatile private var cachedPacked: Set<String>? = null
+    private val cachedInstalldTxt = java.util.concurrent.ConcurrentHashMap<Int, String>()
+
     /** The root script, exactly the pinned bytes. */
     fun rootScript(ctx: Context): ByteArray {
+        cachedRootScript?.let { return it.clone() }
         val b = read(ctx, RootScript.ASSET)
         if (b.size.toLong() != BuildConfig.ROOT_SCRIPT_BYTES || Hashes.sha256(b) != BuildConfig.ROOT_SCRIPT_SHA256) {
             throw Broken("the root script in the app is not the pinned one")
         }
-        return b
+        cachedRootScript = b
+        return b.clone()
     }
 
     /**
@@ -52,17 +61,21 @@ object AppAssets {
     }
 
     internal fun list(ctx: Context, id: String): Map<String, String> {
+        cachedLists[id]?.let { return it }
         val text = runCatching { read(ctx, "oneos/sets/$id.sha256") }
             .getOrElse { throw Broken("this OneOS download does not carry the $id set (another series' download has it)") }
         if (Hashes.sha256(text) != pinned(id)) throw Broken("the app's $id list is not the pinned one")
         val parsed = ShaList.parse(text.toString(Charsets.UTF_8))
         if (parsed.problems.isNotEmpty()) throw Broken("$id: ${parsed.problems.first()}")
+        cachedLists[id] = parsed.entries
         return parsed.entries
     }
 
     private fun sizes(ctx: Context): Map<String, Long> =
-        read(ctx, "oneos/files/index.txt").toString(Charsets.UTF_8).lines().filter { it.isNotBlank() }
+        cachedSizes ?: read(ctx, "oneos/files/index.txt").toString(Charsets.UTF_8).lineSequence()
+            .filter { it.isNotBlank() }
             .associate { it.substringBefore(' ') to (it.substringAfter(' ').toLongOrNull() ?: -1) }
+            .also { cachedSizes = it }
 
     /** The session scripts and host_installd.txt, then the set's files, in staging order. */
     fun files(ctx: Context, set: PackageSet, profile: String): List<Staged> {
@@ -96,13 +109,15 @@ object AppAssets {
      * folders, each with its own download limit ([SetDownloader.url]).
      */
     fun remoteIds(ctx: Context): Map<String, List<String>> =
-        runCatching { read(ctx, "oneos/files/remote.txt") }.getOrNull()?.toString(Charsets.UTF_8)?.lines()
-            ?.filter { it.isNotBlank() }
-            ?.associate { l -> l.substringBefore(' ') to l.substringAfter(' ').split(',').map { it.trim() }.filter { it.isNotEmpty() } }
-            ?: emptyMap()
+        cachedRemoteIds ?: (
+            runCatching { read(ctx, "oneos/files/remote.txt") }.getOrNull()?.toString(Charsets.UTF_8)?.lineSequence()
+                ?.filter { it.isNotBlank() }
+                ?.associate { l -> l.substringBefore(' ') to l.substringAfter(' ').split(',').map { it.trim() }.filter { it.isNotEmpty() } }
+                ?: emptyMap()
+            ).also { cachedRemoteIds = it }
 
     private fun packed(ctx: Context): Set<String> =
-        ctx.applicationContext.assets.list("oneos/files")?.toSet() ?: emptySet()
+        cachedPacked ?: (ctx.applicationContext.assets.list("oneos/files")?.toSet() ?: emptySet()).also { cachedPacked = it }
 
     /** The files of [files] that are neither in the APK nor downloaded yet, with their sources. */
     fun toDownload(ctx: Context, files: List<Staged>): List<Pair<Staged, List<String>>> {
@@ -131,10 +146,12 @@ object AppAssets {
 
     /** The installd table the app ships for SDK [sdk] images (the installd gate's expected table). */
     fun hostInstalldTxt(ctx: Context, sdk: Int = 37): String {
-        val name = InstalldExpected.assetName(sdk)
+        val normSdk = if (sdk == 36) 36 else 37
+        cachedInstalldTxt[normSdk]?.let { return it }
+        val name = InstalldExpected.assetName(normSdk)
         val sha = list(ctx, "scripts")[name] ?: throw Broken("no $name in the app")
         val b = read(ctx, "oneos/files/$sha")
         if (Hashes.sha256(b) != sha) throw Broken("$name in the app is damaged")
-        return b.toString(Charsets.UTF_8)
+        return b.toString(Charsets.UTF_8).also { cachedInstalldTxt[normSdk] = it }
     }
 }

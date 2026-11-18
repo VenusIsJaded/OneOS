@@ -38,15 +38,44 @@ object LogRules {
     val DROP_TAG_PARTS: List<String> = listOf("Geofence")
 
     /** `logcat -v threadtime`: `MM-DD HH:MM:SS.mmm  PID  TID L TAG: message`. */
-    private val THREADTIME = Regex("""^\d\d-\d\d \d\d:\d\d:\d\d\.\d+\s+\d+\s+\d+\s+[VDIWEFAS]\s+(.*?)\s*: """)
+    private const val LEVELS = "VDIWEFAS"
 
     /** Media that never goes into a bundle, whatever a list prints. */
     private val NEVER = Regex("""(?i).*\.(mp4|webm|3gp|mkv|png|jpe?g|webp|gif|heic)$""")
 
-    fun tag(line: String): String? = THREADTIME.find(line)?.groupValues?.get(1)
+    fun tag(line: String): String? {
+        val len = line.length
+        if (len < 24 || line[2] != '-' || line[5] != ' ' || line[8] != ':' || line[11] != ':' || line[14] != '.') return null
+        if (!twoDigits(line, 0) || !twoDigits(line, 3) || !twoDigits(line, 6) || !twoDigits(line, 9) || !twoDigits(line, 12)) return null
+        var i = 15
+        while (i < len && line[i] in '0'..'9') i++
+        if (i == 15) return null
+        for (col in 0 until 2) {
+            val s0 = i
+            while (i < len && line[i].isWhitespace()) i++
+            if (i == s0) return null
+            val d0 = i
+            while (i < len && line[i] in '0'..'9') i++
+            if (i == d0) return null
+        }
+        val ls = i
+        while (i < len && line[i].isWhitespace()) i++
+        if (i == ls || i + 2 >= len || LEVELS.indexOf(line[i]) < 0 || !line[i + 1].isWhitespace()) return null
+        i += 2
+        while (i < len && line[i].isWhitespace()) i++
+        val colon = line.indexOf(": ", i)
+        if (colon < i) return null
+        var end = colon
+        while (end > i && line[end - 1].isWhitespace()) end--
+        return line.substring(i, end)
+    }
 
-    fun drop(line: String): Boolean {
-        val t = tag(line) ?: return false
+    private fun twoDigits(s: String, at: Int): Boolean = s[at] in '0'..'9' && s[at + 1] in '0'..'9'
+
+    fun drop(line: String): Boolean = dropTag(tag(line))
+
+    internal fun dropTag(t: String?): Boolean {
+        if (t == null) return false
         return t in DROP_TAGS || DROP_TAG_PREFIXES.any { t.startsWith(it) } ||
             DROP_TAG_SUFFIXES.any { t.endsWith(it) } || DROP_TAG_PARTS.any { t.contains(it) }
     }
@@ -106,6 +135,7 @@ class RedactingOutputStream(
     private val fileSalt: ByteArray,
 ) : OutputStream() {
     private val line = ByteArrayOutputStream(1024)
+    private val fileDigest: MessageDigest = MessageDigest.getInstance("SHA-256")
     private var closed = false
 
     override fun write(b: Int) {
@@ -140,9 +170,10 @@ class RedactingOutputStream(
         val text = line.toString(Charsets.UTF_8.name()).trimEnd('\r')
         line.reset()
         stats.lines++
-        if (LogRules.drop(text)) {
+        val t = LogRules.tag(text)
+        if (LogRules.dropTag(t)) {
             stats.droppedLines++
-            LogRules.tag(text)?.let { stats.droppedByTag[it] = (stats.droppedByTag[it] ?: 0) + 1 }
+            if (t != null) stats.droppedByTag[t] = (stats.droppedByTag[t] ?: 0) + 1
             return
         }
         var s = redactor.redactText(text, file)
@@ -166,10 +197,10 @@ class RedactingOutputStream(
     }
 
     private fun fileToken(name: String): String {
-        val md = MessageDigest.getInstance("SHA-256")
-        md.update(fileSalt)
-        md.update(name.toByteArray(Charsets.UTF_8))
-        return "<file:${Hashes.hex(md.digest()).take(6)}>"
+        fileDigest.reset()
+        fileDigest.update(fileSalt)
+        fileDigest.update(name.toByteArray(Charsets.UTF_8))
+        return "<file:${Hashes.hex(fileDigest.digest()).take(6)}>"
     }
 
     override fun flush() = out.flush()

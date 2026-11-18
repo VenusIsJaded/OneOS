@@ -46,10 +46,15 @@ object LogTrim {
     private val HEADER = Regex("""^=== OneOS session (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})""")
     private val CLOCK = Regex("""\b(\d{2}):(\d{2}):(\d{2})\b""")
     private val RETURN_LINE = Regex("""returning to One UI|Volume Up \+ Volume Down held|Back to One UI asked|guest requested""")
-    private val LOGCAT_TIME = Regex("""^(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})""")
 
     /** The capture files (logcat, rotated): the only ones cut. */
     fun isCapture(path: String): Boolean = path.substringAfter('/').startsWith("capture/")
+
+    private fun twoDigits(s: String, at: Int): Int {
+        val a = s[at] - '0'
+        val b = s[at + 1] - '0'
+        return if (a in 0..9 && b in 0..9) a * 10 + b else -1
+    }
 
     /**
      * The two windows from the last session of [autoReturn]; [lastLogged]: the
@@ -79,11 +84,31 @@ object LogTrim {
         )
     }
 
+    /** True when [autoReturn] already logs a return timestamp, so [windows] ignores `lastLogged`. */
+    private fun hasReturnLine(autoReturn: String): Boolean {
+        val block = ReturnOutcomes.lastBlock(autoReturn, "=== OneOS session ")
+        if (block.isEmpty() || HEADER.find(block[0]) == null) return false
+        for (i in 1 until block.size) {
+            val l = block[i]
+            if (CLOCK.containsMatchIn(l) && RETURN_LINE.containsMatchIn(l)) return true
+        }
+        return false
+    }
+
     /** A logcat line's time, in the year of [near] (logcat prints no year; December/January is handled). */
     fun lineTime(line: String, near: LocalDateTime): LocalDateTime? {
-        val m = LOGCAT_TIME.find(line) ?: return null
-        val (mo, d, h, mi, s) = m.destructured
-        val t = runCatching { LocalDateTime.of(near.year, mo.toInt(), d.toInt(), h.toInt(), mi.toInt(), s.toInt()) }.getOrNull() ?: return null
+        if (line.length < 14 || line[2] != '-' || line[5] != ' ' || line[8] != ':' || line[11] != ':') return null
+        val mo = twoDigits(line, 0)
+        val d = twoDigits(line, 3)
+        val h = twoDigits(line, 6)
+        val mi = twoDigits(line, 9)
+        val s = twoDigits(line, 12)
+        if (mo !in 1..12 || d !in 1..31 || h !in 0..23 || mi !in 0..59 || s !in 0..59) return null
+        val t = try {
+            LocalDateTime.of(near.year, mo, d, h, mi, s)
+        } catch (_: java.time.DateTimeException) {
+            return null
+        }
         return when {
             t.isAfter(near.plusMonths(6)) -> t.minusYears(1)
             t.isBefore(near.minusMonths(6)) -> t.plusYears(1)
@@ -111,9 +136,11 @@ object LogTrim {
             val header = HEADER.find(ReturnOutcomes.lastBlock(auto, "=== OneOS session ").firstOrNull().orEmpty()) ?: return false
             val near = LocalDateTime.of(LocalDate.parse(header.groupValues[1]), LocalTime.parse(header.groupValues[2]))
             var newest: LocalDateTime? = null
-            for (e in capture) {
-                z.getInputStream(e).bufferedReader().useLines { lines ->
-                    lines.forEach { l -> lineTime(l, near)?.let { t -> if (newest == null || t.isAfter(newest)) newest = t } }
+            if (!hasReturnLine(auto)) {
+                for (e in capture) {
+                    z.getInputStream(e).bufferedReader().useLines { lines ->
+                        lines.forEach { l -> lineTime(l, near)?.let { t -> if (newest == null || t.isAfter(newest)) newest = t } }
+                    }
                 }
             }
             val windows = windows(auto, newest) ?: return false

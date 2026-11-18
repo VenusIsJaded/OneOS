@@ -33,6 +33,8 @@ class OptimizeAppsActivity : AppCompatActivity() {
     private var askedAt = 0L
     private var askedWhat = ""
     private var shown = ""
+    private val labelCache = HashMap<String, String>()
+    private val iconCache = HashMap<String, Drawable?>()
     private val poll = object : Runnable {
         override fun run() {
             render(false)
@@ -75,9 +77,12 @@ class OptimizeAppsActivity : AppCompatActivity() {
     private fun now() = System.currentTimeMillis() / 1000
 
     private fun label(pkg: String): String =
-        runCatching { packageManager.getApplicationInfo(pkg, 0).loadLabel(packageManager).toString() }.getOrDefault(pkg)
+        labelCache.getOrPut(pkg) {
+            runCatching { packageManager.getApplicationInfo(pkg, 0).loadLabel(packageManager).toString() }.getOrDefault(pkg)
+        }
 
-    private fun icon(pkg: String): Drawable? = runCatching { packageManager.getApplicationIcon(pkg) }.getOrNull()
+    private fun icon(pkg: String): Drawable? =
+        if (pkg in iconCache) iconCache[pkg] else runCatching { packageManager.getApplicationIcon(pkg) }.getOrNull().also { iconCache[pkg] = it }
 
     /** The screen is drawn again only when what it shows changed (a wait or a cool-down rewrites the status every 10-30 s). */
     private fun render(force: Boolean) {
