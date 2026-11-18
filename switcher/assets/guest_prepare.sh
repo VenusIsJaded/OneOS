@@ -4672,9 +4672,11 @@ if [ -f "$STAGE/data/system/packages.list" ]; then
         (cd "$PROF_CUR_DIR" 2>/dev/null && for d in *; do [ -d "$d" ] && printf 'cur %s\n' "$d"; done) > "$STAGE/prof.have"
     "$BB" find "$PROF_REF_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | "$BB" awk -F/ '{print "ref " $NF}' >> "$STAGE/prof.have" ||
         (cd "$PROF_REF_DIR" 2>/dev/null && for d in *; do [ -d "$d" ] && printf 'ref %s\n' "$d"; done) >> "$STAGE/prof.have"
-    "$BB" awk -v cur="$PROF_CUR_DIR" -v ref="$PROF_REF_DIR" \
+    # (the first file is told apart by name: NR == FNR is also true for the whole second file when the first is
+    # empty, a fresh tree, and then no package would get its directories)
+    "$BB" awk -v cur="$PROF_CUR_DIR" -v ref="$PROF_REF_DIR" -v hf="$STAGE/prof.have" \
         -v fc="$STAGE/prof.mk.cur" -v fr="$STAGE/prof.mk.ref" -v fo="$STAGE/prof.chown.sh" '
-        NR == FNR { have[$1 ":" $2] = 1; next }
+        FILENAME == hf { have[$1 ":" $2] = 1; next }
         NF >= 2 && $1 ~ /^[A-Za-z0-9._:-]+$/ && $2 ~ /^[0-9]+$/ {
             p = $1; u = $2
             if (!(("cur:" p) in have)) {
@@ -5971,25 +5973,31 @@ created=0
 [ -f /data/system/packages.list ] || exit 0
 realigned=0
 mkdir -p /data/user/0 /data/user_de/0 /data/media/0/Android/data /data/media/0/Android/media /data/media/0/Android/obb 2>/dev/null
+# The listing of what exists may be empty (a fresh tree): packages.list is read first and kept, the listing
+# (stdin) fills `have`, and the work is decided at the end. (NR == FNR took the whole package list for the
+# listing then, and created nothing.)
 find /data/user/0 /data/user_de/0 /data/media/0/Android/data /data/media/0/Android/media /data/media/0/Android/obb \
-    -mindepth 1 -maxdepth 1 -type d -exec stat -c '%u %n' {} + 2>/dev/null | awk '
-    NR == FNR { have[$2] = $1; next }
-    $2 ~ /^[0-9]+$/ && $1 ~ /^[A-Za-z0-9._:-]+$/ {
-        pkg = $1; u = $2
-        p1 = "/data/user/0/" pkg
-        if (!(p1 in have)) print "mk\t" p1 "\t" u ":" u "\t0771"
-        else if (have[p1] != u) print "re\t" p1 "\t" u ":" u
-        p2 = "/data/user_de/0/" pkg
-        if (!(p2 in have)) print "mk\t" p2 "\t" u ":" u "\t0700"
-        else if (have[p2] != u) print "re\t" p2 "\t" u ":" u
-        for (i = 1; i <= 3; i++) {
-            k = (i == 1 ? "data" : (i == 2 ? "media" : "obb"))
-            pe = "/data/media/0/Android/" k "/" pkg
-            if (!(pe in have)) print "mk\t" pe "\t" u ":1078\t0770"
-            else if (have[pe] != u) print "re\t" pe "\t" u ":1078"
+    -mindepth 1 -maxdepth 1 -type d -exec stat -c '%u %n' {} + 2>/dev/null | awk -v pf=/data/system/packages.list '
+    FILENAME == pf { if ($2 ~ /^[0-9]+$/ && $1 ~ /^[A-Za-z0-9._:-]+$/) { np++; pk[np] = $1; pu[np] = $2 }; next }
+    { have[$2] = $1 }
+    END {
+        for (j = 1; j <= np; j++) {
+            pkg = pk[j]; u = pu[j]
+            p1 = "/data/user/0/" pkg
+            if (!(p1 in have)) print "mk\t" p1 "\t" u ":" u "\t0771"
+            else if (have[p1] != u) print "re\t" p1 "\t" u ":" u
+            p2 = "/data/user_de/0/" pkg
+            if (!(p2 in have)) print "mk\t" p2 "\t" u ":" u "\t0700"
+            else if (have[p2] != u) print "re\t" p2 "\t" u ":" u
+            for (i = 1; i <= 3; i++) {
+                k = (i == 1 ? "data" : (i == 2 ? "media" : "obb"))
+                pe = "/data/media/0/Android/" k "/" pkg
+                if (!(pe in have)) print "mk\t" pe "\t" u ":1078\t0770"
+                else if (have[pe] != u) print "re\t" pe "\t" u ":1078"
+            }
         }
     }
-' - /data/system/packages.list > /data/local/tmp/.ensure_app.$$
+' /data/system/packages.list - > /data/local/tmp/.ensure_app.$$
 while IFS='	' read -r act p own mode; do
     case "$act" in
         mk)
@@ -7742,7 +7750,7 @@ for d in "$M"/*; do
 done
 # Nothing may have landed outside the guest's tree; if it did, all of it goes.
 outside > "$S/tmp/module_outside.after"
-LEAK=$(awk 'NR == FNR { b[$0] = 1; next } !($0 in b)' "$S/tmp/module_outside.before" "$S/tmp/module_outside.after")
+LEAK=$(awk -v bf="$S/tmp/module_outside.before" 'FILENAME == bf { b[$0] = 1; next } !($0 in b)' "$S/tmp/module_outside.before" "$S/tmp/module_outside.after")
 if [ -n "$LEAK" ]; then
     for t in $(echo "$LEAK" | sort -r); do $BB umount -l "$t" 2>/dev/null; done
     [ -f "$L" ] && sort -r "$L" | while read -r t; do $BB umount -l "$t" 2>/dev/null; done
@@ -7905,7 +7913,7 @@ fi
 
 # Nothing of the guest on One UI's own partitions (host_part_mounts, top).
 host_part_mounts > "$STAGE/host_part_mounts.after"
-LEAKED=$(awk 'NR == FNR { b[$0] = 1; next } !($0 in b)' "$STAGE/host_part_mounts.before" "$STAGE/host_part_mounts.after")
+LEAKED=$(awk -v bf="$STAGE/host_part_mounts.before" 'FILENAME == bf { b[$0] = 1; next } !($0 in b)' "$STAGE/host_part_mounts.before" "$STAGE/host_part_mounts.after")
 if [ -n "$LEAKED" ]; then
     echo "ERROR: the setup mounted over One UI's own partitions:" $LEAKED
     for m in $(echo "$LEAKED" | sort -r); do $BB umount -l "$m" 2>/dev/null && echo "  unmounted $m"; done
