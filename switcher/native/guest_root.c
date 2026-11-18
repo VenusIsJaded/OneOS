@@ -110,7 +110,7 @@ static int edit_grant(const char *package,int add) {
 static void list_apps(int out) {
     FILE *f=fopen(PACKAGES,"re");if(!f)return;
     char line[8192],p[256];unsigned u;
-    while(fgets(line,sizeof(line),f))if(sscanf(line,"%255s %u",p,&u)==2&&u>=10000&&safe_package(p)&&strcmp(p,MANAGER))
+    while(fgets(line,sizeof(line),f))if(sscanf(line,"%255s %u",p,&u)==2&&safe_package(p)&&strcmp(p,MANAGER))
         dprintf(out,"%s %u %d\n",p,u,granted(p,u));
     fclose(f);
 }
@@ -204,7 +204,8 @@ static int unpack(const char *dest) {
         if(!fgets(header,sizeof(header),stdin)||!strchr(header,'\n')||sscanf(header,"%u %llu %o %c",&len,&size,&mode,&extra)!=3)break;
         if(!len){int extra=fgetc(stdin);close(root);return size==0&&mode==0&&extra==EOF?0:1;}
         if(len>=sizeof(path)||++count>50000||size>536870912ULL||(total+=size)>1073741824ULL)break;
-        if(fread(path,1,len,stdin)!=len)break;path[len]=0;
+        if(fread(path,1,len,stdin)!=len)break;
+        path[len]=0;
         if(path[0]=='/'||memchr(path,0,len)||path[len-1]=='/')break;
         int dir=dup(root),bad=0;char *part=path,*next;
         while((next=strchr(part,'/'))){*next=0;

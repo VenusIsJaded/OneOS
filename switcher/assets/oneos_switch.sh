@@ -235,6 +235,7 @@ case "${ONEOS_GUEST_GMS:-1}" in 0|1) ;; *) refuse "ONEOS_GUEST_GMS=$ONEOS_GUEST_
 # Cool down when hot (the heat cap below): 0 or 1, unset meaning 1.
 case "${ONEOS_HEAT_CAP:-1}" in 0|1) ;; *) refuse "ONEOS_HEAT_CAP=$ONEOS_HEAT_CAP (0 or 1)" ;; esac
 case "${ONEOS_FULL_LOGS:-1}" in 0|1) ;; *) refuse "ONEOS_FULL_LOGS=$ONEOS_FULL_LOGS (0 or 1)" ;; esac
+case "${ONEOS_SHARE_FILES:-0}" in 0|1) ;; *) refuse "ONEOS_SHARE_FILES=$ONEOS_SHARE_FILES (0 or 1)" ;; esac
 [ "${ONEOS_GUEST_GMS:-1}" = 1 ] && [ "${ONEOS_GUEST_HIDE_GMS:-0}" = 1 ] && [ -f "$STAGE/gmssystem_payload.img" ] &&
     refuse "ONEOS_GUEST_GMS is on (the default) with gmssystem_payload.img staged, and ONEOS_GUEST_HIDE_GMS=1 hides Google services: set one of them to 0"
 # The same guard and app-id checks as guest_prepare.sh, here so a refusal comes
@@ -927,7 +928,14 @@ elif [ "${ONEOS_LOGCAT:-1}" = 1 ]; then
     else
         rm -rf "$LOGS.prev"; [ -d "$LOGS" ] && mv "$LOGS" "$LOGS.prev"
         mkdir -p "$LOGS"
-        $BB setsid logcat -b all -v threadtime -f "$LOGS/boot.log" -r 32768 -n 24 </dev/null >/dev/null 2>&1 &
+        # 0.5.20: through a small script that logs the end of the capture with its exit status (several Galaxy
+        # S24+/S24 FE sessions with full logs on had no capture at all, "0 files of the boot kept": the process had
+        # gone and nothing said when or why); the watcher's rounds start it again if it ended early (see there).
+        printf '%s\n' '#!/system/bin/sh' \
+            "logcat -b all -v threadtime -f $LOGS/boot.log -r 32768 -n 24" \
+            "echo \"\$(date) logcat capture ended: exit \$? (\$(ls $LOGS 2>/dev/null | wc -l) files in $LOGS)\" >> $STAGE/auto_return.log" \
+            > "$STAGE/logcat_capture.sh"
+        $BB setsid sh "$STAGE/logcat_capture.sh" </dev/null >/dev/null 2>&1 &
         LOGCAT_HEAD=1
         echo "Logcat capture: $LOGS/boot.log"
     fi
@@ -948,12 +956,17 @@ fi
 # fell in the gap between the capture's head and its end (A56: 13:48-15:35);
 # this log had the whole A56 session but none of those tags.
 if [ "${ONEOS_LOGCAT:-1}" = 1 ]; then
+    # Every earlier one, by its saved pid/process-group and by its command line (0.5.20):
+    # the two-hour timeout does not count while the phone sleeps, so readers from earlier
+    # sessions piled up (A36 ColorOS 11-17: five at once, logd at 100 % CPU).
     swp=$(cat "$STAGE/sound_watch.pid" 2>/dev/null)
     case "$swp" in
         ""|*[!0-9]*) ;;
         *) tr '\0' ' ' < "/proc/$swp/cmdline" 2>/dev/null | grep -q "sound_watch.log" && { kill -TERM -- -"$swp" 2>/dev/null; kill "$swp" 2>/dev/null; } ;;
     esac
-    pkill -f "^logcat .*$STAGE/sound_watch.log" 2>/dev/null || true
+    for swp in $(pgrep -f "^logcat .*$STAGE/sound_watch.log" 2>/dev/null) $(pgrep -f "timeout 7200 logca[t] .*$STAGE/sound_watch.log" 2>/dev/null); do
+        kill "$swp" 2>/dev/null
+    done
     [ -f "$STAGE/sound_watch.log" ] && mv -f "$STAGE/sound_watch.log" "$STAGE/sound_watch.prev"
     # Only enable verbose vibrator/Dolby/ringtone tracing when ONEOS_SOUND_VERBOSE=1
     # is explicitly requested (ONEOS_FULL_LOGS=1 is on by default in app sessions
@@ -1759,6 +1772,20 @@ if [ -w "$LHBM" ]; then
     v=$(cat "$LHBM" 2>/dev/null)
     case "$v" in 0|'') ;; *) echo 0 > "$LHBM" 2>/dev/null; echo "Panel local HBM was $v at the switch (One UI's fingerprint wait): now $(cat "$LHBM" 2>/dev/null)" ;; esac
 fi
+# Samsung's in-kernel touch booster (input_booster: each touch raises the CPU clocks for a few hundred ms). One UI
+# turns it on through its own services; a guest has none of them, so a session ran without it (enable_event 0):
+# ColorOS on the A36, 0.5.20, frames at 14-18 ms median at 120 Hz, 8 ms with it on (owner: "slightly better").
+# On for the session; return_to_oneui.sh puts One UI's value back. ONEOS_TOUCH_BOOST=0 leaves it.
+IB=/sys/class/input_booster/enable_event
+rm -f "$STAGE/host_input_booster"
+if [ "${ONEOS_TOUCH_BOOST:-1}" = 1 ] && [ -w "$IB" ]; then
+    v=$(cat "$IB" 2>/dev/null)
+    case "$v" in
+        0) echo "$v" > "$STAGE/host_input_booster"; echo 1 > "$IB" 2>/dev/null
+           echo "Touch booster: on for the session (One UI had $v): now $(cat "$IB" 2>/dev/null)" ;;
+        *) echo "Touch booster: already on ($v)" ;;
+    esac
+fi
 echo "=== [5/6] $(date +%T) Executing Mount Hierarchy Preparation ==="
 /system/bin/sh "$STAGE/guest_prepare.sh"
 PREP_RET=$?
@@ -2366,6 +2393,18 @@ case "${ONEOS_GUEST_DENSITY:-auto}" in
     [1-9][0-9][0-9]) [ "$ONEOS_GUEST_DENSITY" -ge 120 ] && [ "$ONEOS_GUEST_DENSITY" -le 640 ] && GUEST_DENSITY=$ONEOS_GUEST_DENSITY ;;
 esac
 [ "$GUEST_DENSITY" = "${ONEOS_GUEST_DENSITY:-auto}" ] || echo "ONEOS_GUEST_DENSITY=$ONEOS_GUEST_DENSITY is not off, auto or 120-640: auto"
+# The UI activator used to force 120 Hz on every phone.  On a 90 Hz panel that
+# creates an impossible [120, 120] DisplayModeDirector vote and Android falls
+# back to 60 Hz.  Read the highest physical mode (up to OneOS's 120 Hz policy)
+# from the One UI dump captured before the switch.  Keep 120 as the conservative
+# fallback for old stages or an incomplete dump.
+GUEST_REFRESH=120.0
+R=$(awk -F'fps=' '{ for (i = 2; i <= NF; i++) { v = $i + 0; if (v >= 30 && v <= 120 && v > m) m = v } }
+    END { if (m) printf "%.1f", m }' "$STAGE/display_host.txt" 2>/dev/null)
+case "$R" in
+    30.0|[3-9][0-9].0|1[01][0-9].0|120.0) GUEST_REFRESH=$R ;;
+esac
+echo "Guest refresh-rate policy: ${GUEST_REFRESH} Hz (One UI physical modes)"
 # ONEOS_GUEST_POSTURE=live: the fold line's posture follows the guest's hinge
 # state instead of always flat.
 # Live by default with the hinge sets of pull request #1 (Fold8) and the Fold8 Ultra's.
@@ -2382,6 +2421,19 @@ esac
 for h in $HINGE_SET; do
     grep -q "^  \"set\": \"$h\",\$" "$STAGE/.oneos_stage" && POSTURE_DEFAULT=live
 done
+# The contributor Lineage SystemUI uses Pixel's native half-fold posture.
+# The baseline donor leaves Stable's posture policy alone.
+if [ "${ONEOS_PROFILE:-}" = f8 ] && grep -q '^  "image": "lineage24-infiniti",$' "$STAGE/.oneos_stage" &&
+   [ -f "$STAGE/Fold8LineageSystemUI.apk" ] &&
+   [ "$(sha256sum "$STAGE/Fold8LineageSystemUI.apk" | cut -d' ' -f1)" != aa22961855b1f8a9d3dbbbc643922f9b216f6d411313e12eb8b70086287b84c3 ]; then
+    POSTURE_DEFAULT=live
+fi
+# Infinity-X's contributor SystemUI uses the same native hinge posture; Stable keeps its original default.
+if [ "${ONEOS_PROFILE:-}" = f8 ] && grep -q '^  "image": "infinityx41-findx9u",$' "$STAGE/.oneos_stage" &&
+   [ -f "$STAGE/Fold8InfinitySystemUI.apk" ] &&
+   [ "$(sha256sum "$STAGE/Fold8InfinitySystemUI.apk" | cut -d' ' -f1)" != 6a99684e831f9635738189d39667debe0f8b798012fa4eb622a7cb87ad9b1ddf ]; then
+    POSTURE_DEFAULT=live
+fi
 GUEST_POSTURE_LIVE=0; [ "${ONEOS_GUEST_POSTURE:-$POSTURE_DEFAULT}" = live ] && GUEST_POSTURE_LIVE=1
 GUEST_FOLD_FORM=0; [ "${ONEOS_GUEST_FORM:-fold}" = fold ] && GUEST_FOLD_FORM=1
 # An OxygenOS image (its stable display size resource, see "stable display size"
@@ -2483,13 +2535,13 @@ while true; do
                 echo "[UI Activator] screen timeout: was stay_on_while_plugged_in=\${SOP:-?} screen_off_timeout=\${SOT:-?}; the forced values reset once (0, 60000)"
             fi
             # ColorOS's touch idle (OTI) pushes SurfaceFlinger to 240/60 Hz over the
-            # 120 Hz policy on this panel (run 29); also staged off by guest_prepare.sh.
-            gsh '
+            # refresh policy on this panel (run 29); also staged off by guest_prepare.sh.
+            gsh "
                 /system/bin/settings put system haptic_feedback_enabled 1
-                /system/bin/settings put system peak_refresh_rate 120.0
-                /system/bin/settings put system min_refresh_rate 120.0
+                /system/bin/settings put system peak_refresh_rate $GUEST_REFRESH
+                /system/bin/settings put system min_refresh_rate $GUEST_REFRESH
                 /system/bin/dumpsys oplus_vrr_service oti false >/dev/null 2>&1 && echo oti_off
-            ' 2>/dev/null | grep -q '^oti_off$' && echo '[UI Activator] refresh rate: ColorOS touch idle off'
+            " 2>/dev/null | grep -q '^oti_off$' && echo '[UI Activator] refresh rate: ColorOS touch idle off'
             # Samsung Camera's working folder (guest_prepare.sh makes it when the
             # camera already has a uid): on a phone's first session with the
             # camera the package is only installed by this boot, the folder was
@@ -3225,13 +3277,32 @@ while true; do
             # The guest's updaters could hand an OTA to the phone's own
             # update_engine (already stopped on host): disable them asynchronously
             # right after HOME so they do not delay brightness or Home activated!.
+            # ColorOS's updater stays enabled for its About phone banner (0.5.20)
+            # with network blocked via chain3; if chain3 fails, disable it as before.
             (
-                gsh '
-                    for p in com.oplus.ota com.google.android.factoryota com.infinity.updater; do
-                        /system/bin/pm disable-user --user 0 "$p" >/dev/null 2>&1 || true
-                    done
-                '
-            ) </dev/null >/dev/null 2>&1 &
+                if [ $GUEST_OPLUS = 1 ]; then
+                    gsh '
+                        for p in com.google.android.factoryota com.infinity.updater; do
+                            /system/bin/pm disable-user --user 0 "$p" >/dev/null 2>&1 || true
+                        done
+                        /system/bin/cmd connectivity set-chain3-enabled true >/dev/null 2>&1
+                        /system/bin/cmd connectivity set-package-networking-enabled false com.oplus.ota >/dev/null 2>&1
+                        if /system/bin/cmd connectivity get-package-networking-enabled com.oplus.ota 2>/dev/null | grep -q ":deny"; then
+                            /system/bin/pm enable --user 0 com.oplus.ota >/dev/null 2>&1
+                            echo "[UI Activator] ColorOS updater: enabled, network blocked (About phone banner kept)"
+                        else
+                            /system/bin/pm disable-user --user 0 com.oplus.ota >/dev/null 2>&1
+                            echo "[UI Activator] ColorOS updater: network block not available, disabled"
+                        fi
+                    '
+                else
+                    gsh '
+                        for p in com.oplus.ota com.google.android.factoryota com.infinity.updater; do
+                            /system/bin/pm disable-user --user 0 "$p" >/dev/null 2>&1 || true
+                        done
+                    '
+                fi
+            ) </dev/null >>/data/local/tmp/ui_activator.log 2>&1 &
             # Cover panel. With the fold layout (guest_start.sh wrote
             # data/oneos_fold_mode) ColorOS's DisplayManager switches the panels
             # on the lid switch and keeps the cover off while unfolded: only log
@@ -3974,7 +4045,7 @@ while true; do
 
             # Pixel Fold8 / Fold8 Ultra: start the system-UID sensor reader in the guest namespace
             # (fold8_pixel.sh prepare made runtime.sh only for those two sets).
-            if { [ "${ONEOS_PROFILE:-}" = f8 ] || [ "${ONEOS_PROFILE:-}" = f8u ]; } && grep -q '"set": "pixel-f8u\\{0,1\\}",' "$STAGE/.oneos_stage" && [ -f "$STAGE/data/oneos_pixel_hinge/runtime.sh" ]; then
+            if { [ "${ONEOS_PROFILE:-}" = f8 ] || [ "${ONEOS_PROFILE:-}" = f8u ]; } && grep -q '"set": "\(pixel-f8u\{0,1\}\|lineage\|infinityx\)",' "$STAGE/.oneos_stage" && [ -f "$STAGE/data/oneos_pixel_hinge/runtime.sh" ]; then
                 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/sh /data/oneos_pixel_hinge/runtime.sh runtime >"$STAGE/pixel_hinge_runtime.log" 2>&1 || echo '[UI Activator] Pixel hinge relay unavailable; native sensor fallback active'
             fi
 
@@ -4049,8 +4120,9 @@ while true; do
         fi
     fi
 done
-# This boot's pass is done: wait for a soft reboot of the guest, or end with
-# the session (the return's first step, or its namespace record gone).
+# This boot's pass is done: wait for a soft reboot of the guest, or for its
+# system_server to be replaced without one (guest framework crash/watchdog
+# restart: softreboot.gen does not change, so check PID too).
 while :; do
     _srg=''
     [ -r $STAGE/tmp/softreboot.gen ] && IFS= read -r _srg < $STAGE/tmp/softreboot.gen 2>/dev/null
@@ -4058,9 +4130,24 @@ while :; do
     sleep 2
     [ -f $STAGE/data/oneos_rec_stop ] && exit 0
     [ -f $STAGE/guest_mntns ] || exit 0
+    if [ ! -r "/proc/\$PID/comm" ]; then
+        NPID=\$(pidof system_server 2>/dev/null)
+        NPID=\${NPID%% *}
+        if [ -n "\$NPID" ] && [ "\$NPID" != "\$PID" ]; then
+            echo "[UI Activator] guest system_server changed \$PID -> \$NPID without a soft-reboot generation; starting another pass"
+            break
+        fi
+    fi
 done
-GEN=\$_srg; PASS=\$((PASS + 1))
-echo "[UI Activator] soft reboot of the guest (generation \$GEN): pass \$PASS, waiting for its new boot"
+NGEN=''
+[ -r $STAGE/tmp/softreboot.gen ] && IFS= read -r NGEN < $STAGE/tmp/softreboot.gen 2>/dev/null
+PASS=\$((PASS + 1))
+if [ "\$NGEN" != "\$GEN" ]; then
+    GEN=\$NGEN
+    echo "[UI Activator] soft reboot of the guest (generation \$GEN): pass \$PASS, waiting for its new boot"
+else
+    echo "[UI Activator] guest framework restart: pass \$PASS, waiting for its new boot"
+fi
 done
 UIACT
 chmod 700 "$STAGE/tmp/ui_activator.sh"
@@ -4662,6 +4749,12 @@ if [ "$RETURN_MAX" -gt 0 ]; then
             # boot at run 44's rates, 192 MiB at most) get a second name in
             # $LOGS/head: hard links, no copy, and no space used until the
             # rotation deletes their first name. This session's capture only.
+            # The capture ended early (0.5.20, see where it starts): started again, appending to its file.
+            if [ $LOGCAT_HEAD = 1 ] && [ -n \"\$dname\" ] && [ -f $STAGE/logcat_capture.sh ] && ! pgrep -f \"^logcat .*$LOGS/boot.log\" >/dev/null 2>&1; then
+                mkdir -p $LOGS
+                $BB setsid sh $STAGE/logcat_capture.sh </dev/null >/dev/null 2>&1 &
+                echo \"\$(date) logcat capture had ended: started again\"
+            fi
             if [ \"\$dname\" = 90 ] && [ $LOGCAT_HEAD = 1 ]; then
                 rm -rf $LOGS/head && mkdir -p $LOGS/head
                 for f in $LOGS/boot.log $LOGS/boot.log.0[1-5]; do
