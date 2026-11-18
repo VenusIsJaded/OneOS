@@ -41,13 +41,14 @@ host_part_mounts > "$STAGE/host_part_mounts.before"
 for need in app:app user:user user_de:user_de data:user/0 media:media; do
     case " $BRIDGES " in *" $need "*) ;; *) echo "ERROR: bridges.sh lacks $need; not starting the guest"; exit 4 ;; esac
 done
-for pair in $BRIDGES; do
-    h=${pair%%:*}
-    if awk -v p="/data/$h" '$5 == p' /proc/self/mountinfo | grep -q .; then
-        echo "ERROR: /data/$h is still bridged from an earlier session; return to One UI (reboot) first"
-        exit 4
-    fi
-done
+_active_bridge=$(awk -v list="$BRIDGES" '
+    BEGIN { n = split(list, a, " "); for (i = 1; i <= n; i++) { split(a[i], kv, ":"); want["/data/" kv[1]] = 1 } }
+    $5 in want { print $5; exit }
+' /proc/self/mountinfo)
+if [ -n "$_active_bridge" ]; then
+    echo "ERROR: $_active_bridge is still bridged from an earlier session; return to One UI (reboot) first"
+    exit 4
+fi
 # OneOS: no symlink may sit on any staged /data path the host root below writes
 # through, binds or relabels. A guest with root (a ColorOS root daemon, or an
 # app that got root) could, between sessions, point e.g. $STAGE/data/misc at
@@ -201,7 +202,7 @@ echo "=== 1. $(date +%T) Ensuring Watchdog Feeder is Active ==="
 # /dev/softdog (a link to /dev/watchdog1), and its sysfs has no identity or
 # state to find it by. A /dev/softdog that exists is kicked too.
 pkill -f 'echo -n 1 > /dev/watchdog' 2>/dev/null
-if ! ps -ef | grep -v grep | grep -q "oneos_wdog_feeder.sh"; then
+if ! pgrep -f "oneos_wdog_feeder.sh" >/dev/null 2>&1; then
     echo "Starting watchdog feeder..."
     cat > "$STAGE/oneos_wdog_feeder.sh" <<'WDOG'
 L=/data/local/tmp/oneos/watchdog_feeder.log
@@ -656,13 +657,22 @@ fi
 # and no AIDL radio (android.hardware.radio.sim).
 HWSM=0
 HWSM_WHY=""
-"$BB" grep -rqs 'android.hardware.graphics.composer3' /vendor/etc/vintf/ || HWSM_WHY="display composer"
-"$BB" grep -rqs 'android.hardware.audio.core' /vendor/etc/vintf/ || HWSM_WHY="${HWSM_WHY:+$HWSM_WHY and }audio HAL"
 VM_AIDL=no
 VM_HIDL=no
-"$BB" grep -rqs 'android.hardware.radio.sim' /vendor/etc/vintf/ && VM_AIDL=yes
-"$BB" grep -rqsE '<name>android\.hardware\.radio</name>' /vendor/etc/vintf/ && VM_HIDL=yes
-[ $VM_AIDL = no ] && [ $VM_HIDL = yes ] && HWSM_WHY="${HWSM_WHY:+$HWSM_WHY and }radio HAL"
+eval "$("$BB" find /vendor/etc/vintf/ -type f 2>/dev/null | "$BB" xargs -r "$BB" awk '
+    index($0, "android.hardware.graphics.composer3") { c3 = 1 }
+    index($0, "android.hardware.audio.core") { ac = 1 }
+    index($0, "android.hardware.radio.sim") { ra = 1 }
+    /<name>android\.hardware\.radio<\/name>/ { rh = 1 }
+    END {
+        w = ""
+        if (!c3) w = "display composer"
+        if (!ac) w = (w ? w " and " : "") "audio HAL"
+        printf "VM_AIDL=%s\nVM_HIDL=%s\n", (ra ? "yes" : "no"), (rh ? "yes" : "no")
+        if (!ra && rh) w = (w ? w " and " : "") "radio HAL"
+        printf "HWSM_WHY=\"%s\"\n", w
+    }
+')"
 # The image has no hwservicemanager of its own and One UI runs one.
 hwsm_fits() {
     [ -d "$GUEST_SYSTEM_EXT/bin" ] &&
@@ -1000,9 +1010,20 @@ samcam_jni_here() { # <lib>: One UI has it, libs.txt does not name it, the image
     ! grep -q "^$1 " "$SAMCAM_SRC/libs.txt" && [ -e "/system/lib64/$1" ] &&
         [ ! -s "$ROOTFS/system/lib64/$1" ] && [ ! -L "$ROOTFS/system/lib64/$1" ]
 }
+samcam_jni_candidates() {
+    "$BB" awk -v jni="$SAMCAM_JNI" '
+        NR == FNR { listed[$1] = 1; next }
+        END {
+            n = split(jni, a, " ")
+            for (i = 1; i <= n; i++) if (a[i] != "" && !(a[i] in listed)) print a[i]
+        }
+    ' "$SAMCAM_SRC/libs.txt"
+}
 samcam_libs() {
     awk '{ print $1 }' "$SAMCAM_SRC/libs.txt"
-    for lib in $SAMCAM_JNI; do samcam_jni_here "$lib" && echo "$lib"; done
+    for lib in $(samcam_jni_candidates); do
+        [ -e "/system/lib64/$lib" ] && [ ! -s "$ROOTFS/system/lib64/$lib" ] && [ ! -L "$ROOTFS/system/lib64/$lib" ] && echo "$lib"
+    done
 }
 samcam_files() {
     # "<sys|sysext> <path under the guest's /system or system_ext> <source>".
@@ -1046,8 +1067,8 @@ samcam_files() {
             *) [ -e "/system/lib64/$lib" ] && echo "sys lib64/$lib /system/lib64/$lib" ;;
         esac
     done < "$SAMCAM_SRC/libs.txt"
-    for lib in $SAMCAM_JNI; do
-        samcam_jni_here "$lib" && echo "sys lib64/$lib /system/lib64/$lib"
+    for lib in $(samcam_jni_candidates); do
+        [ -e "/system/lib64/$lib" ] && [ ! -s "$ROOTFS/system/lib64/$lib" ] && [ ! -L "$ROOTFS/system/lib64/$lib" ] && echo "sys lib64/$lib /system/lib64/$lib"
     done
     echo "sys etc/floating_feature.xml /system/etc/floating_feature.xml"
     for f in "$SAMCAM_SRC"/public.libraries-*.txt; do
@@ -4735,7 +4756,7 @@ if [ -s "$PL" ] && [ ! -L "$PL" ] && [ -d "$STAGE/data/app" ] && [ ! -L "$STAGE/
              END { exit bad > 0 }' "$PX" > "$CPS" 2>/dev/null && recs=$(wc -l < "$CPS")
         [ "$recs" -ge "$(wc -l < "$PL")" ] || recs=0
     fi
-    in_use() { [ "$recs" -gt 0 ] && awk -v c="$1" '$2 == c { f = 1 } END { exit !f }' "$CPS"; }
+    CANDS="$STAGE/guest_app_cands.txt"; rm -f "$CANDS"
     gone=""; old=0; pre=0; stg=0
     for d in "$STAGE"/data/app/~~*/* "$STAGE"/data/app/*; do
         [ -d "$d" ] && [ ! -L "$d" ] || continue
@@ -4749,30 +4770,62 @@ if [ -s "$PL" ] && [ ! -L "$PL" ] && [ -d "$STAGE/data/app" ] && [ ! -L "$STAGE/
                     rm -rf "${d:?}" && stg=$((stg + 1))
                 continue ;;
         esac
-        ls "$d"/*.apk >/dev/null 2>&1 || continue
-        in_use "$g" && continue
-        # <package>-<random>: a package name has a dot and no "-".
-        pkg=""
-        case "$n" in *-*) pkg=${n%%-*} ;; esac
-        case "$pkg" in *[!A-Za-z0-9_.]*) pkg="" ;; *.*) ;; *) pkg="" ;; esac
-        if [ -n "$pkg" ] && ! awk -v k="$pkg" '$1 == k { f = 1 } END { exit !f }' "$PL"; then
-            rm -rf "${d:?}" && gone="$gone $pkg"
-        elif [ "$recs" -gt 0 ] && [ -n "$pkg" ]; then
-            # Installed, from another folder (or from the image): an older version's folder.
-            cur=$(awk -v k="$pkg" '$1 == k { print $2; exit }' "$CPS")
-            case "$cur" in
-                "") continue ;;
-                /data/app/*) [ -d "$STAGE$cur" ] && [ ! -L "$STAGE$cur" ] || continue ;;
-            esac
-            rm -rf "${d:?}" && old=$((old + 1))
-        elif [ "$recs" -gt 0 ]; then
-            rm -rf "${d:?}" && pre=$((pre + 1))
-        else
-            continue
-        fi
-        [ "$p" != "$STAGE/data/app" ] && rmdir "${p:?}" 2>/dev/null
+        set -- "$d"/*.apk
+        [ -e "$1" ] || continue
+        printf '%s\t%s\t%s\t%s\n' "$d" "$p" "$g" "$n" >> "$CANDS"
     done
-    rm -f "$CPS"
+    if [ -s "$CANDS" ]; then
+        ACTIONS="$STAGE/guest_app_actions.txt"
+        if [ "$recs" -gt 0 ]; then
+            awk -F '\t' -v recs="$recs" '
+                FILENAME == ARGV[1] { split($0, f, " "); listed[f[1]] = 1; next }
+                FILENAME == ARGV[2] { split($0, f, " "); used[f[2]] = 1; cur[f[1]] = f[2]; next }
+                {
+                    d = $1; p = $2; g = $3; n = $4
+                    if (g in used) next
+                    pkg = ""
+                    idx = index(n, "-")
+                    if (idx > 1) {
+                        cand = substr(n, 1, idx - 1)
+                        if (cand ~ /^[A-Za-z0-9_.]+$/ && index(cand, ".") > 0) pkg = cand
+                    }
+                    if (pkg != "" && !(pkg in listed)) print "gone\t" d "\t" p "\t" pkg
+                    else if (recs > 0 && pkg != "") print "old\t" d "\t" p "\t" cur[pkg]
+                    else if (recs > 0) print "pre\t" d "\t" p "\t-"
+                }
+            ' "$PL" "$CPS" "$CANDS" > "$ACTIONS"
+        else
+            awk -F '\t' '
+                FILENAME == ARGV[1] { split($0, f, " "); listed[f[1]] = 1; next }
+                {
+                    d = $1; p = $2; n = $4
+                    pkg = ""
+                    idx = index(n, "-")
+                    if (idx > 1) {
+                        cand = substr(n, 1, idx - 1)
+                        if (cand ~ /^[A-Za-z0-9_.]+$/ && index(cand, ".") > 0) pkg = cand
+                    }
+                    if (pkg != "" && !(pkg in listed)) print "gone\t" d "\t" p "\t" pkg
+                }
+            ' "$PL" "$CANDS" > "$ACTIONS"
+        fi
+        while IFS='	' read -r act d p extra; do
+            case "$act" in
+                gone) rm -rf "${d:?}" && gone="$gone $extra" ;;
+                old)
+                    case "$extra" in
+                        "") continue ;;
+                        /data/app/*) [ -d "$STAGE$extra" ] && [ ! -L "$STAGE$extra" ] || continue ;;
+                    esac
+                    rm -rf "${d:?}" && old=$((old + 1)) ;;
+                pre) rm -rf "${d:?}" && pre=$((pre + 1)) ;;
+                *) continue ;;
+            esac
+            [ "$p" != "$STAGE/data/app" ] && rmdir "${p:?}" 2>/dev/null
+        done < "$ACTIONS"
+        rm -f "$ACTIONS"
+    fi
+    rm -f "$CPS" "$CANDS"
     [ -z "$gone" ] || echo "Uninstalled apps' code folders removed:$gone"
     [ "$old" = 0 ] || echo "Code folders of older versions of installed apps removed: $old"
     [ "$pre" = 0 ] || echo "Copies of preinstalled apps that no package uses removed: $pre"
@@ -5201,14 +5254,24 @@ done
 $BB chown -h 1023:1023 "$STAGE/data/media" "$STAGE/data/media/0" "$STAGE/data/media/obb" "$STAGE/data/media/0/Android" 2>/dev/null || true
 for md in "$STAGE/data/media/0"/* "$STAGE/data/media/0"/.[!.]*; do
     [ -e "$md" ] || [ -L "$md" ] || continue
-    case "${md##*/}" in Android) continue ;; esac
+    case "${md##*/}" in Android|.oneos_media_perms|.oneos_media_label) continue ;; esac
+    if [ -f "$STAGE/data/media/.oneos_media_perms" ] &&
+       [ "$(stat -c '%u:%g' "$md" 2>/dev/null)" = "1023:1023" ]; then
+        continue
+    fi
     $BB chown -h -R 1023:1023 "$md" 2>/dev/null || true
 done
 for ak in data media obb; do
     [ -d "$STAGE/data/media/0/Android/$ak" ] && $BB chown -h 1023:1078 "$STAGE/data/media/0/Android/$ak" 2>/dev/null || true
 done
 $BB chmod 0770 "$STAGE/data/media" "$STAGE/data/media/0" 2>/dev/null || true
-$BB chcon -h -R u:object_r:media_rw_data_file:s0 "$STAGE/data/media" 2>/dev/null || true
+if [ ! -f "$STAGE/data/media/.oneos_media_label" ] ||
+   [ "$(stat -c %C "$STAGE/data/media" 2>/dev/null)" != "u:object_r:media_rw_data_file:s0" ]; then
+    $BB chcon -h -R u:object_r:media_rw_data_file:s0 "$STAGE/data/media" 2>/dev/null || true
+    : > "$STAGE/data/media/.oneos_media_label" 2>/dev/null || true
+else
+    $BB chcon -h u:object_r:media_rw_data_file:s0 "$STAGE/data/media" "$STAGE/data/media/0" "$STAGE/data/media/obb" "$STAGE/data/media/0/Android" 2>/dev/null || true
+fi
 # data/apex (host /data/apex) and data/adb (host /data/adb) are left alone: they
 # are the host's own directories bind-mounted in, already labeled correctly, and
 # chcon-ing a bind mount would relabel the host's copy.
@@ -5558,17 +5621,32 @@ rm -f "$STAGE/share_holder.pid"
 for pair in $BRIDGES; do
     h=${pair%%:*}; s=${pair#*:}
     mkdir -p "$STAGE/data/$s" 2>/dev/null || true
-    if [ -d "/data/$h" ] && ! mount | grep -q " /data/$h "; then
+    if [ -d "/data/$h" ] && ! awk -v p="/data/$h" '$5 == p { f = 1; exit } END { exit !f }' /proc/self/mountinfo; then
         $BB mount --bind "$STAGE/data/$s" "/data/$h" 2>/dev/null && echo "Bridged /data/$h -> $STAGE/data/$s"
     fi
 done
 # Every one of them must now be the staged copy, or the guest is not started.
-unbridged=""
+_bpaths=""
 for pair in $BRIDGES; do
     h=${pair%%:*}; s=${pair#*:}
     [ -e "/data/$h" ] || continue
-    [ "$(stat -c %d:%i "/data/$h" 2>/dev/null)" = "$(stat -c %d:%i "$STAGE/data/$s" 2>/dev/null)" ] || unbridged="$unbridged /data/$h"
+    _bpaths="$_bpaths /data/$h $STAGE/data/$s"
 done
+unbridged=""
+if [ -n "$_bpaths" ]; then
+    # shellcheck disable=SC2086
+    unbridged=$(stat -c '%d:%i %n' $_bpaths 2>/dev/null | awk -v list="$BRIDGES" -v stg="$STAGE/data/" '
+        { id[$2] = $1 }
+        END {
+            n = split(list, a, " "); out = ""
+            for (i = 1; i <= n; i++) {
+                split(a[i], kv, ":"); hp = "/data/" kv[1]; sp = stg kv[2]
+                if ((hp in id) && id[hp] != id[sp]) out = out " " hp
+            }
+            print out
+        }
+    ')
+fi
 if [ -n "$unbridged" ]; then
     echo "ERROR: not bridged to the staged copy:$unbridged; not starting the guest"
     exit 3
@@ -5802,18 +5880,18 @@ echo "[fix_app_dirs] created $created data dirs, $profile_dirs profile dirs"
 # whose top-level owner is wrong are touched, so later boots stay cheap.
 realigned=0
 if [ -f /data/system/packages.list ]; then
-    while read -r pkg auid rest; do
-        case "$auid" in ''|*[!0-9]*) continue ;; esac
-        for base in /data/user/0 /data/user_de/0; do
-            d="$base/$pkg"
-            [ -d "$d" ] || continue
-            cur=$(stat -c %u "$d" 2>/dev/null)
-            [ "$cur" = "$auid" ] && continue
-            chown -h -R "$auid:$auid" "$d" 2>/dev/null
-            chmod -R go-w "$d" 2>/dev/null
-            realigned=$((realigned + 1))
-        done
-    done < /data/system/packages.list
+    find /data/user/0 /data/user_de/0 -mindepth 1 -maxdepth 1 -type d \
+        -exec stat -c '%u %n' {} + 2>/dev/null | awk '
+        NR == FNR { if ($2 ~ /^[0-9]+$/) auid[$1] = $2; next }
+        { n = $2; sub(/.*\//, "", n); if ((n in auid) && $1 != auid[n]) print auid[n], $2 }
+    ' /data/system/packages.list - > /data/local/tmp/.fix_realign.$$
+    while read -r auid d; do
+        [ -n "$auid" ] && [ -d "$d" ] || continue
+        chown -h -R "$auid:$auid" "$d" 2>/dev/null
+        chmod -R go-w "$d" 2>/dev/null
+        realigned=$((realigned + 1))
+    done < /data/local/tmp/.fix_realign.$$
+    rm -f /data/local/tmp/.fix_realign.$$
 fi
 echo "[fix_app_dirs] realigned $realigned data dirs to their app uid"
 
@@ -5892,42 +5970,38 @@ cat > "$STAGE/data/local/tmp/ensure_app_storage.sh" <<'ENSUREAPP'
 created=0
 [ -f /data/system/packages.list ] || exit 0
 realigned=0
-while read -r pkg auid rest; do
-    case "$auid" in ''|*[!0-9]*) continue ;; esac
-    for d in "/data/user/0/$pkg:0771" "/data/user_de/0/$pkg:0700"; do
-        p=${d%:*}; mode=${d##*:}
-        if [ -d "$p" ]; then
-            # Reinstalling a package can assign a NEW uid while the old data
-            # dirs survive (uninstall has no installd to delete them), and the
-            # app then fails with "SQLiteCantOpenDatabaseException: unable to
-            # open database file" because it cannot write its own directory.
-            cur=$(stat -c %u "$p" 2>/dev/null)
-            if [ -n "$cur" ] && [ "$cur" != "$auid" ]; then
-                chown -h -R "$auid:$auid" "$p" 2>/dev/null && realigned=$((realigned + 1))
-            fi
-            continue
-        fi
-        mkdir -p "$p" 2>/dev/null || continue
-        chown "$auid:$auid" "$p" 2>/dev/null
-        chmod "$mode" "$p" 2>/dev/null
-        created=$((created + 1))
-    done
-    # External storage: owner is the app, group is ext_data_rw (1078).
-    for kind in data media obb; do
-        p="/data/media/0/Android/$kind/$pkg"
-        if [ -d "$p" ]; then
-            cur=$(stat -c %u "$p" 2>/dev/null)
-            if [ -n "$cur" ] && [ "$cur" != "$auid" ]; then
-                chown -h -R "$auid:1078" "$p" 2>/dev/null && realigned=$((realigned + 1))
-            fi
-            continue
-        fi
-        mkdir -p "$p" 2>/dev/null || continue
-        chown "$auid:1078" "$p" 2>/dev/null
-        chmod 0770 "$p" 2>/dev/null
-        created=$((created + 1))
-    done
-done < /data/system/packages.list
+mkdir -p /data/user/0 /data/user_de/0 /data/media/0/Android/data /data/media/0/Android/media /data/media/0/Android/obb 2>/dev/null
+find /data/user/0 /data/user_de/0 /data/media/0/Android/data /data/media/0/Android/media /data/media/0/Android/obb \
+    -mindepth 1 -maxdepth 1 -type d -exec stat -c '%u %n' {} + 2>/dev/null | awk '
+    NR == FNR { have[$2] = $1; next }
+    $2 ~ /^[0-9]+$/ && $1 ~ /^[A-Za-z0-9._:-]+$/ {
+        pkg = $1; u = $2
+        p1 = "/data/user/0/" pkg
+        if (!(p1 in have)) print "mk\t" p1 "\t" u ":" u "\t0771"
+        else if (have[p1] != u) print "re\t" p1 "\t" u ":" u
+        p2 = "/data/user_de/0/" pkg
+        if (!(p2 in have)) print "mk\t" p2 "\t" u ":" u "\t0700"
+        else if (have[p2] != u) print "re\t" p2 "\t" u ":" u
+        for (i = 1; i <= 3; i++) {
+            k = (i == 1 ? "data" : (i == 2 ? "media" : "obb"))
+            pe = "/data/media/0/Android/" k "/" pkg
+            if (!(pe in have)) print "mk\t" pe "\t" u ":1078\t0770"
+            else if (have[pe] != u) print "re\t" pe "\t" u ":1078"
+        }
+    }
+' - /data/system/packages.list > /data/local/tmp/.ensure_app.$$
+while IFS='	' read -r act p own mode; do
+    case "$act" in
+        mk)
+            mkdir -p "$p" 2>/dev/null || continue
+            chown "$own" "$p" 2>/dev/null
+            chmod "$mode" "$p" 2>/dev/null
+            created=$((created + 1)) ;;
+        re)
+            chown -h -R "$own" "$p" 2>/dev/null && realigned=$((realigned + 1)) ;;
+    esac
+done < /data/local/tmp/.ensure_app.$$
+rm -f /data/local/tmp/.ensure_app.$$
 
 # Shared storage skeleton. Without it MediaProvider cannot create
 # /storage/emulated/0/Pictures/Screenshots and taking a screenshot crashes
@@ -6160,11 +6234,11 @@ idle_ok() {
 pm list packages --show-versioncode 2>/dev/null | sed -n 's/^package:\([^ ]*\) versionCode:\([0-9]*\).*/\1 \2/p' > "$D/ver"
 [ -f "$D/attempted" ] || : > "$D/attempted"
 if [ $FULL = 1 ]; then
-    all=$(pm list packages 2>/dev/null | sed -n 's/^package://p')
-    total=$(printf '%s\n' "$all" | grep -c .)
+    awk '{ print $1 }' "$D/ver" > "$D/all.tmp"
+    [ -s "$D/all.tmp" ] || pm list packages 2>/dev/null | sed -n 's/^package://p' > "$D/all.tmp"
+    total=$(grep -c . "$D/all.tmp")
     { pm list packages -3 2>/dev/null | sed -n 's/^package://p'
       echo com.android.launcher; echo com.android.systemui; echo com.android.settings; echo com.android.phone; } > "$D/first.tmp"
-    printf '%s\n' "$all" > "$D/all.tmp"
     pri=$(grep -xFf "$D/all.tmp" "$D/first.tmp")
     rest=$(grep -vxFf "$D/first.tmp" "$D/all.tmp")
     rm -f "$D/first.tmp" "$D/all.tmp"
@@ -6182,10 +6256,15 @@ echo "$(date) compile ($MODE): $total apps, $npri first$([ $FULL = 0 ] && echo '
 : > "$D/results"
 [ $FULL = 1 ] && : > "$DATA/oneos_dexopt.log"
 rm -f "$D/stop"
+{ [ -n "$pri" ] && printf '%s\n' "$pri"; [ -n "$rest" ] && printf '%s\n' "$rest"; } | awk '
+    NR == FNR { ver[$1] = $2; next }
+    NF { print $1, ($1 in ver ? ver[$1] : 0) }
+' "$D/ver" - > "$D/plan"
 i=0
 st running -
 note "Optimizing apps for this system" "0 / $total · paced to keep the phone cool"
-for p in $pri $rest; do
+while read -r p pv; do
+    [ -n "$p" ] || continue
     i=$((i + 1))
     want_stop && halt
     if [ "$MODE" = auto ] && [ $i -gt $npri ]; then
@@ -6210,13 +6289,13 @@ for p in $pri $rest; do
     case "$out" in *Success*) r=ok ;; *) r=fail ;; esac
     echo "$p $r $el" >> "$D/results"
     echo "$p: $out" >> "$DATA/oneos_dexopt.log"
-    pv=$(awk -v p="$p" '$1 == p { print $2; exit }' "$D/ver")
     echo "$p ${pv:-0}" >> "$D/attempted"
     if [ "$MODE" = auto ]; then
         [ $el -gt 0 ] && [ $i -lt $total ] && sleep $el
         [ $((i % 5)) -eq 0 ] && note "Optimizing apps for this system" "$i / $total · paced to keep the phone cool"
     fi
-done
+done < "$D/plan"
+rm -f "$D/plan"
 [ -n "$key" ] && [ $FULL = 1 ] && echo "$key" > "$DATA/oneos_dexopt.done"
 st done -
 note "Apps optimized ✓" "All $total apps are compiled for this system."
@@ -7107,7 +7186,7 @@ if [ "${ONEOS_GUEST_KEEP_TELEMETRY:-0}" != 1 ]; then
             "$ROOTFS"/my_*/non_overlay/app/"$tname" "$ROOTFS"/my_*/non_overlay/priv-app/"$tname" \
             "$ROOTFS/mi_ext/product/app/$tname" "$ROOTFS/mi_ext/product/priv-app/$tname"; do
             [ -d "$d" ] && [ ! -L "$d" ] || continue
-            mount | grep -qF " on $d " && continue
+            awk -v p="$d" '$5 == p { f = 1; exit } END { exit !f }' /proc/self/mountinfo && continue
             if $BB mount -t tmpfs -o ro,size=4k,mode=755 tmpfs "$d" 2>/dev/null; then
                 hid_tel=$((hid_tel + 1))
                 echo "Hid guest telemetry/tracker ${d#"$ROOTFS"/} (ONEOS_GUEST_KEEP_TELEMETRY=1 keeps it)"

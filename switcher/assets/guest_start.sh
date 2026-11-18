@@ -130,10 +130,15 @@ chown -h 1023:1023 /data/media /data/media/0 /data/media/obb /data/media/0/Andro
 chmod 0777 /data/media /data/media/0 /data/media/obb /data/media/0/Android 2>/dev/null || true
 for md in /data/media/0/* /data/media/0/.[!.]*; do
     [ -e "$md" ] || [ -L "$md" ] || continue
-    case "${md##*/}" in Android) continue ;; esac
+    case "${md##*/}" in Android|.oneos_media_perms|.oneos_media_label) continue ;; esac
+    if [ -f /data/media/.oneos_media_perms ] &&
+       [ "$(stat -c '%u:%g:%a' "$md" 2>/dev/null)" = "1023:1023:777" ]; then
+        continue
+    fi
     chown -h -R 1023:1023 "$md" 2>/dev/null || true
     chmod -R 777 "$md" 2>/dev/null || true
 done
+: > /data/media/.oneos_media_perms 2>/dev/null || true
 for ak in data media obb; do
     [ -d "/data/media/0/Android/$ak" ] || continue
     chown -h 1023:1078 "/data/media/0/Android/$ak" 2>/dev/null || true
@@ -164,11 +169,20 @@ export TMPDIR=/data/local/tmp
 # ColorOS's own boot class path. Derive the guest's lists the way init does.
 DERIVE=/apex/com.android.sdkext/bin/derive_classpath
 CLASSPATH_FILE=/data/system/environ/classpath
+CLASSPATH_FAST=/data/system/environ/classpath.sh
 mkdir -p /data/system/environ
+rm -f "$CLASSPATH_FAST"
 if [ -x "$DERIVE" ] && "$DERIVE" "$CLASSPATH_FILE" > /data/derive_classpath.log 2>&1; then
     while read -r kw name value; do
-        [ "$kw" = "export" ] && [ -n "$name" ] && export "$name=$value"
+        [ "$kw" = "export" ] && [ -n "$name" ] || continue
+        export "$name=$value"
+        case "$name" in
+            *[!A-Za-z0-9_]*|[0-9]*) ;;
+            *) case "$value" in *"'"*|*'
+'*) ;; *) printf "export %s='%s'\n" "$name" "$value" >> "$CLASSPATH_FAST" ;; esac ;;
+        esac
     done < "$CLASSPATH_FILE"
+    chmod 644 "$CLASSPATH_FAST" 2>/dev/null || true
     echo "[Pivoted Root] Guest class paths loaded from $CLASSPATH_FILE:"
     sed 's/^/[Pivoted Root]   /' "$CLASSPATH_FILE" | cut -c1-400
 else
@@ -183,9 +197,13 @@ fi
 # leave /data/oneos_genv.sh for commands entered from the host side.
 cat > /data/oneos_genv.sh <<'GENV'
 #!/system/bin/sh
-[ -f /data/system/environ/classpath ] && while read -r kw name value; do
-    [ "$kw" = "export" ] && [ -n "$name" ] && export "$name=$value"
-done < /data/system/environ/classpath
+if [ -r /data/system/environ/classpath.sh ]; then
+    . /data/system/environ/classpath.sh
+elif [ -f /data/system/environ/classpath ]; then
+    while read -r kw name value; do
+        [ "$kw" = "export" ] && [ -n "$name" ] && export "$name=$value"
+    done < /data/system/environ/classpath
+fi
 exec "$@"
 GENV
 chmod 755 /data/oneos_genv.sh
@@ -2673,9 +2691,11 @@ if [ "$ONEOS_GUEST_ODREFRESH" = 1 ] && [ "$ONEOS_GUEST_JIT_ZYGOTE" != 1 ] && [ -
     # The jars the artifacts are made from (the boot class path's and the system
     # server's: size, time and path). Only for the case below where odrefresh
     # itself cannot say whether its artifacts are current.
-    JARS=$(for j in $(printf '%s:%s:%s' "${BOOTCLASSPATH:-}" "${SYSTEMSERVERCLASSPATH:-}" "${STANDALONE_SYSTEMSERVER_JARS:-}" | tr ':' ' '); do
-               ls -lnL "$j" 2>/dev/null | awk '{ print $5, $6, $7, $NF }'
-           done | cksum 2>/dev/null | awk '{ print $1 "-" $2 }')
+    _oifs=$IFS; IFS=:
+    # shellcheck disable=SC2086
+    set -- ${BOOTCLASSPATH:-} ${SYSTEMSERVERCLASSPATH:-} ${STANDALONE_SYSTEMSERVER_JARS:-}
+    IFS=$_oifs
+    JARS=$([ $# -gt 0 ] && stat -L -c '%s %Y %n' "$@" 2>/dev/null | cksum 2>/dev/null | awk '{ print $1 "-" $2 }')
     t0=$(date +%s)
     # Fast path across soft reboots and same-image switches: when a complete boot
     # image with matching GC collector (CCWANT) and matching jar checksums

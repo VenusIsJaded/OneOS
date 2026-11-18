@@ -8,8 +8,15 @@ oneos_boot_write() {
         rm -f "$oneos_boot_tmp"
     fi
 }
+oneos_boot_rf() {
+    _ob_v=""
+    [ -r "$1" ] && IFS= read -r _ob_v < "$1" 2>/dev/null
+    printf '%s' "$_ob_v"
+}
 oneos_boot_event() {
-    [ "$(cat "$ONEOS_BOOT_DIR/verbose" 2>/dev/null)" = 1 ] || return 0
+    _ob_verb=""
+    [ -r "$ONEOS_BOOT_DIR/verbose" ] && IFS= read -r _ob_verb < "$ONEOS_BOOT_DIR/verbose" 2>/dev/null
+    [ "$_ob_verb" = 1 ] || return 0
     oneos_boot_write status "$*"
     printf '%s %s\n' "$(date +%T)" "$*" >> "$ONEOS_BOOT_DIR/events.log"
 }
@@ -18,7 +25,7 @@ oneos_boot_ready() {
     [ -f "$ONEOS_BOOT_DIR/ready" ] || return 1
     read -r oneos_boot_pid oneos_boot_token < "$ONEOS_BOOT_DIR/ready" || return 1
     case "$oneos_boot_pid" in ''|*[!0-9]*) return 1;; esac
-    [ "$oneos_boot_token" = "$(cat "$ONEOS_BOOT_DIR/generation" 2>/dev/null)" ] || return 1
+    [ "$oneos_boot_token" = "$(oneos_boot_rf "$ONEOS_BOOT_DIR/generation")" ] || return 1
     tr '\0' ' ' 2>/dev/null < "/proc/$oneos_boot_pid/cmdline" | grep -q 'OneOSBootStatus' && kill -0 "$oneos_boot_pid" 2>/dev/null
 }
 # A cold renderer must post its first buffer before we choose a live handoff.
@@ -159,7 +166,12 @@ if [ "${1:-}" = supervise ]; then
     echo $$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null || true
     echo -500 > /proc/$$/oom_score_adj 2>/dev/null || true
     generation=$2
-    current() { [ "$(cat "$ONEOS_BOOT_DIR/generation" 2>/dev/null)" = "$generation" ] && [ ! -f "$ONEOS_BOOT_DIR/stop" ]; }
+    current() {
+        [ ! -f "$ONEOS_BOOT_DIR/stop" ] || return 1
+        _cur_gen=""
+        [ -r "$ONEOS_BOOT_DIR/generation" ] && IFS= read -r _cur_gen < "$ONEOS_BOOT_DIR/generation" 2>/dev/null
+        [ "$_cur_gen" = "$generation" ]
+    }
     fifo="$ONEOS_BOOT_DIR/events.$generation.pipe"
     mkfifo "$fifo" || exit 0
     # Keep both PIDs so a quiet log buffer cannot strand a producer on return.
@@ -174,8 +186,20 @@ if [ "${1:-}" = supervise ]; then
                 *boot_progress_pms_ready*) oneos_boot_event 'Package manager ready';;
                 *boot_progress_ams_ready*) oneos_boot_event 'Activity manager ready';;
                 *boot_progress_enable_screen*) [ "$new_framework" = 1 ] && { oneos_boot_event 'Display ready'; sleep 0.4; current && oneos_boot_stop; break; };;
-                *am_proc_start*) process=$(printf '%s\n' "$event" | sed 's/.*\[//' | cut -d, -f4 | cut -c1-100); [ -n "$process" ] && oneos_boot_event "Starting $process";;
-                *am_proc_died*) process=$(printf '%s\n' "$event" | sed 's/.*\[//' | cut -d, -f3 | cut -c1-100); [ -n "$process" ] && oneos_boot_event "Stopped $process";;
+                *am_proc_start*)
+                    _ob_v=""; [ -r "$ONEOS_BOOT_DIR/verbose" ] && IFS= read -r _ob_v < "$ONEOS_BOOT_DIR/verbose" 2>/dev/null
+                    if [ "$_ob_v" = 1 ]; then
+                        _rest=${event#*\[}; _rest=${_rest#*,}; _rest=${_rest#*,}; _rest=${_rest#*,}
+                        process=${_rest%%,*}; process=${process%%]*}; process=$(printf '%.100s' "$process")
+                        [ -n "$process" ] && oneos_boot_event "Starting $process"
+                    fi ;;
+                *am_proc_died*)
+                    _ob_v=""; [ -r "$ONEOS_BOOT_DIR/verbose" ] && IFS= read -r _ob_v < "$ONEOS_BOOT_DIR/verbose" 2>/dev/null
+                    if [ "$_ob_v" = 1 ]; then
+                        _rest=${event#*\[}; _rest=${_rest#*,}; _rest=${_rest#*,}
+                        process=${_rest%%,*}; process=${process%%]*}; process=$(printf '%.100s' "$process")
+                        [ -n "$process" ] && oneos_boot_event "Stopped $process"
+                    fi ;;
             esac
         done < "$fifo"
     ) &

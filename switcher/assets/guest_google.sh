@@ -129,13 +129,11 @@ copy_app() { # <package> <name>
     # empty manifest instead of passing an unmatched glob to sha256sum.
     (cd "$new" && sha256sum ./*.apk > apk.sha256 &&
         : > native.sha256 &&
-        for f in lib/*.so lib/arm64/*.so; do
-            [ -f "$f" ] || continue
-            sha256sum "$f" >> native.sha256 || exit 1
-        done) || { WHY='cannot write checksums'; return 1; }
+        set -- lib/*.so lib/arm64/*.so &&
+        if [ -f "$1" ]; then sha256sum "$@" > native.sha256; fi) || { WHY='cannot write checksums'; return 1; }
     cp "$CACHE/.$name.stat" "$new/source.stat"
-    chown -R 0:0 "$new"; find "$new" -type d -exec chmod 755 {} \;
-    find "$new" -type f -exec chmod 644 {} \;
+    chown -R 0:0 "$new"; find "$new" -type d -exec chmod 755 {} +
+    find "$new" -type f -exec chmod 644 {} +
     # Only our own binary copy, replaced; no guest data.
     rm -rf "$dir"
     mv "$new" "$dir" && verify "$dir" || { WHY="the new copy of $name does not verify"; return 1; }
@@ -229,7 +227,7 @@ GMSPERM
     n=$((n + 1))
     (cd "$new" && find . -type f -name '*.xml' -exec sha256sum {} + > config.sha256) || { WHY="cannot write checksums"; return 1; }
     cp "$CACHE/.etc.stat" "$new/source.stat"
-    chown -R 0:0 "$new"; find "$new" -type d -exec chmod 755 {} \;; find "$new" -type f -exec chmod 644 {} \;
+    chown -R 0:0 "$new"; find "$new" -type d -exec chmod 755 {} +; find "$new" -type f -exec chmod 644 {} +
     rm -rf "$dir"; mv "$new" "$dir" || { WHY="cannot keep the config copy"; return 1; }
     say "Google permission files: $n copied from One UI"
 }
