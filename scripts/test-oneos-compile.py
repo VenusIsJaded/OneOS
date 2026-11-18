@@ -29,6 +29,7 @@ pk() { if [ -f "$ROOTD/pkgs" ]; then cat "$ROOTD/pkgs"; else printf 'com.sys.x\\
 case "$3" in
   -3) printf 'package:com.user.a\\npackage:com.user.b\\n' ;;
   --show-versioncode)
+    [ -n "$NOVC" ] && exit 1
     pk | while read -r n; do
       v=$(awk -v p="$n" '$1 == p { print $2 }' "$ROOTD/vers" 2>/dev/null); echo "package:$n installer=x versionCode:${v:-1}" | sed 's/ installer=x//'
     done ;;
@@ -41,6 +42,15 @@ CMD = """#!/bin/sh
 echo "$5" >> "$ROOTD/order"
 [ -n "$HOOK" ] && sh -c "$HOOK" "$5"
 if [ "$5" = "$FAILPKG" ]; then echo Failure; else echo Success; fi
+"""
+# timeout [-k N] SECS cmd...: TMOFAIL=<pkg> makes that package's compile time out (124), the rest run
+TIMEOUT = """#!/bin/sh
+echo "$*" >> "$ROOTD/timeouts"
+[ "$1" = -k ] && shift 2
+shift
+for last; do :; done
+[ -n "$TMOFAIL" ] && [ "$last" = "$TMOFAIL" ] && exit 124
+exec "$@"
 """
 # sleep: record, and let a test change the world while "waiting"
 SLEEP = """#!/bin/sh
@@ -58,7 +68,7 @@ class Compile(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.r, True)
         for d in ("data", "bin", "fw", "sys/class/power_supply/battery", "sys/class/drm/card0-DSI-1"):
             os.makedirs(os.path.join(self.r, d))
-        for name, body in (("pm", PM), ("cmd", CMD), ("sleep", SLEEP)):
+        for name, body in (("pm", PM), ("cmd", CMD), ("sleep", SLEEP), ("timeout", TIMEOUT)):
             p = os.path.join(self.r, "bin", name)
             open(p, "w").write(body)
             os.chmod(p, os.stat(p).st_mode | stat.S_IXUSR)
@@ -234,6 +244,116 @@ class Compile(unittest.TestCase):
         os.remove(self.p("order"))
         self.run_worker("auto")
         self.assertEqual(self.order(), [])
+
+    # ---- audit fixes (2026-11-18) -------------------------------------------------------------------------
+
+    def start_of(self, pid):
+        with open("/proc/%d/stat" % pid) as f:
+            return f.read().rsplit(")", 1)[1].split()[19]
+
+    def test_pm_answering_nothing_is_not_a_finished_pass(self):
+        self.battery("Charging")  # auto compiles the rest of the system only on an idle phone
+        open(self.p("pkgs"), "w").close()
+        r = self.run_worker("auto")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.order(), [])
+        self.assertFalse(os.path.exists(self.p("data/oneos_dexopt.done")))
+        self.assertFalse(os.path.exists(self.p("data/oneos_compile/lock")))
+        # a later start, with pm answering, does the whole pass
+        os.remove(self.p("pkgs"))
+        self.run_worker("auto")
+        self.assertEqual(len(self.order()), 6)
+        self.assertTrue(os.path.exists(self.p("data/oneos_dexopt.done")))
+
+    def test_plain_package_list_is_used_when_versioncode_listing_is_unavailable(self):
+        # pm without --show-versioncode: the ver file is empty, the plain list has six packages
+        self.battery("Charging")
+        r = self.run_worker("auto", NOVC="1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(sorted(self.order()), sorted(self.FIRST + ["com.sys.x", "com.sys.y"]))
+        self.assertTrue(os.path.exists(self.p("data/oneos_dexopt.done")))
+
+    def test_auto_is_idle_only_when_every_panel_is_off(self):
+        os.makedirs(self.p("sys/class/drm/card0-DSI-2"))
+        self.dpms("Off")
+        open(self.p("sys/class/drm/card0-DSI-2/dpms"), "w").write("On\n")
+        self.run_worker("auto", SLEEPHOOK='[ "$0" -ge 4 ] && echo Off > "$ROOTD/sys/class/drm/card0-DSI-2/dpms"')
+        sl = self.lines("sleeps")
+        # one panel Off is not idle: it waited (30 s) until the second panel went off too
+        self.assertGreaterEqual(sl.count("30"), 3)
+        self.assertEqual(len(self.order()), 6)
+
+    def test_auto_is_idle_when_the_only_readable_panel_is_off(self):
+        self.dpms("Off")
+        self.run_worker("auto")
+        self.assertNotIn("30", self.lines("sleeps"))
+
+    def test_heat_pause_does_not_give_up_after_ten_minutes(self):
+        self.heat(3)
+        self.battery("Charging")
+        # 60 waits of 10 s used to end the pause; it is still on after 70 and ends when the heat does
+        self.run_worker("auto", HOOK='wc -l < "$ROOTD/sleeps" >> "$ROOTD/at"',
+                        SLEEPHOOK='[ "$0" -ge 70 ] && echo 0 > "$ROOTD/data/oneos_heat_level"')
+        first = int(self.lines("at")[0])
+        self.assertGreaterEqual(first, 70)
+        self.assertEqual(len(self.order()), 6)
+
+    def test_heat_pause_still_ends_with_a_stop_request(self):
+        self.heat(3)
+        r = self.run_worker("auto", SLEEPHOOK='[ "$0" -ge 80 ] && : > "$ROOTD/data/oneos_compile/stop"')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.order(), [])
+        self.assertEqual(self.status()[0], "stopped")
+        self.assertFalse(os.path.exists(self.p("data/oneos_compile/lock")))
+
+    def test_a_hung_compile_is_given_up_on_and_the_rest_go_on(self):
+        self.run_worker("now", TMOFAIL="com.android.launcher")
+        res = dict((l.split()[0], l.split()[1]) for l in open(self.p("data/oneos_compile/results")).read().splitlines())
+        self.assertEqual(res["com.android.launcher"], "fail")
+        self.assertEqual(res["com.sys.y"], "ok")
+        self.assertIn("timed out", open(self.p("data/oneos_dexopt.log")).read())
+        self.assertEqual(self.status()[0], "done")
+        self.assertFalse(os.path.exists(self.p("data/oneos_compile/lock")))
+        # every compile ran under timeout, with the configured limit
+        self.assertTrue(all(l.split()[:3] == ["-k", "5", "600"] for l in open(self.p("timeouts")).read().splitlines()))
+
+    def test_lock_of_a_reused_pid_is_not_a_running_worker(self):
+        os.makedirs(self.p("data/oneos_compile"))
+        # this test's own pid is alive, but its start time is not the one the lock recorded: pid reuse
+        open(self.p("data/oneos_compile/lock"), "w").write("%d 1\n" % os.getpid())
+        self.run_worker("now")
+        self.assertEqual(len(self.order()), 6)
+
+    def test_lock_of_a_running_worker_with_its_start_time_is_respected(self):
+        os.makedirs(self.p("data/oneos_compile"))
+        open(self.p("data/oneos_compile/lock"), "w").write("%d %s\n" % (os.getpid(), self.start_of(os.getpid())))
+        self.run_worker("now")
+        self.assertEqual(self.order(), [])
+        self.assertTrue(os.path.exists(self.p("data/oneos_compile/lock")))
+
+    def test_lock_of_a_dead_worker_is_taken_over(self):
+        os.makedirs(self.p("data/oneos_compile"))
+        open(self.p("data/oneos_compile/lock"), "w").write("999999 5\n")
+        self.run_worker("now")
+        self.assertEqual(len(self.order()), 6)
+        self.assertFalse(os.path.exists(self.p("data/oneos_compile/lock")))
+
+    def test_worker_never_removes_a_lock_that_is_not_its_own(self):
+        # another worker took over meanwhile (the old one was stopped for it): its lock stays
+        self.run_worker("now", HOOK='[ "$0" = com.user.a ] && echo "4242 9" > "$ROOTD/data/oneos_compile/lock"')
+        self.assertEqual(open(self.p("data/oneos_compile/lock")).read().split(), ["4242", "9"])
+
+    def test_simultaneous_starts_run_one_worker(self):
+        e = dict(os.environ)
+        e.update(PATH=self.p("bin") + ":" + e["PATH"], ROOTD=self.r, HOOK="/bin/sleep 0.2",
+                 ONEOS_COMPILE_DATA=self.p("data"), ONEOS_COMPILE_SYS=self.p("sys"), ONEOS_COMPILE_FW=self.p("fw"))
+        procs = [subprocess.Popen(["sh", self.p("worker.sh"), "now"], env=e, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL) for _ in range(6)]
+        for pr in procs:
+            pr.wait(timeout=30)
+        order = self.order()
+        self.assertEqual(sorted(order), sorted(set(order)), "an app was compiled twice: two workers ran")
+        self.assertEqual(len(order), 6)
 
 
 if __name__ == "__main__":

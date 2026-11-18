@@ -6190,16 +6190,44 @@ FW=${ONEOS_COMPILE_FW:-/system/framework}
 D=$DATA/oneos_compile
 umask 022
 mkdir -p "$D" 2>/dev/null; chmod 755 "$D" 2>/dev/null
-if [ -f "$D/lock" ]; then
-    op=''; IFS= read -r op < "$D/lock" 2>/dev/null
-    [ -n "$op" ] && [ -d "/proc/$op" ] && exit 0
+# A pid alone is reused by unrelated processes: the lock holds "<pid> <start time>" (field 22 of /proc/<pid>/stat).
+pstart() {
+    ps_=''; IFS= read -r ps_ < "/proc/$1/stat" 2>/dev/null || return 1
+    ps_=${ps_##*\) }; set -- $ps_; [ $# -ge 20 ] || return 1
+    shift 19; echo "$1"
+}
+# <pid> <start>: that very process runs (a lock from an older worker has no start time: the pid alone).
+owner_alive() {
+    [ -n "$1" ] && [ -d "/proc/$1" ] || return 1
+    [ -n "$2" ] || return 0
+    [ "$(pstart "$1")" = "$2" ]
+}
+# Created exclusively (noclobber = O_EXCL): two simultaneous starts cannot both get the lock.
+mklock() { ( set -C; echo "$$ $(pstart $$)" > "$D/lock" ) 2>/dev/null; }
+# Only the owner removes it: a worker told to stop must not take away a newer worker's lock.
+unlock() { lp_=''; read -r lp_ _ < "$D/lock" 2>/dev/null; [ "$lp_" = "$$" ] && rm -f "$D/lock"; return 0; }
+if ! mklock; then
+    op=''; ost=''; read -r op ost < "$D/lock" 2>/dev/null
+    # a lock still being written is empty: give its writer a moment
+    [ -n "$op" ] || { sleep 1; read -r op ost < "$D/lock" 2>/dev/null; }
+    owner_alive "$op" "$ost" && exit 0
+    # Stale. One starter takes it away: a rename is atomic, the second finds nothing to move.
+    mv "$D/lock" "$D/lock.stale.$$" 2>/dev/null || exit 0
+    mo=''; mst=''; read -r mo mst < "$D/lock.stale.$$" 2>/dev/null
+    if [ "$mo" != "$op" ] || [ "$mst" != "$ost" ]; then
+        # that was another starter's new lock: put it back (if nobody took its place) and leave
+        ln "$D/lock.stale.$$" "$D/lock" 2>/dev/null
+        rm -f "$D/lock.stale.$$"; exit 0
+    fi
+    rm -f "$D/lock.stale.$$"
+    mklock || exit 0
 fi
-echo $$ > "$D/lock"; echo "$MODE" > "$D/mode"
+echo "$MODE" > "$D/mode"
 # Keyed on framework.jar + services.jar (matches test_framework_change_runs_a_full_pass_again).
 key=$(cat "$FW/framework.jar" "$FW/services.jar" 2>/dev/null | md5sum | cut -d' ' -f1)
 FULL=1
 if [ "$MODE" = auto ]; then
-    if [ -z "$key" ]; then rm -f "$D/lock"; exit 0; fi
+    if [ -z "$key" ]; then unlock; exit 0; fi
     [ "$(cat "$DATA/oneos_dexopt.done" 2>/dev/null)" = "$key" ] && FULL=0
 fi
 QUIET=0; [ $FULL = 0 ] && QUIET=1
@@ -6212,17 +6240,20 @@ note() {
     fi
 }
 st() { printf '%s %s %s %s %s %s\n' "$1" "${total:-0}" "${i:-0}" "${2:--}" "$MODE" "$(date +%s)" > "$D/.status" && mv -f "$D/.status" "$D/status"; }
-halt() { st stopped -; rm -f "$D/stop" "$D/lock"; echo "$(date) compile ($MODE): stopped at $i / $total" >> "$DATA/app_storage.log"; exit 0; }
+halt() { st stopped -; rm -f "$D/stop"; unlock; echo "$(date) compile ($MODE): stopped at $i / $total" >> "$DATA/app_storage.log"; exit 0; }
 want_stop() { [ -f "$D/stop" ] || [ -f "$DATA/oneos_rec_stop" ]; }
 idle_ok() {
     bs=''; IFS= read -r bs < "$SYS/class/power_supply/battery/status" 2>/dev/null
     case "$bs" in Charging|Full) return 0 ;; esac
+    # A foldable has two panels: idle only when every readable one is off (one still On is in use).
+    seen=0
     for dp in "$SYS/class/drm/card0-DSI-1/dpms" "$SYS/class/drm/card0-DSI-2/dpms"; do
         [ -r "$dp" ] || continue
+        seen=1
         v=On; IFS= read -r v < "$dp" 2>/dev/null
-        [ "$v" = Off ] && return 0
-        return 1
+        [ "$v" = Off ] || return 1
     done
+    [ $seen = 1 ] && return 0
     for b in "$SYS/class/backlight/panel0-backlight/brightness" "$SYS/class/backlight/panel/brightness"; do
         [ -r "$b" ] || continue
         v=1; IFS= read -r v < "$b" 2>/dev/null
@@ -6237,6 +6268,12 @@ if [ $FULL = 1 ]; then
     awk '{ print $1 }' "$D/ver" > "$D/all.tmp"
     [ -s "$D/all.tmp" ] || pm list packages 2>/dev/null | sed -n 's/^package://p' > "$D/all.tmp"
     total=$(grep -c . "$D/all.tmp")
+    if [ "$total" -eq 0 ]; then
+        # pm answered nothing (service not ready, a failed call): nothing was compiled, so nothing is "done".
+        rm -f "$D/all.tmp"
+        echo "$(date) compile ($MODE): no package list from pm, nothing done, not marked as finished" >> "$DATA/app_storage.log"
+        unlock; exit 0
+    fi
     { pm list packages -3 2>/dev/null | sed -n 's/^package://p'
       echo com.android.launcher; echo com.android.systemui; echo com.android.settings; echo com.android.phone; } > "$D/first.tmp"
     pri=$(grep -xFf "$D/all.tmp" "$D/first.tmp")
@@ -6248,16 +6285,17 @@ else
     # Only packages whose version was not tried yet, all of them at once (no waiting for an idle phone).
     pri=$(grep -vxFf "$D/attempted" "$D/ver" | cut -d' ' -f1)
     total=$(printf '%s\n' "$pri" | grep -c .)
-    if [ "$total" -eq 0 ]; then rm -f "$D/lock"; exit 0; fi
+    if [ "$total" -eq 0 ]; then unlock; exit 0; fi
     rest=''; npri=$total
 fi
 heat_limit=1; [ "$MODE" = now ] && heat_limit=3
+TMO=${ONEOS_COMPILE_TIMEOUT:-600}; command -v timeout > /dev/null 2>&1 || TMO=''
 echo "$(date) compile ($MODE): $total apps, $npri first$([ $FULL = 0 ] && echo ', new or updated only')" >> "$DATA/app_storage.log"
 : > "$D/results"
 [ $FULL = 1 ] && : > "$DATA/oneos_dexopt.log"
 rm -f "$D/stop"
-{ [ -n "$pri" ] && printf '%s\n' "$pri"; [ -n "$rest" ] && printf '%s\n' "$rest"; } | awk '
-    NR == FNR { ver[$1] = $2; next }
+{ [ -n "$pri" ] && printf '%s\n' "$pri"; [ -n "$rest" ] && printf '%s\n' "$rest"; } | awk -v vf="$D/ver" '
+    FILENAME == vf { ver[$1] = $2; next }
     NF { print $1, ($1 in ver ? ver[$1] : 0) }
 ' "$D/ver" - > "$D/plan"
 i=0
@@ -6273,8 +6311,11 @@ while read -r p pv; do
             st waiting "$p"; sleep 30
         done
     fi
+    # Waits for as long as the phone is too hot (Stop and the return still end it). After ten minutes it used to
+    # compile anyway, putting the heat back on a phone the cap was holding down. No level file = no heat worker
+    # in this session: nothing to wait for.
     w=0
-    while [ $w -lt 60 ]; do
+    while :; do
         lv=''; [ -r "$DATA/oneos_heat_level" ] && IFS= read -r lv < "$DATA/oneos_heat_level" 2>/dev/null
         case "$lv" in ''|*[!0-9]*) break ;; esac
         [ "$lv" -lt $heat_limit ] && break
@@ -6284,9 +6325,13 @@ while read -r p pv; do
     done
     st running "$p"
     t0=$(date +%s)
-    out=$(cmd package compile -m speed "$p" 2>&1)
+    # A stuck binder/dexopt call must not hold the worker, Stop and the lock for good. This frees the worker; the
+    # package service may still finish that one app by itself.
+    if [ -n "$TMO" ]; then out=$(timeout -k 5 "$TMO" cmd package compile -m speed "$p" 2>&1); rc=$?
+    else out=$(cmd package compile -m speed "$p" 2>&1); rc=$?; fi
     el=$(( $(date +%s) - t0 ))
     case "$out" in *Success*) r=ok ;; *) r=fail ;; esac
+    if [ -n "$TMO" ] && { [ $rc = 124 ] || [ $rc = 137 ]; }; then r=fail; out="$out (timed out after ${TMO}s)"; fi
     echo "$p $r $el" >> "$D/results"
     echo "$p: $out" >> "$DATA/oneos_dexopt.log"
     echo "$p ${pv:-0}" >> "$D/attempted"
@@ -6300,7 +6345,7 @@ rm -f "$D/plan"
 st done -
 note "Apps optimized ✓" "All $total apps are compiled for this system."
 echo "$(date) compile ($MODE): done" >> "$DATA/app_storage.log"
-rm -f "$D/lock"
+unlock
 COMPILEEOF
 chmod 755 "$STAGE/data/local/tmp/oneos_compile.sh" 2>/dev/null || true
 
