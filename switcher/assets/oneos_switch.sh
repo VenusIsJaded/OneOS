@@ -136,10 +136,13 @@ if [ "$APP" = 1 ]; then
     bad=$(awk 'NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-f]/ || $2 !~ /^[A-Za-z0-9_][A-Za-z0-9._-]*$/ ||
                $2 == "system.raw" || seen[$2]++ { print NR ": " $0 }' "$SUMS" | head -3)
     [ -z "$bad" ] || refuse "files.sha256 has malformed lines: $bad"
-    for need in oneos_switch.sh guest_prepare.sh guest_start.sh guest_props.sh return_to_oneui.sh libsec-ril-patch.sh \
-                check_host_apex.sh bridges.sh zygote_exec guards.txt $GUARD_JARS; do
-        awk -v n="$need" '$2 == n { f = 1 } END { exit !f }' "$SUMS" || refuse "files.sha256 does not list $need"
-    done
+    miss=$(awk -v req="oneos_switch.sh guest_prepare.sh guest_start.sh guest_props.sh return_to_oneui.sh libsec-ril-patch.sh check_host_apex.sh bridges.sh zygote_exec guards.txt $GUARD_JARS" '
+        { ok[$2] = 1 }
+        END {
+            n = split(req, a, " ")
+            for (i = 1; i <= n; i++) if (a[i] != "" && !(a[i] in ok)) { print a[i]; exit }
+        }' "$SUMS")
+    [ -z "$miss" ] || refuse "files.sha256 does not list $miss"
     # Verify file ownership/modes synchronously, then hash in 8-worker batches
     # (serial sha256sum across ~35 staged payloads/archives added ~15 s before preflight).
     sums_n=0; sums_pids=""; sums_names=""
@@ -176,15 +179,23 @@ if [ "$APP" = 1 ]; then
     # A leftover the package does not carry would still be bound by
     # guest_prepare.sh (framework_patched.jar, libaudio*_patched.so,
     # PermissionController_patched.apk, an extra payload, an apex info list).
+    extra_cand=""
     for f in "$STAGE"/*; do
         [ -f "$f" ] || [ -L "$f" ] || continue
         n=${f##*/}
         case "$n" in
-            *_patched*|*_payload.img|*.apk|clean_apex_info_list.xml)
-                awk -v n="$n" '$2 == n { f = 1 } END { exit !f }' "$SUMS" ||
-                    refuse "$n is in $STAGE but not in files.sha256 (left from an older stage)" ;;
+            *_patched*|*_payload.img|*.apk|clean_apex_info_list.xml) extra_cand="$extra_cand $n" ;;
         esac
     done
+    if [ -n "$extra_cand" ]; then
+        extra=$(awk -v cand="$extra_cand" '
+            { ok[$2] = 1 }
+            END {
+                n = split(cand, a, " ")
+                for (i = 1; i <= n; i++) if (a[i] != "" && !(a[i] in ok)) { print a[i]; exit }
+            }' "$SUMS")
+        [ -z "$extra" ] || refuse "$extra is in $STAGE but not in files.sha256 (left from an older stage)"
+    fi
     # system.raw is verified once, at staging (10 GB); since then its identity
     # must be unchanged: "<size> <sha256>" and stat dev:inode:size:mtime.
     ID="$STAGE/system.raw.id"
@@ -239,11 +250,28 @@ fi
 
 # The guarded framework jars (scripts/make-overlays.sh: storage, installd,
 # power, sysrq and weaver guards). guest_prepare.sh checks them again.
-for need in $GUARD_JARS; do
-    sum=$(awk -v n="$need" '$2 == n {print $1}' "$STAGE/guards.txt")
-    [ -n "$sum" ] && [ "$(sha256sum "$STAGE/$need" 2>/dev/null | cut -d' ' -f1)" = "$sum" ] ||
-        refuse "$need is missing or not the guarded build in guards.txt"
-done
+# When APP=1, files.sha256 just verified every staged file's SHA-256 above:
+# compare files.sha256 directly against guards.txt instead of re-hashing ~50-100 MB
+# of framework jars on disk.
+if [ "$APP" = 1 ]; then
+    bad_guard=$(awk -v jars="$GUARD_JARS" '
+        NR == FNR { if ($1 !~ /^#/ && NF >= 2) g[$2] = $1; next }
+        { s[$2] = $1 }
+        END {
+            n = split(jars, a, " ")
+            for (i = 1; i <= n; i++) {
+                k = a[i]; if (k == "") continue
+                if (!(k in g) || g[k] == "" || s[k] != g[k]) { print k; exit }
+            }
+        }' "$STAGE/guards.txt" "$SUMS")
+    [ -z "$bad_guard" ] || refuse "$bad_guard is missing or not the guarded build in guards.txt"
+else
+    for need in $GUARD_JARS; do
+        sum=$(awk -v n="$need" '$2 == n {print $1}' "$STAGE/guards.txt")
+        [ -n "$sum" ] && [ "$(sha256sum "$STAGE/$need" 2>/dev/null | cut -d' ' -f1)" = "$sum" ] ||
+            refuse "$need is missing or not the guarded build in guards.txt"
+    done
+fi
 # The guest vold as "gvld" takes both binaries (guest_prepare.sh refuses one
 # alone too, but only once One UI's framework is stopped).
 [ "$(awk '$2 == "vold_patched" { v = 1 } $2 == "service.incremental_patched.so" { i = 1 } END { print v + i }' "$STAGE/guards.txt")" = 1 ] &&
@@ -258,10 +286,15 @@ for need in app:app user:user user_de:user_de data:user/0 media:media; do
 done
 left=$(awk -v s="$STAGE/" 'index($5, s) == 1 {print $5}' /proc/self/mountinfo | head -3 | tr '\n' ' ')
 [ -z "$left" ] || refuse "mounted under the stage ($left): a session is running or never returned; return to One UI (reboot) first"
-for pair in $BRIDGES; do
-    awk -v p="/data/${pair%%:*}" '$5 == p' /proc/self/mountinfo | grep -q . &&
-        refuse "/data/${pair%%:*} is still bridged from an earlier session; return to One UI (reboot) first"
-done
+still_br=$(awk -v bl="$BRIDGES" '
+    BEGIN {
+        n = split(bl, a, " ")
+        for (i = 1; i <= n; i++) { sub(/:.*/, "", a[i]); m["/data/" a[i]] = i; p[i] = "/data/" a[i] }
+    }
+    $5 in m { hit[m[$5]] = 1 }
+    END { for (i = 1; i <= n; i++) if (hit[i]) { print p[i]; exit } }
+' /proc/self/mountinfo)
+[ -z "$still_br" ] || refuse "$still_br is still bridged from an earlier session; return to One UI (reboot) first"
 # The gap splash (below): the OneOS app's GapSplashActivity, started by root
 # (it is not exported). ONEOS_SPLASH_COMPONENT names another package/.Activity,
 # e.g. com.wewaffles.onelineage/.SplashActivity for the old switcher.
@@ -505,17 +538,18 @@ rm -f "$STAGE/host_screenhole" "$STAGE/host_cover_screenhole" "$STAGE/host_holes
 # .log in the stage goes into the session's logs): HyperOS's SurfaceFlinger
 # aborts at the first display connect on the S24 Ultra, S23 and Z Flip5 ("No
 # matching frame rate modes" with an unrestricted policy) before it logs any.
-timeout 10 dumpsys SurfaceFlinger --display-id > "$STAGE/display_modes_host.log" 2>&1
+# Run the three independent binder dumps concurrently inside DISPLAY_READS so
+# SurfaceFlinger and DisplayManager round-trips overlap instead of serializing.
+( timeout 10 dumpsys SurfaceFlinger --display-id > "$STAGE/display_modes_host.log" 2>&1 ) &
+_dp1=$!
+( timeout 15 dumpsys SurfaceFlinger 2>/dev/null > "$STAGE/display_sf_host.txt" ) &
+_dp2=$!
+( timeout 10 dumpsys display 2>/dev/null > "$STAGE/display_host.txt" ) &
+_dp3=$!
+wait "$_dp1" "$_dp2" "$_dp3" 2>/dev/null
 echo "preflight: display id done $(date +%T)"
-# Each mode as SurfaceFlinger made it: hwc id, vsync, dpi, group and the VRR
-# config (minFrameIntervalNs) the composer reports, and the peak rate taken
-# from it. The S24 Ultra's 0.4.33 sessions showed One UI's 21 modes and the
-# composer answering, yet HyperOS's SurfaceFlinger found no mode in an
-# unrestricted policy; what it takes the peak rate from is the open question.
-timeout 15 dumpsys SurfaceFlinger 2>/dev/null > "$STAGE/display_sf_host.txt"
 grep -E 'activeMode=|[{]id=[0-9]+, hwcId=|peakRefreshRate=' "$STAGE/display_sf_host.txt" | head -n 120 | cut -c1-400 >> "$STAGE/display_modes_host.log"
 echo "preflight: display sf done $(date +%T)"
-timeout 10 dumpsys display 2>/dev/null > "$STAGE/display_host.txt"
 # Lines cut at 3000 characters; a longer DisplayDeviceInfo keeps its panel port and
 # brightnessMaximum at the end, which guest_props.sh and guest_prepare.sh read (0.5.11:
 # the S23 Ultra's 21 modes put them past 6000, and every system got the Fold's
@@ -783,8 +817,9 @@ DISPLAY_READS=$!
 # One UI's staged installs (Google Play system updates): 0.4.39 test2 returned in
 # place with a train pending, and One UI's own system_server rebooted 5 s after
 # it started ("Rollback staged install"). Logged for the next such return.
-STG=$(timeout 10 pm list staged-sessions 2>/dev/null | grep -c 'sessionId')
-[ "${STG:-0}" -gt 0 ] && echo "One UI has $STG staged install session(s): $(timeout 10 pm list staged-sessions 2>/dev/null | sed -n 's/.*appPackageName = \([^;]*\); isStaged = true; isReady = \([a-z]*\); isApplied = \([a-z]*\).*/\1(ready \2, applied \3)/p' | tr '\n' ' ')"
+STG_OUT=$(timeout 10 pm list staged-sessions 2>/dev/null)
+STG=$(printf '%s\n' "$STG_OUT" | grep -c 'sessionId')
+[ "${STG:-0}" -gt 0 ] && echo "One UI has $STG staged install session(s): $(printf '%s\n' "$STG_OUT" | sed -n 's/.*appPackageName = \([^;]*\); isStaged = true; isReady = \([a-z]*\); isApplied = \([a-z]*\).*/\1(ready \2, applied \3)/p' | tr '\n' ' ')"
 # KernelSU's manager inside the guest (0.4.39): the kernel knows the manager by
 # the app id One UI gave it, so the guest's package manager gives the same
 # package that id (patches/guest_ksu_manager_appid.py reads these two props) and
@@ -1098,7 +1133,7 @@ case "$(settings get global adb_enabled 2>/dev/null)" in
 esac
 echo "$HOST_ADB" > "$STAGE/host_adb_on"
 echo "Host USB debugging: $([ "$HOST_ADB" = 1 ] && echo on || echo off)"
-if [ "$HOST_ADB" = 1 ] && ! ps -ef 2>/dev/null | grep -v grep | grep -q "adb_watchdog.sh"; then
+if [ "$HOST_ADB" = 1 ] && ! pgrep -f "adb_watchdog\.sh" >/dev/null 2>&1; then
     cat > /data/local/tmp/adb_watchdog.sh <<'ADBW'
 #!/system/bin/sh
 # Watchdog for the host adbd, which is the only way into the phone while the guest
@@ -1163,7 +1198,7 @@ fi
 # above). init does not always bring it back if it dies, and a dead imsd means
 # SMS quietly degrades to "arrives whenever the SMSC next retries", so keep it
 # supervised for the whole guest session.
-if ! ps -ef 2>/dev/null | grep -v grep | grep -q "ims_watchdog.sh"; then
+if ! pgrep -f "ims_watchdog\.sh" >/dev/null 2>&1; then
     cat > /data/local/tmp/ims_watchdog.sh <<'IMSW'
 #!/system/bin/sh
 LOG=/data/local/tmp/ims_watchdog.log
@@ -1320,23 +1355,32 @@ fi
 # ... busy" + "Could not read cgroup.events" triples in one 2 s spin of a system_server thread on a stuck isolated-uid
 # cgroup (the kill loop retries it without a sleep), plus a Created/Removed line per process and CfqWeight/
 # BfqWeight/SetClamps profile warnings this kernel does not have.
-for t in CaptureStateTracker libbinder.Parcel Parcel ResourcesManager MediaCodecList AString BOOTPROF GED \
-         PerformanceManager ProjectManager SchedAssist GestureLog_OplusPenGestureManager HoraeHelper OsenseResManagerService postman \
-         UserAwareMgr OplusUIFirst_TS SDM \
-         SettingsState SG QuickStartRUSHelper OplusGcSupressionHelper UAH_CLIENT \
-         OplusDynamicFrameRateRUS DynamicFramerate FlexibleWindowManagerService \
-         Blur_WindowBlurSessionImpl Blur_ScreenCapture Blur_BlurServiceImpl \
-         OplusBenchHelper OplusViewDebugManager MSP-LOG-SDK- MSP-LOG-APP-MSP-LOG-APP-ProcessBridge MSPAPK_DlCore-FileCall \
-         qcc_file_aidl QCC minksocket PluginSeedling--Origin PluginSeedling--Capsule PluginSeedling--Template \
-         PluginSeedling--CapsuleCard PluginSeedling--Base DigitalClock OplusSecurePayManager COUIVerticalSeekBar \
-         GSLog.AppNameCutter metis_v2_AppConfigUtil OplusRequestedLayerState \
-         OplusStartingWindowManager OplusAppStartupManager ULELite Athena \
-         UniRenderCanvasContext UAH-UahAdaptHelper OplusBatteryServiceFeature libprocessgroup; do
-    setprop "log.tag.$t" SILENT 2>/dev/null
-done
-if [ "${ONEOS_SOUND_VERBOSE:-0}" != 1 ]; then
-    setprop "log.tag.SecVibrator-HAL-AIDL-CORE" SILENT 2>/dev/null
+LT_FILE="$STAGE/tmp/log_tags.props"
+{
+    for t in CaptureStateTracker libbinder.Parcel Parcel ResourcesManager MediaCodecList AString BOOTPROF GED \
+             PerformanceManager ProjectManager SchedAssist GestureLog_OplusPenGestureManager HoraeHelper OsenseResManagerService postman \
+             UserAwareMgr OplusUIFirst_TS SDM \
+             SettingsState SG QuickStartRUSHelper OplusGcSupressionHelper UAH_CLIENT \
+             OplusDynamicFrameRateRUS DynamicFramerate FlexibleWindowManagerService \
+             Blur_WindowBlurSessionImpl Blur_ScreenCapture Blur_BlurServiceImpl \
+             OplusBenchHelper OplusViewDebugManager MSP-LOG-SDK- MSP-LOG-APP-MSP-LOG-APP-ProcessBridge MSPAPK_DlCore-FileCall \
+             qcc_file_aidl QCC minksocket PluginSeedling--Origin PluginSeedling--Capsule PluginSeedling--Template \
+             PluginSeedling--CapsuleCard PluginSeedling--Base DigitalClock OplusSecurePayManager COUIVerticalSeekBar \
+             GSLog.AppNameCutter metis_v2_AppConfigUtil OplusRequestedLayerState \
+             OplusStartingWindowManager OplusAppStartupManager ULELite Athena \
+             UniRenderCanvasContext UAH-UahAdaptHelper OplusBatteryServiceFeature libprocessgroup; do
+        printf 'log.tag.%s=SILENT\n' "$t"
+    done
+    if [ "${ONEOS_SOUND_VERBOSE:-0}" != 1 ]; then
+        printf 'log.tag.SecVibrator-HAL-AIDL-CORE=SILENT\n'
+    fi
+} > "$LT_FILE"
+if ! "$RP" -n -f "$LT_FILE" 2>/dev/null; then
+    while IFS='=' read -r k v; do
+        [ -n "$k" ] && setprop "$k" "$v" 2>/dev/null
+    done < "$LT_FILE"
 fi
+rm -f "$LT_FILE"
 
 # Wifi handover, recorded while One UI still runs. The guest's WifiService gets
 # the supplicant (ISupplicant/default) from the shared servicemanager, which
@@ -2401,13 +2445,16 @@ while true; do
         if $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/dumpsys window 2>/dev/null | grep -q 'mStatusBar'; then
             echo '[UI Activator] WindowManager is ready! Dismissing bootanim and unlocking...'
             gsh() { $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/sh -c "\$1"; }
+            # Cache guest display 0's physical size once per pass ("<W> <H>") so
+            # panel fit, density scaling, cutout scaling, and OxygenOS stable-size
+            # checks do not spawn redundant nsenter + wm size binder calls.
+            GSZ=\$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/wm size -d 0 2>/dev/null | sed -n 's/^Physical size: \([0-9]*\)x\([0-9]*\)$/\1 \2/p' | head -n 1)
             # The camera hole for the size the guest runs the panel at
             # (guest_panel_fit.sh, see where the switch writes it): the switch
             # placed it when the window manager first answered. This is the check
             # after it and the one after a soft reboot of the guest, and the line
             # that says what size the guest has.
             if [ $GUEST_FOLD_FORM = 0 ] && [ -f $STAGE/guest_panel_fit.sh ] && [ ! -L $STAGE/guest_panel_fit.sh ]; then
-                GSZ=\$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/wm size -d 0 2>/dev/null | sed -n 's/^Physical size: \([0-9]*\)x\([0-9]*\)$/\1 \2/p' | head -n 1)
                 [ -z "\$GSZ" ] || /system/bin/sh $STAGE/guest_panel_fit.sh \$GSZ late 2>&1 | head -n 3 | sed 's/^/[UI Activator] /'
                 echo "[UI Activator] guest display 0: \$(echo "\${GSZ:-size not read}" | tr ' ' 'x') (the whole panel: \$(cat $STAGE/host_panel_size 2>/dev/null | tr ' ' 'x')); camera hole property: '\$(getprop ro.oplus.display.screenhole.positon)'"
             fi
@@ -2462,7 +2509,8 @@ while true; do
             # guest_prepare.sh): OPPO's fluid cloud stays off while this global
             # says unsupported, as the Fold8 runtime of pull request #2 found.
             if [ "${ONEOS_GUEST_STOCK_FEATURES:-1}" = 1 ] &&
-               timeout 10 $BB nsenter -t \$PID -m /system/bin/sh -c '[ -f /my_stock/etc/extension/com.oplus.oplus-feature.xml ]' 2>/dev/null; then
+               { [ -f $STAGE/rootfs/my_stock/etc/extension/com.oplus.oplus-feature.xml ] ||
+                 [ -f $STAGE/rootfs/system/my_stock/etc/extension/com.oplus.oplus-feature.xml ]; }; then
                 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings put global fluid_cloud_not_support 0 && echo '[UI Activator] Live Alerts: fluid_cloud_not_support 0'
             fi
             # Circle to Search (0.4.38): the global builds wire it to Google
@@ -2472,12 +2520,14 @@ while true; do
             # oplus_gesture_handle_cui_enable 0). Once per stage, where the image has
             # the feature, so a later choice in Settings stays.
             if [ ! -e $STAGE/data/oneos_cts_default ] && [ ! -L $STAGE/data/oneos_cts_default ] &&
-               timeout 10 $BB nsenter -t \$PID -m /system/bin/sh -c 'ls /my_product/etc/extension/feature_contextualsearch_*.xml' >/dev/null 2>&1; then
-                for k in oplus_gesture_handle_cui_enable oplus_home_button_cui_enable; do
-                    timeout 10 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings put secure \$k 1
-                done
+               ls $STAGE/rootfs/my_product/etc/extension/feature_contextualsearch_*.xml $STAGE/rootfs/system/my_product/etc/extension/feature_contextualsearch_*.xml >/dev/null 2>&1; then
+                CTS_VAL=\$(gsh '
+                    /system/bin/settings put secure oplus_gesture_handle_cui_enable 1
+                    /system/bin/settings put secure oplus_home_button_cui_enable 1
+                    /system/bin/settings get secure oplus_gesture_handle_cui_enable
+                ' 2>/dev/null | tail -n 1)
                 mkdir $STAGE/data/oneos_cts_default 2>/dev/null
-                echo "[UI Activator] Circle to Search: press and hold on, \$(timeout 10 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings get secure oplus_gesture_handle_cui_enable) (once per stage)"
+                echo "[UI Activator] Circle to Search: press and hold on, \$CTS_VAL (once per stage)"
             fi
             # One UI's screen mode on every panel (0.4.38): the vendor render
             # intent recorded before the switch, as SurfaceFlinger's display color
@@ -2511,7 +2561,13 @@ while true; do
                 # One UI's modules over it (every guest app died in the same idmap
                 # lookup within a second) and rewrote One UI's KernelSU features
                 # (adb root on, module umount off) in the shared kernel and config.
-                for KP in me.weishu.kernelsu com.rifsxd.ksunext com.sukisu.ultra app.kitsusu.manager; do
+                # Fast path: check the guest's packages.list on the host first so
+                # clean boots (99% of sessions) skip 4 sequential nsenter + pm forks.
+                KSU_FOUND="me.weishu.kernelsu com.rifsxd.ksunext com.sukisu.ultra app.kitsusu.manager"
+                if [ -s $STAGE/data/system/packages.list ]; then
+                    KSU_FOUND=\$(awk 'BEGIN { m["me.weishu.kernelsu"]=1; m["com.rifsxd.ksunext"]=1; m["com.sukisu.ultra"]=1; m["app.kitsusu.manager"]=1 } \$1 in m { printf "%s ", \$1 }' $STAGE/data/system/packages.list 2>/dev/null)
+                fi
+                for KP in \$KSU_FOUND; do
                     KC=\$(timeout 20 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/pm list packages -U \$KP 2>/dev/null | sed -n "s/^package:\$KP uid://p" | head -n 1)
                     case "\$KC" in
                         [0-9]*)
@@ -2593,11 +2649,6 @@ while true; do
             # key at 0 (run 28): only a gesture handle was drawn while the
             # launcher stayed in 3-button mode, so neither worked. Keep the
             # user's choice; a stage that never had the key gets gestures.
-            NAVK=\$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings get secure hide_navigationbar_enable 2>/dev/null)
-            [ "\$NAVK" = null ] && $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings put secure hide_navigationbar_enable 3 2>/dev/null
-            # Window blur off once on mid-range Galaxy A and M phones (0.5.14): blur is GPU-only, and on
-            # the A36 it alone missed about 240 frames in 30 s. Once per guest data (marker), so a user who
-            # turns it back on (Developer options > Allow window-level blurs) keeps it.
             case "\$(getprop ro.product.model)" in SM-A*|SM-M*)
                 if [ ! -f $STAGE/data/oneos_blur_default ]; then
                     $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings put global disable_window_blurs 1 2>/dev/null &&
@@ -2609,15 +2660,23 @@ while true; do
             # EffectStrength MEDIUM (amplitude 6700 on the A36: owner, "haptics feel weak af"). 3 = high, the
             # HAL's STRONG. Once (marker), so the values can still be changed from adb.
             if [ -e $STAGE/rootfs/system_ext/framework/nt-telephony-common.jar ] && [ ! -f $STAGE/data/oneos_haptics_default ]; then
-                for k in haptic_feedback_intensity notification_vibration_intensity ring_vibration_intensity alarm_vibration_intensity media_vibration_intensity; do
-                    $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings put system \$k 3 2>/dev/null
-                done
+                gsh '
+                    for k in haptic_feedback_intensity notification_vibration_intensity ring_vibration_intensity alarm_vibration_intensity media_vibration_intensity; do
+                        /system/bin/settings put system $k 3 2>/dev/null
+                    done
+                '
                 touch $STAGE/data/oneos_haptics_default && echo "[UI Activator] Nothing OS vibration intensities at high once (Samsung HAL: STRONG)"
             fi
-            NAVM=\$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings get secure navigation_mode 2>/dev/null)
+            NAV_OUT=\$(gsh '
+                navk=\$(/system/bin/settings get secure hide_navigationbar_enable 2>/dev/null)
+                [ "\$navk" = null ] && /system/bin/settings put secure hide_navigationbar_enable 3 2>/dev/null
+                navm=\$(/system/bin/settings get secure navigation_mode 2>/dev/null)
+                /system/bin/pm disable android.ext.services/android.ext.services.notification.Assistant 2>/dev/null || true
+                printf "%s|%s\n" "\$navk" "\$navm"
+            ' 2>/dev/null | tail -n 1)
+            NAVK=\${NAV_OUT%%|*}; NAVM=\${NAV_OUT#*|}
             echo "[UI Activator] navigation: hide_navigationbar_enable=\$NAVK navigation_mode=\$NAVM"
             case "\$NAVK:\$NAVM" in 0:2|2:0|3:0) echo "[UI Activator] WARNING: ColorOS nav key and AOSP navigation_mode disagree" ;; esac
-            $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/pm disable android.ext.services/android.ext.services.notification.Assistant 2>/dev/null || true
             # Once per stage, disable background advertising/personalization sandboxes
             # and any remaining OEM analytics/telemetry packages (keeping APEX jars
             # mounted so BOOTCLASSPATH and framework callers never throw).
@@ -2713,14 +2772,17 @@ while true; do
             # provisioned), sets both keys and turns itself off when it finishes
             # (it can be skipped without an account), and the stage keeps that.
             if [ -f $STAGE/data/oneos_gms_present ]; then
-                echo "[UI Activator] Google services presented: setup left to the setup wizard (device_provisioned=\$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings get global device_provisioned 2>/dev/null) user_setup_complete=\$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings get secure user_setup_complete 2>/dev/null))"
+                GMS_PRV=\$(gsh 'printf "%s|%s\n" "\$(/system/bin/settings get global device_provisioned 2>/dev/null)" "\$(/system/bin/settings get secure user_setup_complete 2>/dev/null)"' 2>/dev/null | tail -n 1)
+                echo "[UI Activator] Google services presented: setup left to the setup wizard (device_provisioned=\${GMS_PRV%%|*} user_setup_complete=\${GMS_PRV#*|})"
             else
-            for kv in 'global device_provisioned' 'secure user_setup_complete'; do
-                [ "\$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings get \$kv 2>/dev/null)" = 1 ] || $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings put \$kv 1
-            done
-            for p in com.google.android.setupwizard com.google.android.pixel.setupwizard; do
-                $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/pm disable-user --user 0 \$p >/dev/null 2>&1 && echo "[UI Activator] \$p disabled (setup is done in the container)"
-            done
+                gsh '
+                    for kv in "global device_provisioned" "secure user_setup_complete"; do
+                        [ "\$(/system/bin/settings get \$kv 2>/dev/null)" = 1 ] || /system/bin/settings put \$kv 1
+                    done
+                    for p in com.google.android.setupwizard com.google.android.pixel.setupwizard; do
+                        /system/bin/pm disable-user --user 0 \$p >/dev/null 2>&1 && echo "[UI Activator] \$p disabled (setup is done in the container)"
+                    done
+                ' 2>/dev/null
             fi
             # Run 43: the verbose Wi-Fi logging run 42 switched on for its diag_wifi
             # capture (below) was saved in the stage's WifiConfigStore.xml and put
@@ -2795,8 +2857,8 @@ while true; do
                 timeout 10 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/cmd overlay disable --user 0 com.android.shell:OneOSImsMmtel >/dev/null 2>&1
             fi
             if [ $WIFI_VERBOSE = 1 ]; then WV=enabled; else WV=disabled; fi
-            timeout 10 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/cmd wifi set-verbose-logging \$WV >/dev/null 2>&1
-            echo "[UI Activator] wifi: verbose logging \$WV -> \$(timeout 10 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/cmd wifi is-verbose-logging 2>&1 | head -1)"
+            WV_NOW=\$(timeout 15 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/sh -c "/system/bin/cmd wifi set-verbose-logging \$WV >/dev/null 2>&1; /system/bin/cmd wifi is-verbose-logging 2>&1 | head -1" 2>/dev/null)
+            echo "[UI Activator] wifi: verbose logging \$WV -> \$WV_NOW"
             # Window-level blur (run 44, owner): guest_props.sh tells SurfaceFlinger
             # blur is supported, but the Pixel kept "Allow window-level blurs" off
             # (Developer options) until the owner turned it on. Allowed once, on a
@@ -3066,7 +3128,8 @@ while true; do
                 HUD=\$(sed -n 's/^density=\([0-9]*\) .*/\1/p' $STAGE/host_display 2>/dev/null)
                 HW=\$(sed -n 's/.* width=\([0-9]*\) .*/\1/p' $STAGE/host_display 2>/dev/null)
                 HP=\$(sed -n 's/.* physical=\([0-9]*\)$/\1/p' $STAGE/host_display 2>/dev/null)
-                GW=\$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/wm size -d 0 2>/dev/null | sed -n 's/^Physical size: \([0-9]*\)x[0-9]*$/\1/p' | head -n 1)
+                [ -n "\$GSZ" ] || GSZ=\$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/wm size -d 0 2>/dev/null | sed -n 's/^Physical size: \([0-9]*\)x\([0-9]*\)$/\1 \2/p' | head -n 1)
+                GW=\${GSZ% *}; GDH_CACHED=\${GSZ#* }
                 case "\$HUD:\$HW:\$HP:\$GW" in
                     *[!0-9:]*|:*|*::*|*:)
                         echo "[UI Activator] density: One UI's scale not recorded (\${HUD:-?} at \${HW:-?} of \${HP:-?} px, guest \${GW:-?} px), left at base" ;;
@@ -3082,7 +3145,7 @@ while true; do
                         # density). Any other display 0 is not this panel.
                         GWN=''; GSHAPE=1; GDH=''
                         if [ \$GW != \$HP ]; then
-                            GDH=\$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/wm size -d 0 2>/dev/null | sed -n 's/^Physical size: [0-9]*x\([0-9]*\)$/\1/p' | head -n 1)
+                            GDH=\$GDH_CACHED
                             GSHAPE=\$(awk -v w="\$GW" -v h="\$GDH" -v s="\$(cat $STAGE/host_panel_size 2>/dev/null)" 'BEGIN { n = split(s, p, " "); d = w * p[2] - h * p[1]; if (d < 0) d = -d; print (n == 2 && h ~ /^[0-9]+\$/ && h + 0 > 0 && p[1] + 0 > 0 && d * 100 <= h * p[1]) ? 1 : 0 }')
                             GWN=", which the guest runs at \$GW px,"
                         fi
@@ -3101,9 +3164,9 @@ while true; do
                             # data/oneos_auto_density_index); an index saved since is the user's
                             # (the Display size slider) and stays. Before 0.4.57 there was no
                             # index file: an unset index or Default's counts as not chosen.
-                            GH=\$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/wm size -d 0 2>/dev/null | sed -n 's/^Physical size: [0-9]*x\([0-9]*\)$/\1/p' | head -n 1)
-                            BD=\$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/wm density -d 0 2>/dev/null | sed -n 's/^Physical density: \([0-9]*\)$/\1/p' | head -n 1)
-                            MAN=\$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings get system display_density_index_manual 2>/dev/null)
+                            GH=\$GDH_CACHED
+                            OP_DENS=\$(gsh 'printf "%s|%s\n" "\$(/system/bin/wm density -d 0 2>/dev/null | sed -n \"s/^Physical density: \\([0-9]*\\)\$/\\1/p\" | head -n 1)" "\$(/system/bin/settings get system display_density_index_manual 2>/dev/null)"' 2>/dev/null | tail -n 1)
+                            BD=\${OP_DENS%%|*}; MAN=\${OP_DENS#*|}
                             case "\$MAN" in ''|*[!0-9]*) MAN= ;; esac
                             MARK=\$(cat $STAGE/data/oneos_auto_density_index 2>/dev/null)
                             # "<Default's index> <nearest index> <its dpi> <list>"
@@ -3236,13 +3299,16 @@ while true; do
             # its default, about 135 nits with the Samsung panel curve.
             # ColorOS's scale only (AOSP's screen_brightness is 0..255).
             if [ $GUEST_OPLUS = 1 ]; then
-            b=\$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings get system screen_brightness 2>/dev/null)
-            [ "\${b%%.*}" -ge 222 ] 2>/dev/null || $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings put system screen_brightness 4570
-            # Once with the fixed panel curve: the saved value was chosen while the
-            # curve was wrong (run 28: 1702 looked like ~420 nits, is ~15).
-            [ -f $STAGE/data/.oneos_curve2 ] || { $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings put system screen_brightness 4570; touch $STAGE/data/.oneos_curve2; }
+                gsh "
+                    b=\$(/system/bin/settings get system screen_brightness 2>/dev/null)
+                    if [ ! -f /data/.oneos_curve2 ] || ! [ \"\${b%%.*}\" -ge 222 ] 2>/dev/null; then
+                        /system/bin/settings put system screen_brightness 4570
+                    fi
+                " 2>/dev/null
+                [ -f $STAGE/data/.oneos_curve2 ] || touch $STAGE/data/.oneos_curve2
             fi
-            echo "[UI Activator] refresh: min \$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings get system min_refresh_rate) peak \$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings get system peak_refresh_rate); brightness \$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings get system screen_brightness)"
+            RFB=\$(gsh 'printf "min %s peak %s; brightness %s\n" "\$(/system/bin/settings get system min_refresh_rate)" "\$(/system/bin/settings get system peak_refresh_rate)" "\$(/system/bin/settings get system screen_brightness)"' 2>/dev/null | tail -n 1)
+            echo "[UI Activator] refresh: \$RFB"
             echo '[UI Activator] Home activated!'
             # ColorOS lock screen depth effect (0.4.60, owner; 0.4.59 A36 768c5a1d, S23
             # 77b9dfc0): SystemUI saves the cut-out subject as /data/oplus/os/deep_scenery_image*,
@@ -3336,7 +3402,8 @@ while true; do
             # power of two. Re-made every session. ONEOS_GUEST_NT_ABOUT=0 leaves
             # Nothing's strings.
             if [ "${ONEOS_GUEST_NT_ABOUT:-1}" = 1 ] &&
-               timeout 10 $BB nsenter -t \$PID -m /system/bin/sh -c '[ -f /system_ext/priv-app/NothingSettings/NothingSettings.apk ]' 2>/dev/null; then
+               { [ -f $STAGE/rootfs/system_ext/priv-app/NothingSettings/NothingSettings.apk ] ||
+                 [ -f $STAGE/rootfs/system/system_ext/priv-app/NothingSettings/NothingSettings.apk ]; }; then
                 NRAM=\$(awk '/^MemTotal:/ { g = \$2 / 1048576; n = split("4 6 8 12 16 24 32 48 64", s, " "); for (i = 1; i <= n; i++) if (s[i] + 0 >= g) { print s[i] "GB"; exit } }' /proc/meminfo)
                 NROM=\$($BB df -k /data 2>/dev/null | awk 'NR == 2 { g = \$2 / 1000000; p = 16; while (p < g) p *= 2; if (p >= 1024) print p / 1024 "TB"; else print p "GB" }')
                 # With the About overlay's own-phone mode (guest_props.sh wrote
@@ -3497,7 +3564,8 @@ while true; do
                 # same factor.)
                 DIMS=''; SBK=''; HSBG=\$HSB
                 if [ "$GUEST_AOSP_SYSUI$GUEST_MIUI" != 00 ] && [ $GUEST_FOLD_FORM = 0 ] && [ -f $STAGE/data/oneos_overlay_dimen.dex ]; then
-                    SBK=\$(awk -v g="\$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/wm size -d 0 2>/dev/null | sed -n 's/^Physical size: \([0-9]*\)x\([0-9]*\)$/\1 \2/p' | head -n 1)" -v s="\$(cat $STAGE/host_panel_size 2>/dev/null)" 'BEGIN { if (split(g, a, " ") != 2 || split(s, p, " ") != 2 || a[1] + 0 <= 0 || a[2] + 0 <= 0 || p[1] + 0 <= 0 || a[1] == p[1]) exit; d = a[1] * p[2] - a[2] * p[1]; if (d < 0) d = -d; if (d * 100 <= a[2] * p[1]) print a[1], p[1] }')
+                    [ -n "\$GSZ" ] || GSZ=\$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/wm size -d 0 2>/dev/null | sed -n 's/^Physical size: \([0-9]*\)x\([0-9]*\)$/\1 \2/p' | head -n 1)
+                    SBK=\$(awk -v g="\$GSZ" -v s="\$(cat $STAGE/host_panel_size 2>/dev/null)" 'BEGIN { if (split(g, a, " ") != 2 || split(s, p, " ") != 2 || a[1] + 0 <= 0 || a[2] + 0 <= 0 || p[1] + 0 <= 0 || a[1] == p[1]) exit; d = a[1] * p[2] - a[2] * p[1]; if (d < 0) d = -d; if (d * 100 <= a[2] * p[1]) print a[1], p[1] }')
                     case "\$SBK:\$HSB" in
                         :*|*:|*:*[!0-9]*) ;;
                         *) HSBG=\$(awk -v v="\$HSB" -v k="\$SBK" 'BEGIN { split(k, a, " "); printf "%d", v * a[1] / a[2] + 0.5 }') ;;
@@ -3609,7 +3677,8 @@ while true; do
                 gsd() { timeout 20 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/cmd overlay lookup android android:integer/config_stableDeviceDisplay\$1 2>/dev/null | tr -d '\r' | head -n 1; }
                 if [ "${ONEOS_GUEST_STABLE_SIZE:-1}" = 1 ]; then
                     SDW=\$(gsd Width)
-                    SDS=\$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/wm size -d 0 2>/dev/null | sed -n 's/^Physical size: \([0-9]*\)x\([0-9]*\)$/\1 \2/p' | head -n 1)
+                    SDS=\$GSZ
+                    [ -n "\$SDS" ] || SDS=\$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/wm size -d 0 2>/dev/null | sed -n 's/^Physical size: \([0-9]*\)x\([0-9]*\)$/\1 \2/p' | head -n 1)
                     SGW=\${SDS% *}; SGH=\${SDS#* }
                     SDNEED=0
                     # No answer from the lookup on an OxygenOS image: its resource is
@@ -3982,12 +4051,15 @@ while true; do
 done
 # This boot's pass is done: wait for a soft reboot of the guest, or end with
 # the session (the return's first step, or its namespace record gone).
-while [ "\$(cat $STAGE/tmp/softreboot.gen 2>/dev/null)" = "\$GEN" ]; do
+while :; do
+    _srg=''
+    [ -r $STAGE/tmp/softreboot.gen ] && IFS= read -r _srg < $STAGE/tmp/softreboot.gen 2>/dev/null
+    [ "\$_srg" = "\$GEN" ] || break
     sleep 2
     [ -f $STAGE/data/oneos_rec_stop ] && exit 0
     [ -f $STAGE/guest_mntns ] || exit 0
 done
-GEN=\$(cat $STAGE/tmp/softreboot.gen 2>/dev/null); PASS=\$((PASS + 1))
+GEN=\$_srg; PASS=\$((PASS + 1))
 echo "[UI Activator] soft reboot of the guest (generation \$GEN): pass \$PASS, waiting for its new boot"
 done
 UIACT
@@ -4246,31 +4318,54 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
             echo \"# \$(date +%T) stopped (the return started, or no guest namespace record)\" >> \$F
             exit 0
         fi
-        bt=''
+        bt=''; bt_d=''
         if [ -n \"\$BATT_NODE\" ]; then
-            IFS= read -r bt < \"\$BATT_NODE\" 2>/dev/null
-            case \"\$bt\" in
-                ''|*[!0-9]*) bt='' ;;
-                *) [ \"\$bt\" -gt 1500 ] && bt=\$((bt / 100)); bt=\"\$((bt / 10)).\$((bt % 10))\" ;;
+            IFS= read -r bt_d < \"\$BATT_NODE\" 2>/dev/null
+            case \"\$bt_d\" in
+                ''|*[!0-9]*) bt_d='' ;;
+                *) [ \"\$bt_d\" -gt 1500 ] && bt_d=\$((bt_d / 100)) ;;
             esac
         fi
         # The battery sensor glitches (30.0 to 42.9 C and 18.5 C between two samples on the S25 Ultra while
         # charging, which capped the clocks for no reason): the median of the last three reads drops a single
-        # outlier either way, real heating still passes within 10 s.
-        if [ -n \"\$bt\" ]; then
-            rb=\$bt
-            bt=\$(awk -v a=\"\$bt\" -v b=\"\${b1:-\$bt}\" -v c=\"\${b2:-\${b1:-\$bt}}\" 'BEGIN { if (a + 0 > b + 0) { t = a; a = b; b = t } if (b + 0 > c + 0) { t = b; b = c; c = t } if (a + 0 > b + 0) { t = a; a = b; b = t } print b }')
+        # outlier either way, real heating still passes within 10 s. Integer tenths-of-C math avoids forking
+        # 2-3 awk processes + pidof every 10 s (~1,080 forks/hour).
+        if [ -n \"\$bt_d\" ]; then
+            rb=\$bt_d
+            _a=\$bt_d; _b=\${b1:-\$bt_d}; _c=\${b2:-\${b1:-\$bt_d}}
+            [ \$_a -gt \$_b ] && { _t=\$_a; _a=\$_b; _b=\$_t; }
+            [ \$_b -gt \$_c ] && { _t=\$_b; _b=\$_c; _c=\$_t; }
+            [ \$_a -gt \$_b ] && { _t=\$_a; _a=\$_b; _b=\$_t; }
+            bt_d=\$_b
             b2=\$b1; b1=\$rb
+            bt=\"\$((bt_d / 10)).\$((bt_d % 10))\"
         fi
         P=''
-        if [ -n \"\$bt\" ] && [ $GUEST_THERMAL_MAP = 1 ]; then
-            P=\$(pidof system_server 2>/dev/null)
-            P=\${P%% *}
+        if [ -n \"\$bt_d\" ] && [ $GUEST_THERMAL_MAP = 1 ]; then
+            if [ -n \"\$lp\" ] && [ -r \"/proc/\$lp/comm\" ]; then
+                _lcomm=''
+                IFS= read -r _lcomm < \"/proc/\$lp/comm\" 2>/dev/null
+                [ \"\$_lcomm\" = system_server ] && P=\$lp
+            fi
+            if [ -z \"\$P\" ]; then
+                P=\$(pidof system_server 2>/dev/null)
+                P=\${P%% *}
+            fi
         fi
-        if [ -n \"\$bt\" ] && [ -n \"\$P\" ]; then
+        if [ -n \"\$bt_d\" ] && [ -n \"\$P\" ]; then
             [ \"\$P\" = \"\$lp\" ] || tl=-1
             lp=\$P
-            nt=\$(awk -v s=\"\$bt\" -v l=\$tl 'BEGIN { t[1] = 46; t[2] = 48; t[3] = 50; t[4] = 53; if (l < 0) l = 0; while (l < 4 && s >= t[l + 1]) l++; while (l > 0 && s < t[l] - 1) l--; print l }')
+            nt=\$tl; [ \$nt -lt 0 ] && nt=0
+            while [ \$nt -lt 4 ]; do
+                case \$nt in 0) _th=460 ;; 1) _th=480 ;; 2) _th=500 ;; *) _th=530 ;; esac
+                [ \$bt_d -ge \$_th ] || break
+                nt=\$((nt + 1))
+            done
+            while [ \$nt -gt 0 ]; do
+                case \$nt in 1) _th=450 ;; 2) _th=470 ;; 3) _th=490 ;; *) _th=520 ;; esac
+                [ \$bt_d -lt \$_th ] || break
+                nt=\$((nt - 1))
+            done
             if [ \"\$nt\" != \"\$tl\" ]; then
                 if [ \"\$nt\" = 4 ]; then a=reset; w=\"the HAL status again\"; else a=\"override-status \$nt\"; w=\$nt; fi
                 r=\$(timeout 10 $BB nsenter -t \$P -m /system/bin/sh /data/oneos_genv.sh /system/bin/cmd thermalservice \$a 2>&1 | head -n 2 | tr '\\n' ' ')
@@ -4278,9 +4373,19 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
                 tl=\$nt
             fi
         fi
-        if [ -n \"\$bt\" ] && [ $HEAT_CAP = 1 ]; then
+        if [ -n \"\$bt_d\" ] && [ $HEAT_CAP = 1 ]; then
             tag=\"battery \$bt C\"
-            new=\$(awk -v b=\"\$bt\" -v l=\$lvl 'BEGIN { u[1] = 42; u[2] = 44; u[3] = 46; u[4] = 48; while (l < 4 && b >= u[l + 1]) l++; while (l > 0 && b < u[l] - 2) l--; print l }')
+            new=\$lvl
+            while [ \$new -lt 4 ]; do
+                case \$new in 0) _uh=420 ;; 1) _uh=440 ;; 2) _uh=460 ;; *) _uh=480 ;; esac
+                [ \$bt_d -ge \$_uh ] || break
+                new=\$((new + 1))
+            done
+            while [ \$new -gt 0 ]; do
+                case \$new in 1) _uh=400 ;; 2) _uh=420 ;; 3) _uh=440 ;; *) _uh=460 ;; esac
+                [ \$bt_d -lt \$_uh ] || break
+                new=\$((new - 1))
+            done
             if [ \"\$new\" = 0 ] && [ \$first = 1 ]; then
                 capped=''
                 [ \"$HOST_LOW_POWER\" = 0 ] && [ -r \$CFL ] && [ \"\$(cat \$CFL 2>/dev/null)\" != -1 ] && capped=1
@@ -4353,7 +4458,8 @@ if [ -w /sys/class/lcd/panel/local_hbm ]; then
             echo \"# \$(date +%T) stopped after \$offs resets\" >> \$F
             exit 0
         fi
-        v=\$(cat \$H 2>/dev/null)
+        v=''
+        [ -r \$H ] && IFS= read -r v < \$H 2>/dev/null
         case \"\$v\" in 0|'') n=0 ;; *) n=\$((n + 1)) ;; esac
         if [ \$n -ge 3 ]; then
             echo 0 > \$H 2>/dev/null; offs=\$((offs + 1)); n=0
