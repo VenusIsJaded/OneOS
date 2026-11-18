@@ -23,6 +23,13 @@ def worker_text():
     return SRC[a:b] + "\n"
 
 
+def takeover_text():
+    """stop_auto_compile from the app_storage_loop.sh heredoc."""
+    a = SRC.index("stop_auto_compile() {")
+    b = SRC.index("\n}\n", a) + 3
+    return SRC[a:b] + "\n"
+
+
 PM = """#!/bin/sh
 # the package list: $ROOTD/pkgs when a test wrote one; versionCodes from $ROOTD/vers ("pkg code"), default 1
 pk() { if [ -f "$ROOTD/pkgs" ]; then cat "$ROOTD/pkgs"; else printf 'com.sys.x\\ncom.user.a\\ncom.android.systemui\\ncom.user.b\\ncom.android.launcher\\ncom.sys.y\\n'; fi; }
@@ -354,6 +361,62 @@ class Compile(unittest.TestCase):
         order = self.order()
         self.assertEqual(sorted(order), sorted(set(order)), "an app was compiled twice: two workers ran")
         self.assertEqual(len(order), 6)
+
+    def takeover(self, lock_line, mode="auto"):
+        """Runs stop_auto_compile against a live fake worker (a shell with a long-running child)."""
+        d = self.p("data/oneos_compile")
+        os.makedirs(d, exist_ok=True)
+        open(os.path.join(d, "mode"), "w").write(mode + "\n")
+        w = subprocess.Popen(["sh", "-c", "sleep 60 & echo $! > %s; wait" % self.p("child.pid")],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(100):
+            if os.path.exists(self.p("child.pid")) and open(self.p("child.pid")).read().strip():
+                break
+            subprocess.run(["sleep", "0.05"])
+        child = int(open(self.p("child.pid")).read())
+        open(os.path.join(d, "lock"), "w").write(lock_line.replace("{pid}", str(w.pid))
+                                                 .replace("{start}", self.start_of(w.pid)) + "\n")
+        fn = takeover_text().replace("/data/oneos_compile", d)
+        open(self.p("take.sh"), "w").write(fn + "stop_auto_compile\n")
+        e = dict(os.environ, PATH=self.p("bin") + ":" + os.environ["PATH"], ROOTD=self.r)
+        subprocess.run(["sh", self.p("take.sh")], env=e, timeout=30)
+
+        def alive(pid):
+            try:
+                os.kill(pid, 0)
+                return "Z" not in open("/proc/%d/stat" % pid).read().rsplit(")", 1)[1].split()[0]
+            except (ProcessLookupError, FileNotFoundError):
+                return False
+        res = (alive(w.pid), alive(child), os.path.exists(os.path.join(d, "lock")))
+        for pid in (w.pid, child):
+            try:
+                os.kill(pid, 9)
+            except ProcessLookupError:
+                pass
+        w.wait()
+        return res
+
+    def test_takeover_stops_the_worker_and_the_compile_it_waits_for(self):
+        worker, child, lock = self.takeover("{pid} {start}")
+        self.assertFalse(worker)
+        self.assertFalse(child, "the foreground compile of the old worker survived the takeover")
+        self.assertTrue(lock, "the takeover must leave the lock to the new worker (it takes a dead owner's over)")
+
+    def test_takeover_leaves_a_reused_pid_alone(self):
+        worker, child, _ = self.takeover("{pid} 1")
+        self.assertTrue(worker)
+        self.assertTrue(child)
+
+    def test_takeover_leaves_a_running_now_job_alone(self):
+        worker, child, _ = self.takeover("{pid} {start}", mode="now")
+        self.assertTrue(worker)
+        self.assertTrue(child)
+
+    def test_new_worker_runs_after_the_takeover(self):
+        # the lock the takeover left belongs to a dead worker: a new one takes it over and runs
+        self.takeover("{pid} {start}")
+        self.run_worker("now")
+        self.assertEqual(len(self.order()), 6)
 
 
 if __name__ == "__main__":

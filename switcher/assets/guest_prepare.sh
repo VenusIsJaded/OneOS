@@ -6199,6 +6199,8 @@ pstart() {
 # <pid> <start>: that very process runs (a lock from an older worker has no start time: the pid alone).
 owner_alive() {
     [ -n "$1" ] && [ -d "/proc/$1" ] || return 1
+    oz_=''; IFS= read -r oz_ < "/proc/$1/stat" 2>/dev/null || return 1
+    oz_=${oz_##*\) }; [ "${oz_%% *}" = Z ] && return 1   # killed, not reaped yet: gone
     [ -n "$2" ] || return 0
     [ "$(pstart "$1")" = "$2" ]
 }
@@ -6358,6 +6360,38 @@ cat > "$STAGE/data/local/tmp/app_storage_loop.sh" <<'APPLOOP'
 last=""
 up=0
 pend=0
+# Takes over from a running automatic compile job (the button asks for "now"). The lock is "<pid> <start time>":
+# only that very process is stopped, with everything it started (the `cmd package compile` it waits for would
+# otherwise run on, orphaned), and it is waited for, so it cannot write the status of the job that follows. The
+# lock stays: the new worker finds its owner gone and takes it over.
+stop_auto_compile() {
+    [ -f /data/oneos_compile/lock ] || return 0
+    cm=''; IFS= read -r cm < /data/oneos_compile/mode 2>/dev/null
+    [ "$cm" = auto ] || return 0
+    cp=''; cst=''; read -r cp cst < /data/oneos_compile/lock 2>/dev/null
+    case "$cp" in ''|*[!0-9]*) return 0 ;; esac
+    cs=''; IFS= read -r cs < "/proc/$cp/stat" 2>/dev/null || return 0
+    cs=${cs##*\) }; [ "${cs%% *}" = Z ] && return 0
+    if [ -n "$cst" ]; then set -- $cs; [ $# -ge 20 ] || return 0; shift 19; [ "$1" = "$cst" ] || return 0; fi
+    kids=$(for sf in /proc/[0-9]*/stat; do
+        s=''; IFS= read -r s < "$sf" 2>/dev/null || continue
+        q=${sf#/proc/}; q=${q%/stat}; s=${s##*\) }; set -- $s
+        echo "$q $2"
+    done | awk -v r="$cp" '
+        { pp[$1] = $2 }
+        END { inset[r] = 1; ch = 1
+              while (ch) { ch = 0; for (p in pp) if (!(p in inset) && (pp[p] in inset)) { inset[p] = 1; ch = 1 } }
+              for (p in inset) if (p != r) print p }')
+    kill -9 "$cp" 2>/dev/null
+    [ -n "$kids" ] && kill -9 $kids 2>/dev/null
+    w=0
+    while [ $w -lt 10 ]; do
+        [ -d "/proc/$cp" ] || break
+        zs=''; IFS= read -r zs < "/proc/$cp/stat" 2>/dev/null || break
+        zs=${zs##*\) }; [ "${zs%% *}" = Z ] && break
+        sleep 1; w=$((w + 1))
+    done
+}
 # The OneOS app's Optimize apps screen reads this folder (it shows "not available" when it is missing, i.e. under an older session).
 mkdir -p /data/oneos_compile 2>/dev/null; chmod 755 /data/oneos_compile 2>/dev/null
 while true; do
@@ -6387,11 +6421,7 @@ while true; do
         case "$rq" in
             stop*) : > /data/oneos_compile/stop ;;
             now*)
-                if [ -f /data/oneos_compile/lock ]; then
-                    cm=''; IFS= read -r cm < /data/oneos_compile/mode 2>/dev/null
-                    cp=''; IFS= read -r cp < /data/oneos_compile/lock 2>/dev/null
-                    if [ "$cm" = auto ] && [ -n "$cp" ] && [ -d "/proc/$cp" ]; then kill "$cp" 2>/dev/null; rm -f /data/oneos_compile/lock; fi
-                fi
+                stop_auto_compile
                 ( /system/bin/sh /data/local/tmp/oneos_compile.sh now < /dev/null > /dev/null 2>&1 & ) ;;
         esac
     fi
