@@ -356,6 +356,20 @@ if [ -n "$GUEST_NS" ] && [ "$GUEST_NS" != "$HOST_NS" ]; then
         NF == 2 && $1 ~ /^[0-9]+$/ && $2 ~ /\/[0-9]+\/root$/ {
             p = $2; sub(/\/root$/, "", p); sub(/^.*\//, "", p); r[p] = $1; next }
         END { for (p in n) if ((n[p] "") != (ns "") && (dev == "" || ((p in r) && (r[p] "") != (dev "")))) printf "%s ", p }'
+    # Start time (field 22 of /proc/<pid>/stat, in clock ticks since boot) of a PID
+    # into RET_PSTART. The comm may hold spaces and parentheses, so the line is cut
+    # after its last ") "; the positional parameters are the function's own.
+    ret_pstart() {
+        RET_PSTART=""
+        _rs=""
+        { IFS= read -r _rs < "$1/stat"; } 2>/dev/null || return 1
+        _rs=${_rs##*) }
+        set -- $_rs
+        [ $# -ge 20 ] || return 1
+        shift 19
+        RET_PSTART=$1
+        [ -n "$RET_PSTART" ]
+    }
     seen=""
     pass=1
     while [ $pass -le 5 ]; do
@@ -364,9 +378,16 @@ if [ -n "$GUEST_NS" ] && [ "$GUEST_NS" != "$HOST_NS" ]; then
             awk -v ns="$GUEST_NS" -v dev="$GUEST_DEV" "$not_guest_ret_awk") "
         for p in /proc/[0-9]*; do
             pid=${p#/proc/}
-            # Speed: check the seen and bulk-verified host lists before per-PID probes.
-            case " $seen $other" in *" $pid "*) continue ;; esac
-            seen="$seen $pid"
+            # Speed: the bulk-verified host list first. A PID in it was read as a
+            # non-guest process by this pass's own listing, so it cannot be a
+            # recycled one.
+            case "$other" in *" $pid "*) continue ;; esac
+            # The seen list is keyed by PID and start time: a PID recycled
+            # during the teardown (a new guest process on the number of one just
+            # killed or skipped) has another start time and is inspected again.
+            ret_pstart "$p" || continue
+            case " $seen " in *" $pid:$RET_PSTART "*) continue ;; esac
+            seen="$seen $pid:$RET_PSTART"
             ns=$(readlink "$p/ns/mnt" 2>/dev/null)
             # A process in One UI's namespace is still checked by its root
             # mount below (cheap): something chrooted into the guest's root
