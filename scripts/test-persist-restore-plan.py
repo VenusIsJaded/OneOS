@@ -52,7 +52,15 @@ def run(mode='', store=0, code=None, rp_fails=False):
         (stage / 'snap').write_text(''.join(f'{k}={v}\n' for k, v in SNAPSHOT.items()))
         (stage / 'blanked').write_text(''.join(k + '\n' for k in BLANKED))
         rp = root / 'rp'
-        rp.write_text('#!/bin/sh\nfor a in "$@"; do printf "%s\\037" "$a"; done >> "$CALLS"; printf "\\n" >> "$CALLS"\n' + ('exit 1\n' if rp_fails else ''))
+        rp.write_text('#!/bin/sh\n'
+                      + ('exit 1\n' if rp_fails else '')
+                      + 'if [ "$1" = "-n" ] && [ "$2" = "-f" ]; then\n'
+                      + '    while IFS= read -r l; do\n'
+                      + '        [ -n "$l" ] && printf -- "-n\\037%s\\037%s\\037\\n" "${l%%=*}" "${l#*=}" >> "$CALLS"\n'
+                      + '    done < "$3"\n'
+                      + '    exit 0\n'
+                      + 'fi\n'
+                      + 'for a in "$@"; do printf "%s\\037" "$a"; done >> "$CALLS"; printf "\\n" >> "$CALLS"\n')
         rp.chmod(0o755)
         pre = ('getprop() { cat "$FIX/getprop"; }\nset -- restore-persist "$MODE"\n'
                'SNAP="$STAGE/snap"; BLANKED="$STAGE/blanked"; BOOT_ID=boot-1\n')

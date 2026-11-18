@@ -1895,11 +1895,23 @@ restore-persist)
                 print "R " l
             }
         }' > "$plan"
+    # Blank all guest-added persist props in one resetprop -n -f call when using
+    # the session's own store (~150-490 props on ColorOS/OriginOS), falling back
+    # to per-key writes only if the batch call fails.
+    sed -n 's/^B \(.*\)$/\1=/p' "$plan" > "$plan.blank"
+    batch_blank_ok=0
+    if [ -s "$plan.blank" ] && "$RP" -n -f "$plan.blank" 2>/dev/null; then
+        batch_blank_ok=1
+        sed -n 's/^B //p' "$plan" > "$BLANKED.persist"
+        blanked_p=$(wc -l < "$BLANKED.persist")
+    fi
+    rm -f "$plan.blank"
     # The whole line as it is: a restored value keeps its own leading and trailing spaces.
     while IFS= read -r line; do
         op=${line%% *}; val=${line#* }
         case "$op" in
-            B) if "$RP" -n "$val" "" 2>/dev/null; then echo "$val" >> "$BLANKED.persist"; blanked_p=$((blanked_p + 1)); else failed=$((failed + 1)); fi ;;
+            B) [ $batch_blank_ok = 1 ] && continue
+               if "$RP" -n "$val" "" 2>/dev/null; then echo "$val" >> "$BLANKED.persist"; blanked_p=$((blanked_p + 1)); else failed=$((failed + 1)); fi ;;
             D) if "$RP" -p --delete "$val" 2>/dev/null; then deleted=$((deleted + 1)); else failed=$((failed + 1)); fi ;;
             R) if "$RP" -p "${val%%=*}" "${val#*=}" 2>/dev/null; then restored=$((restored + 1)); else failed=$((failed + 1)); fi ;;
         esac

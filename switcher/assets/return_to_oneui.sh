@@ -467,11 +467,14 @@ for pair in $BRIDGES; do
 done
 # Never touch One UI's files, or start One UI in place, while a bridge is
 # still there: it would act on the guest's staged copy.
-still_bridged=""
-for pair in $BRIDGES; do
-    d=${pair%%:*}
-    awk -v p="/data/$d" '$5 == p' /proc/self/mountinfo | grep -q . && still_bridged="$still_bridged /data/$d"
-done
+still_bridged=$(awk -v bl="$BRIDGES" '
+    BEGIN {
+        n = split(bl, a, " ")
+        for (i = 1; i <= n; i++) { sub(/:.*/, "", a[i]); m["/data/" a[i]] = i; p[i] = "/data/" a[i] }
+    }
+    $5 in m { hit[m[$5]] = 1 }
+    END { for (i = 1; i <= n; i++) if (hit[i]) printf " %s", p[i] }
+' /proc/self/mountinfo)
 if [ -n "$still_bridged" ]; then
     echo "!!! still bridged:$still_bridged; rebooting"
     ONEOS_RETURN_MODE=reboot
@@ -813,21 +816,49 @@ gone=$("$BB" awk 'FILENAME == ARGV[1] { now[$0] = 1; next } !($0 in now) { print
 [ -z "$gone" ] || say "files a root tool bound into One UI's APEX modules (LSPosed's dex2oat wrapper, for one) are gone since the switch: ${gone}until that tool starts again"
 DIRECT=0; "$BB" dd --help 2>&1 | "$BB" grep -q direct && DIRECT=1
 read_mb=0
+dm_nodes=""
 for d in $("$BB" awk '$1 == "dev" {print $3} $1 == "loop" {print $2}' "$BASE/apex" | "$BB" sort -u); do
     nd=$(node $d) || failsafe "$d is gone"
     case $d in
         loop*) "$BB" losetup $nd >/dev/null 2>&1 || failsafe "$d no longer serves its backing file" ;;
         dm-*)
-            [ "$("$BB" cat /sys/block/$d/dm/suspended 2>/dev/null)" = 0 ] || failsafe "$d is suspended"
-            # Every block through dm-verity and its loop, past the page cache.
-            # Never a buffered read instead: that one goes through the cache.
+            susp=""
+            [ -r "/sys/block/$d/dm/suspended" ] && IFS= read -r susp < "/sys/block/$d/dm/suspended" 2>/dev/null
+            [ "$susp" = 0 ] || failsafe "$d is suspended"
             if [ $DIRECT = 1 ]; then
-                "$BB" timeout 60 "$BB" dd if=$nd of=/dev/null bs=1M iflag=direct 2>/dev/null ||
-                    failsafe "reading $d failed"
-                read_mb=$((read_mb + $("$BB" cat /sys/block/$d/size) / 2048))
+                dm_nodes="$dm_nodes $d:$nd"
+                sz=0
+                [ -r "/sys/block/$d/size" ] && IFS= read -r sz < "/sys/block/$d/size" 2>/dev/null
+                read_mb=$((read_mb + ${sz:-0} / 2048))
             fi ;;
     esac
 done
+# Every block through dm-verity and its loop, past the page cache (never a
+# buffered read instead: that one goes through the cache). Four concurrent
+# O_DIRECT readers saturate UFS queue depth instead of stalling serially per dm.
+if [ $DIRECT = 1 ] && [ -n "$dm_nodes" ]; then
+    rm -f "$S/inplace_dm.fail"
+    dm_pids=""
+    dm_n=0
+    for pair in $dm_nodes; do
+        d=${pair%%:*}; nd=${pair#*:}
+        ( "$BB" timeout 60 "$BB" dd if="$nd" of=/dev/null bs=1M iflag=direct 2>/dev/null || echo "$d" >> "$S/inplace_dm.fail" ) &
+        dm_pids="$dm_pids $!"
+        dm_n=$((dm_n + 1))
+        if [ $dm_n -ge 4 ]; then
+            wait $dm_pids
+            dm_pids=""; dm_n=0
+            [ ! -s "$S/inplace_dm.fail" ] || break
+        fi
+    done
+    [ -z "$dm_pids" ] || wait $dm_pids
+    if [ -s "$S/inplace_dm.fail" ]; then
+        bad_dm=$("$BB" head -n 1 "$S/inplace_dm.fail")
+        rm -f "$S/inplace_dm.fail"
+        failsafe "reading $bad_dm failed"
+    fi
+    rm -f "$S/inplace_dm.fail"
+fi
 # The kernel log since the switch, for errors on exactly these devices.
 # Joined with "|" and no empty entry: a trailing "|" ("loop9|)") made busybox
 # grep -E fail with "empty (sub)expression", and the scan then found nothing
@@ -884,31 +915,56 @@ STAGE=$S /system/bin/sh $S/guest_props.sh remove >> "$IPLOG" 2>&1
 # update (ART, permission modules; on 11-01 tzdata) and rebooted the phone ("Rollback staged
 # install"). persist.sys.disable_rescue stops RescueParty, not the rollback observer. So the window
 # and mitigation state go back to the switch's and One UI's start counts as its first.
-for k in crashrecovery.rescue_boot_start crashrecovery.boot_mitigation_count crashrecovery.boot_mitigation_start \
-         crashrecovery.attempting_reboot crashrecovery.attempting_factory_reset; do
-    put_back "$k"
-done
-"$RP" -n sys.rescue_boot_count 0 2>/dev/null
-"$RP" -n crashrecovery.rescue_boot_count 0 2>/dev/null
 # qemu.hw.mainkeys: AOSP's DisplayPolicy reads it at start ("1" = no navigation
 # bar); vivo's VivoDisplayPolicyImpl.setVivoNavBar(false) sets it to 1 when it
 # removes its own bar for gestures, and the seventh OriginOS run's return left
 # it at 1 for One UI's system_server. vold.has_adoptable: One UI's vold is not
 # restarted and set it once.
-for k in ro.control_privapp_permissions \
-         audio.offload.disable audio.deep_buffer.media audio.offload.video vendor.audio.offload.track.enable \
-         service.bootanim.exit oneos.guest.powerctl oneos.vivo.inner_display qemu.hw.mainkeys vold.has_adoptable; do
-    put_back "$k"
+# debug.* (surfaceflinger, hwui, renderengine) the guest set through the shared
+# property service and log.tag.* overrides are restored in one awk + resetprop -f
+# pass instead of ~150 per-key grep/sed/resetprop forks.
+getprop > "$S/inplace_props.mid"
+"$BB" awk '
+    function parse(l,   i) {
+        i = index(l, "]: [")
+        if (substr(l, 1, 1) != "[" || i < 3) return 0
+        PK = substr(l, 2, i - 2)
+        PV = substr(l, i + 4); sub(/\]$/, "", PV)
+        return 1
+    }
+    NR == FNR {
+        if (parse($0)) { b[PK] = PV; has_b[PK] = 1 }
+        next
+    }
+    parse($0) {
+        now[PK] = PV; has_n[PK] = 1
+    }
+    END {
+        n = split("crashrecovery.rescue_boot_start crashrecovery.boot_mitigation_count crashrecovery.boot_mitigation_start crashrecovery.attempting_reboot crashrecovery.attempting_factory_reset ro.control_privapp_permissions audio.offload.disable audio.deep_buffer.media audio.offload.video vendor.audio.offload.track.enable service.bootanim.exit oneos.guest.powerctl oneos.vivo.inner_display qemu.hw.mainkeys vold.has_adoptable", fixed, " ")
+        for (i = 1; i <= n; i++) want[fixed[i]] = 1
+        for (k in has_n) {
+            if (index(k, "log.tag.") == 1) want[k] = 1
+            else if (index(k, "debug.") == 1 && (!(k in has_b) || b[k] != now[k])) want[k] = 1
+        }
+        for (k in want) {
+            if (k in has_b) printf "S %s=%s\n", k, b[k]
+            else printf "D %s\n", k
+        }
+        printf "S sys.rescue_boot_count=0\nS crashrecovery.rescue_boot_count=0\n"
+    }
+' "$BASE/props" "$S/inplace_props.mid" > "$S/inplace_props.plan"
+"$BB" sed -n 's/^S //p' "$S/inplace_props.plan" > "$S/inplace_props.set"
+if [ -s "$S/inplace_props.set" ] && ! "$RP" -n -f "$S/inplace_props.set" 2>/dev/null; then
+    while IFS= read -r kv; do
+        "$RP" -n "${kv%%=*}" "${kv#*=}" 2>/dev/null
+    done < "$S/inplace_props.set"
+fi
+"$BB" sed -n 's/^D //p' "$S/inplace_props.plan" | while IFS= read -r k; do
+    "$RP" --delete "$k" 2>/dev/null
 done
+rm -f "$S/inplace_props.plan" "$S/inplace_props.set"
 [ "$(getprop qemu.hw.mainkeys)" = "$(base_prop qemu.hw.mainkeys)" ] ||
     failsafe "qemu.hw.mainkeys is still the guest's ($(getprop qemu.hw.mainkeys)): One UI would start without its navigation bar"
-for k in $(getprop | "$BB" sed -n 's/^\[\(log\.tag\.[^]]*\)\]: .*/\1/p'); do put_back "$k"; done
-# debug.* (surfaceflinger, hwui, renderengine) the guest set through the shared
-# property service: One UI's surfaceflinger reads them at start.
-getprop > "$S/inplace_props.mid"
-for k in $("$BB" awk -F'\\]: \\[' 'NR == FNR {b[$1] = $2; next} $1 ~ /^\[debug\./ && (!($1 in b) || b[$1] != $2) {sub(/^\[/, "", $1); print $1}' "$BASE/props" "$S/inplace_props.mid"); do
-    put_back "$k"
-done
 STAGE=$S /system/bin/sh $S/guest_props.sh restore-persist >> "$IPLOG" 2>&1 || failsafe "One UI's persist props could not be restored"
 # RescueParty stays off until One UI is up (in memory: the stored value is the
 # snapshot's again); the guest's system_server starts counted towards it.
@@ -1041,9 +1097,7 @@ g=0
 GUEST_DEV=$(cat $S/guest_rootdev 2>/dev/null)
 [ "$GUEST_DEV" = "$HOST_DEV" ] && GUEST_DEV=""
 if [ -n "$GUEST_DEV" ]; then
-    for p in /proc/[0-9]*; do
-        [ "$(stat -L -c %d "$p/root/" 2>/dev/null)" = "$GUEST_DEV" ] && g=$((g + 1))
-    done
+    g=$("$BB" stat -L -c %d /proc/[0-9]*/root/ 2>/dev/null | "$BB" awk -v d="$GUEST_DEV" '$1 == d { c++ } END { print c + 0 }')
 fi
 [ $g = 0 ] || failsafe "$g guest processes still running"
 for name in vold SurfaceFlinger media.audio_policy media.audio_flinger installd; do
@@ -1053,7 +1107,9 @@ for svc in vold keystore2 servicemanager hwservicemanager logd lmkd installd; do
     [ "$(base_prop init.svc.$svc)" = running ] || continue
     [ "$(getprop init.svc.$svc)" = running ] || failsafe "$svc is $(getprop init.svc.$svc), was running"
 done
-svcs=$(getprop | "$BB" awk -F'\\]: \\[' 'NR == FNR {b[$1] = $2; next} $1 ~ /^\[init\.svc\./ && ($1 in b) && b[$1] != $2 {sub(/^\[init\.svc\./, "", $1); print $1}' "$BASE/props" - | "$BB" tr '\n' ' ')
+getprop > "$S/inplace_props.gateb"
+svcs=$("$BB" awk -F'\\]: \\[' 'NR == FNR {b[$1] = $2; next} $1 ~ /^\[init\.svc\./ && ($1 in b) && b[$1] != $2 {sub(/^\[init\.svc\./, "", $1); print $1}' "$BASE/props" "$S/inplace_props.gateb" | "$BB" tr '\n' ' ')
+rm -f "$S/inplace_props.gateb"
 say "init services not as at the switch: ${svcs:-none}"
 say "Gate B: no guest process, One UI's services up, SELinux $(getenforce)"
 
@@ -1095,43 +1151,52 @@ fi
 # unlocked and 30 s more. Any death reboots right away: Samsung's bootchecker
 # reboots after a few anyway, and RescueParty would reset One UI's settings.
 t=0; ss=""
-while [ $t -lt 60 ]; do
+while [ $t -lt 240 ]; do
     # Two pids: a child system_server forked and has not exec'd yet; ask again.
     ss=$(pidof system_server); case "$ss" in *" "*) ss="" ;; esac
     [ -n "$ss" ] && break
-    sleep 1; t=$((t + 1))
+    sleep 0.25; t=$((t + 1))
 done
 [ -n "$ss" ] || failsafe "One UI's system_server did not start in 60 s"
 say "One UI's system_server $ss"
-t=0; up=0
+# Poll at 0.5 s until user 0 unlocks so the "Returning to One UI" splash
+# dismisses promptly, then every 2 s for the 30 s stability window.
+ticks=0; up_ticks=0
 while :; do
-    sleep 2; t=$((t + 2))
+    if [ $up_ticks -eq 0 ]; then
+        sleep 0.5; ticks=$((ticks + 1))
+    else
+        sleep 2; ticks=$((ticks + 4))
+    fi
+    t=$((ticks / 2))
     # The pid's own name, not pidof's list: a child system_server forks is named
     # system_server too until it execs, and "now 9787 25148" with 9787 alive was
     # a failsafe reboot for nothing (0.4.51 report e6a54d95, and 0.4.31).
-    if [ "$("$BB" cat /proc/$ss/comm 2>/dev/null)" != system_server ]; then
+    comm_ss=""
+    [ -r "/proc/$ss/comm" ] && IFS= read -r comm_ss < "/proc/$ss/comm" 2>/dev/null
+    if [ "$comm_ss" != system_server ]; then
         now=$(pidof system_server)
         failsafe "One UI's system_server $ss died after ${t}s (now ${now:-none})"
     fi
     [ "$(getprop init.svc.zygote)" = running ] || failsafe "zygote is $(getprop init.svc.zygote)"
-    if [ $up = 0 ]; then
+    if [ $up_ticks -eq 0 ]; then
         st=$(timeout 5 am get-started-user-state 0 2>&1)
         case "$st" in
-            *RUNNING_UNLOCKED*) up=$t; say "user 0 unlocked after ${t}s" ;;
+            *RUNNING_UNLOCKED*) up_ticks=$ticks; say "user 0 unlocked after ${t}s" ;;
             # An am without the command: One UI's home screen process instead.
-            *nknown*|*rror*) pidof com.sec.android.app.launcher >/dev/null && { up=$t; say "One UI Home running after ${t}s"; } ;;
+            *nknown*|*rror*) pidof com.sec.android.app.launcher >/dev/null && { up_ticks=$ticks; say "One UI Home running after ${t}s"; } ;;
         esac
         # 0.5.07: One UI is up, so the "Returning to One UI" layer goes now. It ends
         # itself on One UI's boot events, but twice it stayed over a working One UI
         # (S24 FE HyperOS fbc98ae7, S24 OriginOS f4a3c170: "the Returning to One UI
         # didn't disappear").
-        if [ $up -gt 0 ] && type oneos_boot_stop >/dev/null 2>&1; then
+        if [ $up_ticks -gt 0 ] && type oneos_boot_stop >/dev/null 2>&1; then
             oneos_boot_stop
             say "Return splash: stopped (One UI is up)"
         fi
     fi
-    [ $up -gt 0 ] && [ $t -ge $((up + 30)) ] && break
-    [ $up = 0 ] && [ $t -ge 180 ] && failsafe "user 0 not unlocked within 180 s"
+    [ $up_ticks -gt 0 ] && [ $ticks -ge $((up_ticks + 60)) ] && break
+    [ $up_ticks -eq 0 ] && [ $ticks -ge 360 ] && failsafe "user 0 not unlocked within 180 s"
 done
 
 norm_iprule() {
