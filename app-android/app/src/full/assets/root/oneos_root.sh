@@ -2069,15 +2069,40 @@ do_selfupdate() {
 # delete system.raw under them (0.4.69 A54 204aa0f8, two app updates at 02:40, then system.raw gone
 # 28 s after a launch that had checked it). The lock is a file in the stage's bin folder holding
 # the pid, made with noclobber; one whose pid is no longer this script is stale and taken over.
+# A pid alone is reused, and a command line that merely contains "oneos_root" is any
+# process's: the lock holds "<pid> <start time>" (field 22 of /proc/<pid>/stat, cut
+# after the last ") " because the name may hold spaces), and only that very process
+# keeps it. A lock with no start time is an older app's: it keeps its old test.
+lock_pstart() {
+    lps=$(cat "$PROC/$1/stat" 2>/dev/null) || return 1
+    lps=${lps##*) }
+    set -- $lps
+    [ $# -ge 20 ] || return 1
+    shift 19
+    echo "$1"
+}
+lock_owner_alive() {
+    is_dec "$1" && [ "$1" != "$$" ] || return 1
+    if [ -n "$2" ]; then
+        [ "$(lock_pstart "$1")" = "$2" ] || return 1
+        lps=$(cat "$PROC/$1/stat" 2>/dev/null)
+        lps=${lps##*) }
+        [ "${lps%% *}" != Z ]
+    else
+        tr '\000' ' ' < "$PROC/$1/cmdline" 2>/dev/null | grep -q -F oneos_root
+    fi
+}
 take_lock() {
     LOCK="$STAGE/bin/.lock"
-    if ! ( set -C; echo $$ > "$LOCK" ) 2>/dev/null; then
-        p=$(cat "$LOCK" 2>/dev/null)
-        if is_dec "$p" && [ "$p" != "$$" ] && tr '\000' ' ' < "$PROC/$p/cmdline" 2>/dev/null | grep -q -F oneos_root; then
+    me="$$ $(lock_pstart $$)"
+    if ! ( set -C; echo "$me" > "$LOCK" ) 2>/dev/null; then
+        p=''; pst=''
+        read -r p pst < "$LOCK" 2>/dev/null
+        if lock_owner_alive "$p" "$pst"; then
             refuse "another OneOS step is still running (pid $p): wait for it to end, or restart the phone"
         fi
         rm -f "$LOCK"
-        ( set -C; echo $$ > "$LOCK" ) 2>/dev/null || refuse "another OneOS step is starting: try again"
+        ( set -C; echo "$me" > "$LOCK" ) 2>/dev/null || refuse "another OneOS step is starting: try again"
     fi
     trap 'rm -f "$LOCK"' EXIT
 }
