@@ -92,5 +92,51 @@ class HostApexStamp(unittest.TestCase):
         self.assertEqual((1, True, False), (code, disk, stamp))
 
 
+class HostApexIncompleteWalk(unittest.TestCase):
+    """A look that could not read the files must not pass or leave a stamp (follow-up audit N11)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.phone = Phone(self.tmp.name)
+
+    def test_a_missing_module_directory_is_unreadable_and_leaves_no_stamp(self):
+        import shutil
+        shutil.rmtree(self.phone.root / 'apex/com.x')
+        line, code, _, stamp = self.phone.look('after-inplace')
+        self.assertIn('1 unreadable', line)
+        self.assertIn('(missing)', line)
+        self.assertEqual((1, False), (code, stamp))
+
+    def test_a_module_with_no_files_is_unreadable(self):
+        import shutil
+        shutil.rmtree(self.phone.root / 'apex/com.x/lib')
+        (self.phone.root / 'apex/com.x/manifest').unlink()
+        line, code, _, stamp = self.phone.look('after-inplace')
+        self.assertIn('(no files)', line)
+        self.assertEqual((1, False), (code, stamp))
+
+    @unittest.skipIf(os.geteuid() == 0, 'root can list a mode 000 directory')
+    def test_a_directory_that_cannot_be_listed_fails_the_look(self):
+        sub = self.phone.root / 'apex/com.x/lib'
+        os.chmod(sub, 0)
+        self.addCleanup(os.chmod, sub, 0o755)
+        line, code, _, stamp = self.phone.look('after-inplace')
+        self.assertIn('(not listable)', line)
+        self.assertEqual((1, False), (code, stamp))
+
+    def test_a_failed_drop_of_the_page_cache_is_said_and_leaves_no_stamp(self):
+        self.phone.script = self.phone.script.replace(str(self.phone.root / 'dropped'), '/proc/nonexistent/drop')
+        line, code, _, stamp = self.phone.look('after-inplace')
+        self.assertIn('page cache NOT dropped', line)
+        self.assertNotIn('(read from disk)', line)
+        self.assertEqual((0, False), (code, stamp), 'the files were read, but not from disk: no stamp may suppress the next disk read')
+
+    def test_a_working_look_is_unchanged(self):
+        line, code, _, stamp = self.phone.look('after-inplace')
+        self.assertEqual('[after-inplace] host APEXes on /data: 1 modules, 2 files, 0 unreadable (read from disk)', line)
+        self.assertEqual((0, True), (code, stamp))
+
+
 if __name__ == '__main__':
     unittest.main()
