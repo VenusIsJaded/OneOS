@@ -306,11 +306,20 @@ restore-props)
     snapshot="$A/oneos/run/module-props"
     if [ -f "$snapshot" ]; then
         [ -x "$A/ksu/bin/resetprop" ] || exit 1
+        # resetprop can exit 0 and leave the property as it was (a full property area): each write is read
+        # back, and the snapshot (the only record) is kept for the next try unless every one landed.
+        bad=0
         while IFS='|' read -r key present value; do
             case "$key" in ''|*[!A-Za-z0-9._-]*) exit 1 ;; esac
-            if [ "$present" = 1 ]; then "$A/ksu/bin/resetprop" -n "$key" "$value"
-            else "$A/ksu/bin/resetprop" --delete "$key"; fi
+            if [ "$present" = 1 ]; then
+                "$A/ksu/bin/resetprop" -n "$key" "$value"
+                [ "$(getprop "$key")" = "$value" ] || { echo "Guest runtime: $key was not restored to its earlier value" >&2; bad=$((bad + 1)); }
+            else
+                "$A/ksu/bin/resetprop" --delete "$key"
+                [ -z "$(getprop "$key")" ] || { echo "Guest runtime: $key was not removed" >&2; bad=$((bad + 1)); }
+            fi
         done < "$snapshot"
+        [ "$bad" = 0 ] || { echo "Guest runtime: $bad module properties not restored; keeping $snapshot" >&2; exit 1; }
         rm -f "$snapshot"
     fi
     ;;
