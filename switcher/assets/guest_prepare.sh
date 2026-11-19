@@ -3428,7 +3428,7 @@ if [ "${ONEOS_PROFILE:-}" = f8 ] && grep -q '^  "set": "pixel-f8",$' "$STAGE/.on
 elif [ "${ONEOS_PROFILE:-}" = f8u ] && grep -q '^  "set": "pixel-f8u",$' "$STAGE/.oneos_stage"; then
     UNFOLD_RRO=OneOSPixelUnfold.apk
 fi
-if [ "${ONEOS_PROFILE:-}" = f8 ] && grep -q '^  "image": "\(lineage24-infiniti\|infinityx41-findx9u\)",$' "$STAGE/.oneos_stage" && [ -f "$STAGE/OneOSSettingsSplit.apk" ]; then
+if [ "${ONEOS_PROFILE:-}" = f8 ] && grep -qE '^  "image": "(lineage24-infiniti|infinityx41-findx9u)",$' "$STAGE/.oneos_stage" && [ -f "$STAGE/OneOSSettingsSplit.apk" ]; then
     mkdir -p "$STAGE/oem/overlay" &&
         cp "$STAGE/OneOSSettingsSplit.apk" "$STAGE/oem/overlay/" &&
         chmod 644 "$STAGE/oem/overlay/OneOSSettingsSplit.apk" &&
