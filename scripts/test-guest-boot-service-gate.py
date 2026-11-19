@@ -4,7 +4,14 @@ import os,subprocess,tempfile,unittest
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 s=(ROOT/'switcher/assets/guest_start.sh').read_text()
-RESET=s[s.index('# Properties are shared: One UI left boot_completed=1.'):s.index('echo "[Pivoted Root] Launching guest Zygote')]
+# Only the decision block (the `if [ -f /data/oneos_root/enabled ]; then setprop ...; fi` that follows the comment).
+# The old slice ran on to the "Launching guest Zygote" line: 570 lines with the guest's odrefresh, Bring-apps, wave
+# APK and sm_diag blocks, which as root ran host odrefresh and wrote host /data/odrefresh.log (follow-up audit N12).
+_a=s.index('# Properties are shared: One UI left boot_completed=1.')
+_b=s.index('\nfi\n',s.index('if [ -f /data/oneos_root/enabled ]; then',_a))+len('\nfi\n')
+RESET=s[_a:_b]
+assert RESET.count('\n')<12,'the boot-flag block grew: re-check what this test executes'
+for _bad in ('odrefresh','/data/oneos_sm_diag.log','/apex','pm ','mount'):assert _bad not in RESET,_bad
 class BootGateTest(unittest.TestCase):
  def run_handoff(self,enabled):
   with tempfile.TemporaryDirectory() as d:
