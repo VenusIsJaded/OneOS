@@ -84,7 +84,7 @@ def session_app(data):
             info = z.getinfo(names[0])
             if info.file_size > 256 * 1024:
                 return None
-            rep = json.loads(z.read(names[0]).decode("utf-8", "replace"))
+            rep = json.loads(head(z, info, 256 * 1024 + 1).decode("utf-8", "replace"))
             app = rep.get("app")
             ses = rep.get("session")
     except Exception:
@@ -112,6 +112,13 @@ def garbage(b):
     return b.count(b" ") + b.count(b"\n") < len(b) * 0.06
 
 
+def head(z, info, n=4096):
+    """The first n bytes of a zip member, decompressed from a stream: z.read(info)[:n] would first
+    inflate the whole member (a tester's upload: 1.8 MB of zip held 1.8 GB of log)."""
+    with z.open(info) as f:
+        return f.read(n)
+
+
 def implausible(data, logs):
     """Why a log bundle cannot be a real session, or None (11-18: 622 scripted reports from four throwaway
     accounts, each ~200 log files of random characters). Not the size: real full logs can be small (some
@@ -120,7 +127,7 @@ def implausible(data, logs):
         with zipfile.ZipFile(io.BytesIO(bytes(data))) as z:
             logs_in = [i for i in z.infolist() if i.filename.endswith(".log") and i.file_size >= 32]
             if len(logs_in) >= 10:
-                bad = sum(1 for i in logs_in if garbage(z.read(i)[:4096]))
+                bad = sum(1 for i in logs_in if garbage(head(z, i)))
                 if bad * 2 >= len(logs_in):
                     return f"{bad} of {len(logs_in)} log files are random characters"
     except zipfile.BadZipFile:

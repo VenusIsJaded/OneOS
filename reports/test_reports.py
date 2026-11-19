@@ -74,6 +74,46 @@ class PullTest(unittest.TestCase):
             self.assertIn("bad report id", pull.collect(svc, name, d, keep=False))
 
 
+class UntrustedZipTest(unittest.TestCase):
+    """The log bundle and the findings zip are a tester's upload: reading them must not inflate whole members."""
+
+    @staticmethod
+    def bomb(names, size):
+        import io
+        import zipfile
+        b = io.BytesIO()
+        with zipfile.ZipFile(b, "w", zipfile.ZIP_DEFLATED) as z:
+            for n in names:
+                z.writestr(n, b"x" * size)
+        return b.getvalue()
+
+    @staticmethod
+    def peak(fn):
+        import tracemalloc
+        tracemalloc.start()
+        try:
+            out = fn()
+            return out, tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+    def test_implausible_reads_only_the_head_of_each_log(self):
+        data = self.bomb([f"l{i}.log" for i in range(12)], 40 * 1024 * 1024)
+        why, peak = self.peak(lambda: pull.implausible(data, None))
+        self.assertIn("12 of 12", why)  # still judged from the first 4 KiB
+        self.assertLess(peak, 4 * 1024 * 1024, f"peak {peak} bytes: whole members were inflated")
+
+    def test_findings_summary_is_capped(self):
+        import io
+        import zipfile
+        import notify
+        data = self.bomb(["summary.txt", "cpu/uname.txt"], 40 * 1024 * 1024)
+        (text, uname), peak = self.peak(lambda: notify._summary(zipfile.ZipFile(io.BytesIO(data))))
+        self.assertEqual(notify.MEMBER_MAX, len(text))
+        self.assertEqual(notify.MEMBER_MAX, len(uname))
+        self.assertLess(peak, 4 * 1024 * 1024, f"peak {peak} bytes: whole members were inflated")
+
+
 class DevicesTest(unittest.TestCase):
     @staticmethod
     def phone(pid, label, model, chip):

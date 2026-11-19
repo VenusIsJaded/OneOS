@@ -23,12 +23,23 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 
 
+MEMBER_MAX = 256 * 1024  # a probe's summary.txt and uname.txt are a few KB; the zip is a tester's upload
+
+
+def _member(zf, name):
+    """At most MEMBER_MAX bytes of one member, streamed (zf.read would inflate all of it)."""
+    if not name:
+        return ""
+    with zf.open(name) as f:
+        return f.read(MEMBER_MAX).decode(errors="replace")
+
+
 def _summary(zf):
     names = zf.namelist()
     s = next((n for n in names if n.endswith("/summary.txt") or n == "summary.txt"), None)
     u = next((n for n in names if n.endswith("cpu/uname.txt")), None)
-    text = zf.read(s).decode(errors="replace") if s else ""
-    uname = zf.read(u).decode(errors="replace") if u else ""
+    text = _member(zf, s)
+    uname = _member(zf, u)
     return text, uname
 
 
