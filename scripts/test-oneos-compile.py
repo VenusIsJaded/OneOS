@@ -203,9 +203,21 @@ class Compile(unittest.TestCase):
 
     def test_second_instance_exits_while_one_is_running(self):
         os.makedirs(self.p("data/oneos_compile"))
-        open(self.p("data/oneos_compile/lock"), "w").write("%d\n" % os.getpid())
+        open(self.p("data/oneos_compile/lock"), "w").write("%d %s\n" % (os.getpid(), self.start_of(os.getpid())))
         self.run_worker("now")
         self.assertEqual(self.order(), [])
+
+    def test_pid_only_lock_is_stale_and_its_pid_is_left_alone(self):
+        # an older worker's lock names only a pid; that pid is a live, unrelated process here
+        os.makedirs(self.p("data/oneos_compile"))
+        open(self.p("data/oneos_compile/lock"), "w").write("%d\n" % os.getpid())
+        self.run_worker("now")
+        self.assertEqual(len(self.order()), 6)
+
+    def test_takeover_never_signals_a_pid_only_lock(self):
+        worker, child, lock = self.takeover("{pid}")
+        self.assertTrue(worker, "an unrelated process was killed from a lock with no start time")
+        self.assertTrue(child)
 
     def test_after_done_auto_compiles_only_new_or_updated_versions_quietly(self):
         self.battery("Charging")

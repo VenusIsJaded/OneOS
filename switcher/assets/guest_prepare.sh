@@ -6214,12 +6214,12 @@ pstart() {
     ps_=${ps_##*\) }; set -- $ps_; [ $# -ge 20 ] || return 1
     shift 19; echo "$1"
 }
-# <pid> <start>: that very process runs (a lock from an older worker has no start time: the pid alone).
+# <pid> <start>: that very process runs. A lock without a start time is an older worker's: the guest is
+# restarted for every session, so no such worker survives, and its pid is some other process's by now: stale.
 owner_alive() {
-    [ -n "$1" ] && [ -d "/proc/$1" ] || return 1
+    [ -n "$1" ] && [ -n "$2" ] && [ -d "/proc/$1" ] || return 1
     oz_=''; IFS= read -r oz_ < "/proc/$1/stat" 2>/dev/null || return 1
     oz_=${oz_##*\) }; [ "${oz_%% *}" = Z ] && return 1   # killed, not reaped yet: gone
-    [ -n "$2" ] || return 0
     [ "$(pstart "$1")" = "$2" ]
 }
 # Created exclusively (noclobber = O_EXCL): two simultaneous starts cannot both get the lock.
@@ -6400,7 +6400,10 @@ stop_auto_compile() {
     case "$cp" in ''|*[!0-9]*) return 0 ;; esac
     cs=''; IFS= read -r cs < "/proc/$cp/stat" 2>/dev/null || return 0
     cs=${cs##*\) }; [ "${cs%% *}" = Z ] && return 0
-    if [ -n "$cst" ]; then set -- $cs; [ $# -ge 20 ] || return 0; shift 19; [ "$1" = "$cst" ] || return 0; fi
+    # A lock without a start time (an older worker's) names a pid that may be anyone's now: never signalled.
+    # The next worker finds it stale (owner_alive) and takes it over.
+    [ -n "$cst" ] || return 0
+    set -- $cs; [ $# -ge 20 ] || return 0; shift 19; [ "$1" = "$cst" ] || return 0
     kids=$(for sf in /proc/[0-9]*/stat; do
         s=''; IFS= read -r s < "$sf" 2>/dev/null || continue
         q=${sf#/proc/}; q=${q%/stat}; s=${s##*\) }; set -- $s
