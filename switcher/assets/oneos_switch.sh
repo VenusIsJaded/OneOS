@@ -2496,6 +2496,7 @@ GUEST_OXYGEN=0; grep -q '^  "image": "oxygenos' "$STAGE/.oneos_stage" 2>/dev/nul
 # waits for a double click of Nothing's own key, which a Galaxy cannot send through (owner's A36). Only the one
 # boolean is changed, and only when it reads exactly false; the app is stopped first so it reads it again.
 if [ -e "$STAGE/rootfs/system_ext/framework/nt-telephony-common.jar" ] && [ -d "$STAGE/data" ]; then
+    rm -f "$STAGE/data/oneos_essential_open.sh"
     cat > "$STAGE/data/oneos_essential_open.sh" <<'ESSOPEN'
 #!/system/bin/sh
 # oneos_essential_open.sh <guest system_server pid> <busybox>

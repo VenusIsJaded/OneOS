@@ -2042,6 +2042,7 @@ if [ "$VG" = 2 ]; then
         fi
         echo "Bound ${b%%:*} -> $dst"
     done
+    rm -f "$STAGE/data/oneos_vold_name"
     echo gvld > "$STAGE/data/oneos_vold_name"
     echo "Guest vold: registers gvld; One UI's vold keeps vold and android.system.vold.IVold/default"
 elif [ "$VG" != 0 ]; then
@@ -3100,6 +3101,7 @@ if [ -f "$FEAT" ]; then
                     $BB mount --bind "$PSUI" "$PAPK" &&
                         $BB mount -o remount,bind,ro "$PSUI" "$PAPK" 2>/dev/null
                     if [ "$(stat -c %d:%i "$PAPK" 2>/dev/null)" = "$(stat -c %d:%i "$PSUI")" ]; then
+                        rm -f "$STAGE/data/oneos_panoramic_aod.sh"
                         cat > "$STAGE/data/oneos_panoramic_aod.sh" <<'PANO'
 uri=content://com.oplus.customize.coreapp.configmanager.configprovider.AppFeatureProvider/app_feature
 f=com.oplus.systemui.panoramic_aod.enable
@@ -3454,6 +3456,7 @@ if [ $INJ = 1 ]; then
 fi
 if [ "${ONEOS_GUEST_APP:-1}" = 1 ]; then
     mkdir -p "$STAGE/data/oneos_bootui"
+    rm -f "$STAGE/data/oneos_bootui/boot_status.sh"
     cp "$STAGE/boot_status.sh" "$STAGE/data/oneos_bootui/boot_status.sh"
     chmod 644 "$STAGE/data/oneos_bootui/boot_status.sh"
     GUEST_APP_APK="$STAGE/OneOSGuest.apk"
@@ -4498,7 +4501,7 @@ done
 # vivo_config.ini without the hardware features): without vivo's config store HAL
 # every vivo feature read as off. ONEOS_GUEST_VIVO_FEATURES=0 leaves them off.
 if [ -f "$STAGE/oneos-vivo-features.txt" ] && [ "${ONEOS_GUEST_VIVO_FEATURES:-1}" = 1 ]; then
-    mkdir -p "$STAGE/data/system" && cp -f "$STAGE/oneos-vivo-features.txt" "$STAGE/data/system/oneos_vivo_features" &&
+    mkdir -p "$STAGE/data/system" && rm -f "$STAGE/data/system/oneos_vivo_features" && cp -f "$STAGE/oneos-vivo-features.txt" "$STAGE/data/system/oneos_vivo_features" &&
         chmod 644 "$STAGE/data/system/oneos_vivo_features" &&
         echo "Guest vivo features: $(tr '&' '\n' < "$STAGE/data/system/oneos_vivo_features" | grep -c 'vivo-support$') from the vendor's vivo_config.ini"
     # vivo's SuperX (atomic) notifications: VivoSuperXNotificationManager turns its scene
@@ -5842,6 +5845,7 @@ echo "=== 5e. $(date +%T) Writing per-package data-dir helper ==="
 # This helper recreates the dirs for every package the guest knows about, with
 # the uid PMS reports. oneos_switch.sh runs it once the container is up.
 mkdir -p "$STAGE/data/local/tmp" 2>/dev/null || true
+rm -f "$STAGE/data/local/tmp/fix_app_dirs.sh"   # never write through a link the guest planted there
 cat > "$STAGE/data/local/tmp/fix_app_dirs.sh" <<'FIXAPPDIRS'
 #!/system/bin/sh
 # Create missing CE/DE data dirs (and dexopt profile dirs) for every installed
@@ -5977,6 +5981,7 @@ chmod 755 "$STAGE/data/local/tmp/fix_app_dirs.sh" 2>/dev/null || true
 # /data/user_de/0/<pkg>: No such file or directory". Every app installed from
 # inside the guest -- Play Store, Aurora, adb -- used to crash on launch this way.
 # Create the scaffolding installd would; /data_mirror is a bind of these trees.
+rm -f "$STAGE/data/local/tmp/ensure_app_storage.sh"   # never write through a link the guest planted there
 cat > "$STAGE/data/local/tmp/ensure_app_storage.sh" <<'ENSUREAPP'
 #!/system/bin/sh
 created=0
@@ -6045,6 +6050,7 @@ chmod 755 "$STAGE/data/local/tmp/ensure_app_storage.sh" 2>/dev/null || true
 
 # A new install only becomes launchable once the dirs above exist, so sweep
 # while the guest is running instead of at boot only. Started by guest_start.
+rm -f "$STAGE/data/local/tmp/net_fix.sh"   # never write through a link the guest planted there
 cat > "$STAGE/data/local/tmp/net_fix.sh" <<'NETFIX'
 #!/system/bin/sh
 # The guest's ConnectivityService cannot install its routes into the host's
@@ -6180,6 +6186,7 @@ exit 0
 NETFIX
 chmod 755 "$STAGE/data/local/tmp/net_fix.sh" 2>/dev/null || true
 
+rm -f "$STAGE/data/local/tmp/oneos_compile.sh"   # never write through a link the guest planted there
 cat > "$STAGE/data/local/tmp/oneos_compile.sh" <<'COMPILEEOF'
 #!/system/bin/sh
 # OneOS: compiles the guest's apps (guest_prepare.sh writes this file, app_storage_loop.sh starts it).
@@ -6379,6 +6386,7 @@ unlock
 COMPILEEOF
 chmod 755 "$STAGE/data/local/tmp/oneos_compile.sh" 2>/dev/null || true
 
+rm -f "$STAGE/data/local/tmp/app_storage_loop.sh"   # never write through a link the guest planted there
 cat > "$STAGE/data/local/tmp/app_storage_loop.sh" <<'APPLOOP'
 #!/system/bin/sh
 # Watches for installs/removals, gives the new package its data dirs, and makes
