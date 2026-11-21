@@ -30,8 +30,14 @@ def _member(zf, name):
     """At most MEMBER_MAX bytes of one member, streamed (zf.read would inflate all of it)."""
     if not name:
         return ""
-    with zf.open(name) as f:
-        return f.read(MEMBER_MAX).decode(errors="replace")
+    try:
+        info = zf.getinfo(name)
+        if info.flag_bits & 0x1:
+            return ""
+        with zf.open(info) as f:
+            return f.read(MEMBER_MAX).decode(errors="replace")
+    except (KeyError, zipfile.BadZipFile, RuntimeError, NotImplementedError, EOFError, OSError):
+        return ""
 
 
 def _summary(zf):

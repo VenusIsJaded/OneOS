@@ -23,7 +23,6 @@ read them with python -I, as with any upload.
 import argparse
 import hashlib
 import io
-import zipfile
 import json
 import os
 import re
@@ -31,6 +30,8 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
+import zipfile
 
 HOME = os.path.expanduser("~")
 DEFAULT_DEST = "/srv/projects/OneOS/out/reports"
@@ -112,9 +113,24 @@ def garbage(b):
     return b.count(b" ") + b.count(b"\n") < len(b) * 0.06
 
 
+MAX_ARCHIVE_ENTRIES = 4096
+MAX_LOGS_SAMPLED = 128
+SAFE_ZNAME = re.compile(r"^[A-Za-z0-9_.-]{1,120}$")
+
+
+def safe_zip_name(raw_name, fallback="logs.zip"):
+    """Sanitize uploaded archive filename and forbid colliding with report.json metadata (audit A10)."""
+    base = os.path.basename(raw_name or fallback)
+    if not base or base.lower() == "report.json" or not SAFE_ZNAME.fullmatch(base) or base in (".", ".."):
+        return fallback
+    return base
+
+
 def head(z, info, n=4096):
     """The first n bytes of a zip member, decompressed from a stream: z.read(info)[:n] would first
     inflate the whole member (a tester's upload: 1.8 MB of zip held 1.8 GB of log)."""
+    if info.flag_bits & 0x1:
+        raise RuntimeError(f"member {info.filename!r} is encrypted")
     with z.open(info) as f:
         return f.read(n)
 
@@ -125,13 +141,22 @@ def implausible(data, logs):
     were cut to under 1 MB), so only what is inside counts."""
     try:
         with zipfile.ZipFile(io.BytesIO(bytes(data))) as z:
-            logs_in = [i for i in z.infolist() if i.filename.endswith(".log") and i.file_size >= 32]
+            infos = z.infolist()
+            if len(infos) > MAX_ARCHIVE_ENTRIES:
+                return f"archive has {len(infos)} entries (limit {MAX_ARCHIVE_ENTRIES})"
+            for i in infos:
+                if i.flag_bits & 0x1:
+                    return "archive contains encrypted entries"
+            logs_in = [i for i in infos if i.filename.endswith(".log") and i.file_size >= 32]
             if len(logs_in) >= 10:
-                bad = sum(1 for i in logs_in if garbage(head(z, i)))
-                if bad * 2 >= len(logs_in):
-                    return f"{bad} of {len(logs_in)} log files are random characters"
+                sample = logs_in[:MAX_LOGS_SAMPLED]
+                bad = sum(1 for i in sample if garbage(head(z, i)))
+                if bad * 2 >= len(sample):
+                    return f"{bad} of {len(sample)} log files are random characters"
     except zipfile.BadZipFile:
         return None  # judged by the record alone (two old reports of 11-11 were stored that way)
+    except (RuntimeError, NotImplementedError, zlib.error, EOFError, OSError) as e:
+        return f"unreadable zip member ({type(e).__name__})"
     return None
 
 
@@ -154,7 +179,7 @@ def collect(svc, name, dest, keep, seen=None):
     logs = record.get("logs")
     parts = []
     if logs:
-        zname = os.path.basename(logs.get("name") or "logs.zip")
+        zname = safe_zip_name(logs.get("name"), "logs.zip")
         data = bytearray()
         for i in range(int(logs["parts"])):
             key = f"part:{rid}:{i}"
@@ -237,7 +262,7 @@ def main():
     for name in svc.keys("report:"):
         try:
             print(collect(svc, name, a.dest, a.keep, seen=seen), flush=True)
-        except (urllib.error.URLError, ValueError, KeyError) as e:
+        except (urllib.error.URLError, ValueError, KeyError, RuntimeError, NotImplementedError, zlib.error, OSError) as e:
             print(f"error {name}: {e}", flush=True)
 
 

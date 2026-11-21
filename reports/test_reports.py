@@ -113,6 +113,75 @@ class UntrustedZipTest(unittest.TestCase):
         self.assertEqual(notify.MEMBER_MAX, len(uname))
         self.assertLess(peak, 4 * 1024 * 1024, f"peak {peak} bytes: whole members were inflated")
 
+    def test_devices_scan_summary_is_capped(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "2026-11-19", "findings-1")
+            os.makedirs(p)
+            data = self.bomb(["summary.txt"], 40 * 1024 * 1024)
+            with open(os.path.join(p, "findings.zip"), "wb") as f:
+                f.write(data)
+            _, peak = self.peak(lambda: devices.scan({"phones": []}, [], d))
+            self.assertLess(peak, 4 * 1024 * 1024, f"peak {peak} bytes: devices.scan inflated summary.txt whole")
+
+    def test_encrypted_members_quarantined_without_aborting_collector(self):
+        import io
+        import struct
+        import zipfile
+        b = io.BytesIO()
+        with zipfile.ZipFile(b, "w", zipfile.ZIP_STORED) as z:
+            for i in range(10):
+                z.writestr(f"l{i}.log", b"12:00:00 normal log line with spaces\n" * 2)
+        raw = bytearray(b.getvalue())
+        # Set the general-purpose bit 0 (encrypted) in both local file headers and central directory headers
+        i = 0
+        while True:
+            j = raw.find(b"PK\x03\x04", i)
+            if j < 0:
+                break
+            flags = struct.unpack_from("<H", raw, j + 6)[0] | 0x1
+            struct.pack_into("<H", raw, j + 6, flags)
+            i = j + 4
+        i = 0
+        while True:
+            j = raw.find(b"PK\x01\x02", i)
+            if j < 0:
+                break
+            flags = struct.unpack_from("<H", raw, j + 8)[0] | 0x1
+            struct.pack_into("<H", raw, j + 8, flags)
+            i = j + 4
+        enc_zip = bytes(raw)
+        # Verify Python's zipfile itself considers it encrypted on open()
+        with zipfile.ZipFile(io.BytesIO(enc_zip)) as zchk:
+            with self.assertRaises(RuntimeError):
+                zchk.read("l0.log")
+        why = pull.implausible(enc_zip, None)
+        self.assertIn("encrypted", why)
+        # End-to-end: encrypted report is quarantined to suspect/ and later records still collect
+        rid1 = "enc-report-0001"
+        rid2 = "good-report-0002"
+        n1, n2 = f"report:2026-11-19T01:00:00Z:{rid1}", f"report:2026-11-19T02:00:00Z:{rid2}"
+        logs1 = {"kind": "session", "name": "logs.zip", "full": False, "bytes": len(enc_zip), "sha256": hashlib.sha256(enc_zip).hexdigest(), "parts": 1}
+        good_zip = b"PK" + b"a" * 64
+        logs2 = {"kind": "session", "name": "report.json", "full": False, "bytes": len(good_zip), "sha256": hashlib.sha256(good_zip).hexdigest(), "parts": 1}
+        svc = FakeService({
+            n1: json.dumps(record(rid=rid1, receivedAt="2026-11-19T01:00:00Z", logs=logs1)).encode(),
+            f"part:{rid1}:0": enc_zip,
+            n2: json.dumps(record(rid=rid2, receivedAt="2026-11-19T02:00:00Z", logs=logs2)).encode(),
+            f"part:{rid2}:0": good_zip,
+        })
+        with tempfile.TemporaryDirectory() as d:
+            out1 = pull.collect(svc, n1, d, keep=False)
+            out2 = pull.collect(svc, n2, d, keep=False)
+            self.assertTrue(out1.startswith("suspect enc-report-0001"))
+            self.assertTrue(out2.startswith("new good-report-0002"))
+            # A10: archive named "report.json" must not be overwritten by metadata report.json
+            folder2 = os.path.join(d, "inbox", "2026-11-19", rid2)
+            with open(os.path.join(folder2, "logs.zip"), "rb") as f:
+                self.assertEqual(good_zip, f.read())
+            with open(os.path.join(folder2, "report.json")) as f:
+                meta = json.load(f)
+            self.assertEqual(rid2, meta["reportId"])
+
 
 class DevicesTest(unittest.TestCase):
     @staticmethod

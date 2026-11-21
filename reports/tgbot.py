@@ -97,14 +97,25 @@ class Counts:
         return True
 
 
+def _bounded_json_member(z, name, max_bytes):
+    """Stream at most max_bytes + 1 from an untrusted zip member; reject oversized/encrypted/corrupt members."""
+    info = z.getinfo(name)
+    if info.flag_bits & 0x1 or info.file_size > max_bytes:
+        return None
+    raw = pull.head(z, info, max_bytes + 1)
+    if len(raw) > max_bytes:
+        return None
+    return json.loads(raw.decode("utf-8", "replace"))
+
+
 def read_record(data):
     """The app's record inside the posted zip, or None. Untrusted: bounded read of one member."""
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as z:
-            if RECORD not in z.namelist() or z.getinfo(RECORD).file_size > 64 * 1024:
+            if len(z.infolist()) > pull.MAX_ARCHIVE_ENTRIES or RECORD not in z.namelist():
                 return None
-            r = json.loads(z.read(RECORD).decode("utf-8", "replace"))
-    except (zipfile.BadZipFile, ValueError):
+            r = _bounded_json_member(z, RECORD, 64 * 1024)
+    except (zipfile.BadZipFile, ValueError, RuntimeError, NotImplementedError, EOFError, OSError):
         return None
     if not isinstance(r, dict) or r.get("schema") != "oneos.report/1":
         return None
@@ -118,11 +129,13 @@ def read_logs(data, sid):
     """A record for a bare session logs zip (oneos.logbundle/1 report.json inside), or None."""
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as z:
-            names = [n for n in z.namelist() if n.endswith("/report.json") or n == "report.json"]
-            if len(names) != 1 or z.getinfo(names[0]).file_size > 256 * 1024:
+            if len(z.infolist()) > pull.MAX_ARCHIVE_ENTRIES:
                 return None
-            b = json.loads(z.read(names[0]).decode("utf-8", "replace"))
-    except (zipfile.BadZipFile, ValueError):
+            names = [n for n in z.namelist() if n.endswith("/report.json") or n == "report.json"]
+            if len(names) != 1:
+                return None
+            b = _bounded_json_member(z, names[0], 256 * 1024)
+    except (zipfile.BadZipFile, ValueError, RuntimeError, NotImplementedError, EOFError, OSError):
         return None
     if not isinstance(b, dict) or b.get("schema") != "oneos.logbundle/1":
         return None
@@ -144,11 +157,13 @@ def read_findings(data):
     The report id is the zip's SHA-256 (first 16), so the same zip sent again is caught as a repeat."""
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as z:
-            names = [n for n in z.namelist() if n.endswith("/report.json") or n == "report.json"]
-            if len(names) != 1 or z.getinfo(names[0]).file_size > 2 * 1024 * 1024:
+            if len(z.infolist()) > pull.MAX_ARCHIVE_ENTRIES:
                 return None
-            b = json.loads(z.read(names[0]).decode("utf-8", "replace"))
-    except (zipfile.BadZipFile, ValueError):
+            names = [n for n in z.namelist() if n.endswith("/report.json") or n == "report.json"]
+            if len(names) != 1:
+                return None
+            b = _bounded_json_member(z, names[0], 2 * 1024 * 1024)
+    except (zipfile.BadZipFile, ValueError, RuntimeError, NotImplementedError, EOFError, OSError):
         return None
     if not isinstance(b, dict) or b.get("schema") != "oneos.findings/1":
         return None
@@ -205,6 +220,7 @@ def summary(r, who):
 
 def file_report(dest, r, data, zname):
     """Like pull.collect: report.json and the zip under inbox/ (or suspect/), one line in db/reports.jsonl."""
+    zname = pull.safe_zip_name(zname, "logs.zip")
     rid = r["reportId"]
     day = r["receivedAt"][:10]
     why = pull.implausible(data, r.get("logs"))

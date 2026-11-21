@@ -393,6 +393,17 @@ def exact(cmd):
     return "/filter (" + ", ".join(f'"exact:{t}"' for t in trig) + ") " + cmd[m.end():]
 
 
+SUMMARY_MAX = 256 * 1024
+
+
+def _read_member_bounded(zf, name, limit=SUMMARY_MAX):
+    info = zf.getinfo(name)
+    if info.flag_bits & 0x1:
+        raise RuntimeError(f"encrypted member {name}")
+    with zf.open(info) as f:
+        return f.read(limit).decode(errors="replace")
+
+
 def scan(devices, waiting, inbox):
     """Findings zips from phones with no profile and no waiting.json entry: what each showed."""
     known = [(m.strip(), p["codename"]) for p in devices["phones"] for m in p["model"].split(",")]
@@ -400,9 +411,11 @@ def scan(devices, waiting, inbox):
     for z in sorted(glob.glob(os.path.join(inbox, "*", "findings*", "*.zip"))):
         try:
             with zipfile.ZipFile(z) as zf:
+                if len(zf.infolist()) > 4096:
+                    raise ValueError("too many archive entries")
                 names = [n for n in zf.namelist() if n.endswith("summary.txt")]
-                text = zf.read(names[0]).decode(errors="replace") if names else ""
-        except (zipfile.BadZipFile, OSError) as e:
+                text = _read_member_bounded(zf, names[0]) if names else ""
+        except (zipfile.BadZipFile, OSError, RuntimeError, NotImplementedError, ValueError, EOFError) as e:
             print(f"{z}: unreadable ({e})")
             continue
         line = lambda k: (re.search(rf"^{k}:\s*(.*)$", text, re.M) or [None, "?"])[1].strip()
