@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""check_host_apex.sh: only the look before a session's setup may keep the page cache, and only right after a clean final look."""
+"""check_host_apex.sh: fail-closed manifest/cache-drop validation and NUL-safe file reads (N11, A6, A18)."""
 from pathlib import Path
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -25,16 +26,26 @@ class Phone:
         (self.root / 'apex/apex-info-list.xml').write_text(LIST)
         self.stamp = self.root / 'stamp'
         self.calls = self.root / 'calls'
-        self.script = ('sync() { echo sync >> "$CALLS"; }\n' + SOURCE
-                       .replace('/apex/apex-info-list.xml', str(self.root / 'apex/apex-info-list.xml'))
-                       .replace('"/apex/$m"', f'"{self.root}/apex/$m"')
-                       .replace('/proc/sys/vm/drop_caches', str(self.root / 'dropped')))
+        self.drop_target = str(self.root / 'dropped')
 
     def look(self, label):
         """(line, exit code, whether the files were read from disk, whether a stamp is left)"""
         self.calls.unlink(missing_ok=True)
-        out = subprocess.run(['/bin/sh', '-c', self.script, 'check', label], capture_output=True, text=True,
-                             env=dict(os.environ, ONEOS_APEX_STAMP=str(self.stamp), CALLS=str(self.calls)))
+        script = ('sync() { echo sync >> "$CALLS"; }\n' +
+                  SOURCE.replace('/proc/sys/vm/drop_caches', self.drop_target))
+        out = subprocess.run(
+            ['/bin/sh', '-c', script, 'check', label],
+            capture_output=True,
+            text=True,
+            env=dict(
+                os.environ,
+                ONEOS_APEX_STAMP=str(self.stamp),
+                ONEOS_APEX_INFO_LIST=str(self.root / 'apex/apex-info-list.xml'),
+                ONEOS_APEX_ROOT=str(self.root / 'apex'),
+                TMPDIR=str(self.root),
+                CALLS=str(self.calls),
+            ),
+        )
         return out.stdout.strip(), out.returncode, self.calls.exists(), self.stamp.exists()
 
 
@@ -61,7 +72,6 @@ class HostApexStamp(unittest.TestCase):
         line, code, disk, stamp = self.phone.look('before-setup')
         self.assertIn('page cache kept', line)
         self.assertEqual((0, False, False), (code, disk, stamp))
-        # The stamp is spent: the same session's later looks and the next first look read from disk.
         for label in ('after-setup', 'before-setup'):
             self.assertEqual((True, False), self.phone.look(label)[2:], label)
 
@@ -93,15 +103,45 @@ class HostApexStamp(unittest.TestCase):
 
 
 class HostApexIncompleteWalk(unittest.TestCase):
-    """A look that could not read the files must not pass or leave a stamp (follow-up audit N11)."""
+    """A look that could not read the files or manifest must fail closed and leave no stamp (N11, A6, A18)."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.phone = Phone(self.tmp.name)
 
+    def test_missing_manifest_fails_closed_a6(self):
+        (self.phone.root / 'apex/apex-info-list.xml').unlink()
+        line, code, _, stamp = self.phone.look('after-inplace')
+        self.assertIn('manifest unreadable', line)
+        self.assertEqual((1, False), (code, stamp))
+
+    @unittest.skipIf(os.geteuid() == 0, 'root reads mode 000 manifest')
+    def test_unreadable_manifest_fails_closed_and_leaves_no_stamp_a6(self):
+        xml = self.phone.root / 'apex/apex-info-list.xml'
+        xml.chmod(0)
+        self.addCleanup(xml.chmod, 0o644)
+        line, code, _, stamp = self.phone.look('after-inplace')
+        self.assertIn('manifest unreadable', line)
+        self.assertEqual((1, False), (code, stamp))
+
+    def test_manifest_without_active_entries_fails_closed_a6(self):
+        (self.phone.root / 'apex/apex-info-list.xml').write_text('<apex-info-list></apex-info-list>\n')
+        line, code, _, stamp = self.phone.look('after-inplace')
+        self.assertIn('no active APEX entries', line)
+        self.assertEqual((1, False), (code, stamp))
+
+    def test_system_only_active_apex_manifest_succeeds_with_zero_data_modules(self):
+        (self.phone.root / 'apex/apex-info-list.xml').write_text(
+            '<apex-info-list>\n'
+            '<apex-info moduleName="com.sys" modulePath="/system/apex/com.sys.apex" isActive="true" />\n'
+            '</apex-info-list>\n'
+        )
+        line, code, _, stamp = self.phone.look('after-inplace')
+        self.assertIn('0 modules, 0 files, 0 unreadable', line)
+        self.assertEqual((0, True), (code, stamp))
+
     def test_a_missing_module_directory_is_unreadable_and_leaves_no_stamp(self):
-        import shutil
         shutil.rmtree(self.phone.root / 'apex/com.x')
         line, code, _, stamp = self.phone.look('after-inplace')
         self.assertIn('1 unreadable', line)
@@ -109,7 +149,6 @@ class HostApexIncompleteWalk(unittest.TestCase):
         self.assertEqual((1, False), (code, stamp))
 
     def test_a_module_with_no_files_is_unreadable(self):
-        import shutil
         shutil.rmtree(self.phone.root / 'apex/com.x/lib')
         (self.phone.root / 'apex/com.x/manifest').unlink()
         line, code, _, stamp = self.phone.look('after-inplace')
@@ -125,12 +164,19 @@ class HostApexIncompleteWalk(unittest.TestCase):
         self.assertIn('(not listable)', line)
         self.assertEqual((1, False), (code, stamp))
 
-    def test_a_failed_drop_of_the_page_cache_is_said_and_leaves_no_stamp(self):
-        self.phone.script = self.phone.script.replace(str(self.phone.root / 'dropped'), '/proc/nonexistent/drop')
+    def test_a_failed_drop_of_the_page_cache_fails_closed_and_leaves_no_stamp_a6(self):
+        self.phone.drop_target = '/proc/nonexistent/drop'
         line, code, _, stamp = self.phone.look('after-inplace')
         self.assertIn('page cache NOT dropped', line)
         self.assertNotIn('(read from disk)', line)
-        self.assertEqual((0, False), (code, stamp), 'the files were read, but not from disk: no stamp may suppress the next disk read')
+        self.assertEqual((1, False), (code, stamp), 'failed drop_caches is not a disk read and must return non-zero')
+
+    def test_newline_filename_in_apex_is_preserved_nul_safely_a18(self):
+        weird = self.phone.root / 'apex/com.x/lib/line\nbreak.so'
+        weird.write_text('ok')
+        line, code, _, stamp = self.phone.look('after-inplace')
+        self.assertEqual('[after-inplace] host APEXes on /data: 1 modules, 3 files, 0 unreadable (read from disk)', line)
+        self.assertEqual((0, True), (code, stamp))
 
     def test_a_working_look_is_unchanged(self):
         line, code, _, stamp = self.phone.look('after-inplace')
