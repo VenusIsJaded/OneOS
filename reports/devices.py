@@ -27,6 +27,7 @@ import json
 import os
 import re
 import zipfile
+import zlib
 from collections import defaultdict
 from datetime import date, timedelta
 
@@ -415,7 +416,7 @@ def scan(devices, waiting, inbox):
                     raise ValueError("too many archive entries")
                 names = [n for n in zf.namelist() if n.endswith("summary.txt")]
                 text = _read_member_bounded(zf, names[0]) if names else ""
-        except (zipfile.BadZipFile, OSError, RuntimeError, NotImplementedError, ValueError, EOFError) as e:
+        except (zipfile.BadZipFile, zlib.error, OSError, RuntimeError, NotImplementedError, ValueError, EOFError) as e:
             print(f"{z}: unreadable ({e})")
             continue
         line = lambda k: (re.search(rf"^{k}:\s*(.*)$", text, re.M) or [None, "?"])[1].strip()

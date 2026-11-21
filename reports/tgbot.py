@@ -35,6 +35,7 @@ import os
 import re
 import sys
 import zipfile
+import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pull  # noqa: E402  (implausible, session_app, the inbox layout)
@@ -115,7 +116,7 @@ def read_record(data):
             if len(z.infolist()) > pull.MAX_ARCHIVE_ENTRIES or RECORD not in z.namelist():
                 return None
             r = _bounded_json_member(z, RECORD, 64 * 1024)
-    except (zipfile.BadZipFile, ValueError, RuntimeError, NotImplementedError, EOFError, OSError):
+    except (zipfile.BadZipFile, zlib.error, ValueError, RuntimeError, NotImplementedError, EOFError, OSError):
         return None
     if not isinstance(r, dict) or r.get("schema") != "oneos.report/1":
         return None
@@ -135,7 +136,7 @@ def read_logs(data, sid):
             if len(names) != 1:
                 return None
             b = _bounded_json_member(z, names[0], 256 * 1024)
-    except (zipfile.BadZipFile, ValueError, RuntimeError, NotImplementedError, EOFError, OSError):
+    except (zipfile.BadZipFile, zlib.error, ValueError, RuntimeError, NotImplementedError, EOFError, OSError):
         return None
     if not isinstance(b, dict) or b.get("schema") != "oneos.logbundle/1":
         return None
@@ -163,7 +164,7 @@ def read_findings(data):
             if len(names) != 1:
                 return None
             b = _bounded_json_member(z, names[0], 2 * 1024 * 1024)
-    except (zipfile.BadZipFile, ValueError, RuntimeError, NotImplementedError, EOFError, OSError):
+    except (zipfile.BadZipFile, zlib.error, ValueError, RuntimeError, NotImplementedError, EOFError, OSError):
         return None
     if not isinstance(b, dict) or b.get("schema") != "oneos.findings/1":
         return None
