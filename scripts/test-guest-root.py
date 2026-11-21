@@ -99,7 +99,7 @@ class NativeBundleTest(unittest.TestCase):
 
 class SystemUidListTest(unittest.TestCase):
     def test_native_manager_lists_shell_and_system_packages(self):
-        start = SOURCE.index("static void list_apps(")
+        start = SOURCE.index("static int list_apps(")
         end = SOURCE.index("/* Take exactly", start)
         with tempfile.TemporaryDirectory() as temporary:
             w = Path(temporary)
@@ -115,13 +115,49 @@ class SystemUidListTest(unittest.TestCase):
             code += "static int safe_package(const char *p) { (void)p; return 1; }\n"
             code += "static int granted(const char *p,unsigned u) { (void)p; return u==2000; }\n"
             code += function("write_client_bounded") + "\n"
-            code += SOURCE[start:end] + "\nint main(void) { list_apps(1); return 0; }\n"
+            code += SOURCE[start:end] + "\nint main(void) { return list_apps(1) == 0 ? 0 : 1; }\n"
             source = w / "list.c"
             source.write_text(code)
             binary = w / "list"
             subprocess.run(["cc", "-O2", "-Wall", "-Wextra", "-Werror", str(source), "-o", str(binary)], check=True)
             rows = subprocess.check_output([str(binary)], text=True).splitlines()
             self.assertEqual(["android 1000 0", "com.android.shell 2000 1", "com.low 9999 0", "com.normal 10001 0"], rows)
+
+    def test_partial_list_flush_failure_does_not_duplicate_and_returns_error(self):
+        start = SOURCE.index("static int list_apps(")
+        end = SOURCE.index("/* Take exactly", start)
+        with tempfile.TemporaryDirectory() as temporary:
+            w = Path(temporary)
+            packages = w / "packages.list"
+            packages.write_text("".join(f"com.pkg.item{i:04d} {10000 + i}\n" for i in range(3000)))
+            code = (
+                "#define _GNU_SOURCE\n"
+                "#include <stdio.h>\n#include <string.h>\n#include <unistd.h>\n"
+                "#include <fcntl.h>\n#include <poll.h>\n#include <time.h>\n"
+                "#include <errno.h>\n#include <stdint.h>\n"
+            )
+            code += '#define PACKAGES "' + str(packages) + '"\n#define MANAGER "com.fahadali.oneos.guest"\n'
+            code += "static int safe_package(const char *p) { (void)p; return 1; }\n"
+            code += "static int granted(const char *p,unsigned u) { (void)p; (void)u; return 0; }\n"
+            # Simulate a client pipe that accepts 4096 bytes of the first flush and then stalls/times out
+            code += (
+                "static int calls = 0;\n"
+                "static int write_client_bounded(int fd, const void *buf, size_t n, int timeout_ms) {\n"
+                "    (void)timeout_ms;\n"
+                "    calls++;\n"
+                "    if (calls == 1) { ssize_t w = write(fd, buf, n < 4096 ? n : 4096); (void)w; return -1; }\n"
+                "    ssize_t w = write(fd, buf, n); (void)w; return -1;\n"
+                "}\n"
+            )
+            code += SOURCE[start:end] + "\nint main(void) { return list_apps(1) == 0 ? 0 : 1; }\n"
+            source = w / "list_partial.c"
+            source.write_text(code)
+            binary = w / "list_partial"
+            subprocess.run(["cc", "-O2", "-Wall", "-Wextra", "-Werror", str(source), "-o", str(binary)], check=True)
+            res = subprocess.run([str(binary)], capture_output=True)
+            self.assertEqual(1, res.returncode, "partial LIST flush must return failure")
+            self.assertEqual(4096, len(res.stdout), "failed mid-list flush must not resend buffer from offset 0")
+            self.assertEqual(1, res.stdout.count(b"com.pkg.item0000 10000 0\n"))
 
 
 class FullPipeNonblockingBrokerTest(unittest.TestCase):

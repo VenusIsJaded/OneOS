@@ -190,12 +190,13 @@ static int edit_grant(const char *package,int add) {
     int ok=fflush(out)==0&&fsync(fd)==0; if(fclose(out))ok=0;
     if(!ok||rename(GRANTS ".new",GRANTS)){unlink(GRANTS ".new");return -1;}return 0;
 }
-static void list_apps(int out) {
-    FILE *f=fopen(PACKAGES,"re");if(!f)return;
+static int list_apps(int out) {
+    FILE *f=fopen(PACKAGES,"re");if(!f)return -1;
     #ifdef GRANTS
     struct grant_row *grants=NULL;size_t ng=load_grants(&grants);
     #endif
     char line[8192],p[256],buf[16384];unsigned u;size_t off=0;
+    int err=0;
     while(fgets(line,sizeof(line),f)){
         #ifdef GRANTS
         if(!parse_pkg_uid(line,p,&u)||!safe_package(p)||!strcmp(p,MANAGER))continue;
@@ -205,20 +206,22 @@ static void list_apps(int out) {
         int ok=granted(p,u);
         #endif
         int n=snprintf(buf+off,sizeof(buf)-off,"%s %u %d\n",p,u,ok);
-        if(n<0)continue;
+        if(n<0){err=-1;break;}
         if((size_t)n>=sizeof(buf)-off){
-            if(write_client_bounded(out,buf,off,500)<0)break;
+            if(write_client_bounded(out,buf,off,500)<0){err=-1;off=0;break;}
             off=0;
             n=snprintf(buf,sizeof(buf),"%s %u %d\n",p,u,ok);
-            if(n<=0||(size_t)n>=sizeof(buf))continue;
+            if(n<=0||(size_t)n>=sizeof(buf)){err=-1;break;}
         }
         off+=(size_t)n;
     }
-    if(off)(void)write_client_bounded(out,buf,off,500);
+    if(ferror(f))err=-1;
+    if(!err&&off&&write_client_bounded(out,buf,off,500)<0)err=-1;
     #ifdef GRANTS
     free(grants);
     #endif
     fclose(f);
+    return err;
 }
 /* Take exactly three stdio descriptors; close every delivered surplus fd,
  * including padding-sized fourth descriptors and subsequent SCM_RIGHTS headers.
@@ -265,10 +268,9 @@ static void serve(int server) {
             if(r.op==INFO&&admin){
                 char info[128];
                 int ilen=snprintf(info,sizeof(info),"OneOS guest root API 1 manager=%s\n",MANAGER);
-                if(ilen>0&&(size_t)ilen<sizeof(info))(void)write_client_bounded(fds[1],info,(size_t)ilen,250);
-                status=0;
+                status=(ilen>0&&(size_t)ilen<sizeof(info)&&write_client_bounded(fds[1],info,(size_t)ilen,250)==0)?0:1;
             }
-            else if(r.op==LIST&&admin){list_apps(fds[1]);status=0;}
+            else if(r.op==LIST&&admin){status=list_apps(fds[1])?1:0;}
             else if((r.op==GRANT||r.op==REVOKE)&&admin)status=edit_grant(arg,r.op==GRANT)?1:0;
             else if(r.op==RUN&&(admin||allowed(cred.uid))){
                 pid_t handler=fork();
