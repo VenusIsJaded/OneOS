@@ -2,8 +2,9 @@
 # Optional display only: every failure leaves the original boot/return path intact.
 ONEOS_BOOT_DIR=${ONEOS_BOOT_DIR:-/data/local/tmp/oneos/data/oneos_bootui}
 oneos_boot_write() {
-    [ -d "$ONEOS_BOOT_DIR" ] || return 0
+    [ -d "$ONEOS_BOOT_DIR" ] && [ ! -L "$ONEOS_BOOT_DIR" ] || return 0
     oneos_boot_tmp=$(mktemp "$ONEOS_BOOT_DIR/$1.XXXXXX") || return 0
+    rm -f "$ONEOS_BOOT_DIR/$1"
     if ! { printf '%s\n' "$2" > "$oneos_boot_tmp" && mv -f "$oneos_boot_tmp" "$ONEOS_BOOT_DIR/$1"; }; then
         rm -f "$oneos_boot_tmp"
     fi
@@ -18,9 +19,10 @@ oneos_boot_event() {
     [ -r "$ONEOS_BOOT_DIR/verbose" ] && IFS= read -r _ob_verb < "$ONEOS_BOOT_DIR/verbose" 2>/dev/null
     [ "$_ob_verb" = 1 ] || return 0
     oneos_boot_write status "$*"
+    [ ! -L "$ONEOS_BOOT_DIR" ] && [ ! -L "$ONEOS_BOOT_DIR/events.log" ] || rm -f "$ONEOS_BOOT_DIR/events.log" 2>/dev/null
     printf '%s %s\n' "$(date +%T)" "$*" >> "$ONEOS_BOOT_DIR/events.log"
 }
-oneos_boot_stop() { touch "$ONEOS_BOOT_DIR/stop" 2>/dev/null; }
+oneos_boot_stop() { [ ! -L "$ONEOS_BOOT_DIR" ] && { rm -f "$ONEOS_BOOT_DIR/stop" 2>/dev/null; touch "$ONEOS_BOOT_DIR/stop" 2>/dev/null; }; }
 oneos_boot_ready() {
     [ -f "$ONEOS_BOOT_DIR/ready" ] || return 1
     read -r oneos_boot_pid oneos_boot_token < "$ONEOS_BOOT_DIR/ready" || return 1
@@ -83,7 +85,7 @@ oneos_boot_hold_display() {
     sleep 0.3  # let the live renderer post the return status before holding it
     composer_lease=$(cat "$ONEOS_BOOT_DIR/generation")
     composer_hold="$composer_pid $composer_identity $composer_lease"
-    rm -f "$ONEOS_BOOT_DIR/held_composer_guard"
+    rm -f "$ONEOS_BOOT_DIR/held_composer_guard" "$ONEOS_BOOT_DIR/renderer.log"
     oneos_boot_write held_composer "$composer_hold"
     # Arm the recovery BEFORE stopping the composer. It is in the host mount
     # namespace and outside the app's cgroup, just like the renderer supervisor.
@@ -107,6 +109,7 @@ oneos_boot_hold_display() {
 oneos_boot_begin() {
     [ ! -L "$ONEOS_BOOT_DIR" ] || return 0
     mkdir -p "$ONEOS_BOOT_DIR" || return 0
+    rm -f "$ONEOS_BOOT_DIR/stop" "$ONEOS_BOOT_DIR/icon.png" "$ONEOS_BOOT_DIR/renderer.log" "$ONEOS_BOOT_DIR/events.log"
     touch "$ONEOS_BOOT_DIR/stop"
     # A generation also retires any old worker after the stop flag is cleared.
     oneos_boot_write generation "$(date +%s)-$$"
@@ -130,6 +133,7 @@ oneos_boot_begin() {
         oneos_boot_write title 'Returning to One UI'
     fi
     oneos_boot_write status 'Preparing display'
+    rm -f "$ONEOS_BOOT_DIR/icon.png" "$ONEOS_BOOT_DIR/renderer.log"
     cp /data/local/tmp/oneos/oneos_boot_icon.png "$ONEOS_BOOT_DIR/icon.png" 2>/dev/null
     chmod 755 "$ONEOS_BOOT_DIR"; chmod 644 "$ONEOS_BOOT_DIR"/verbose "$ONEOS_BOOT_DIR"/title "$ONEOS_BOOT_DIR"/system_name "$ONEOS_BOOT_DIR"/icon.png 2>/dev/null
     /system/bin/sh /data/local/tmp/oneos/boot_status.sh supervise "$(cat "$ONEOS_BOOT_DIR/generation")" </dev/null >> "$ONEOS_BOOT_DIR/renderer.log" 2>&1 &

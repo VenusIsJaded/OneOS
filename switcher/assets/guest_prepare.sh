@@ -73,7 +73,8 @@ for pair in $BRIDGES; do no_symlink "${pair#*:}"; done
 for s in data misc misc/adb misc/profiles misc/user misc/bluedroid misc/bluetooth \
          misc_ce/0 misc_de/0 system system/devicestate system/package_cache \
          system/watchdog_timestamps system_de system_ce user/0 user_de/0 \
-         oneos_bin oneos_bin/busybox zygote_exec oplus oplus/multimedia \
+         oneos_bin oneos_bin/busybox zygote_exec oplus oplus/multimedia oplus/os \
+         oneos_bootui oneos_ksu oneos_root vfonts 1 1/ns \
          preapps-lib media/0 anr app local/tmp resource-cache oneos_fold8 oneos_pixel_hinge oneos_hinge; do
     no_symlink "$s"
 done
@@ -890,6 +891,7 @@ if [ "${ONEOS_GUEST_SEC_IMS:-0}" = 1 ]; then
         sec_ims_off "this One UI defines the secimshttpclient library itself; the compat jar needs that name"
     elif sec_ims_stage; then
         SEC_IMS=1
+        rm -f "$STAGE/data/oneos_sec_ims"
         touch "$STAGE/data/oneos_sec_ims"
         echo "Samsung IMS in the guest: staged from this One UI ($(du -sk "$SECIMS" 2>/dev/null | cut -f1) KB: $(ls "$SECIMS/framework" | tr '\n' ' ')$(ls "$SECIMS/lib64" | tr '\n' ' '))"
     else
@@ -2835,12 +2837,13 @@ if [ -f "$STAGE/SystemUI_wave.dex" ] && [ -f "$STAGE/OneOSWaveRepack.dex" ] &&
                 wave_env=$(tr '\0' '\n' < "/proc/$wave_zpid/environ" 2>/dev/null |
                     grep -e '^BOOTCLASSPATH=' -e '^DEX2OATBOOTCLASSPATH=')
         fi
-        rm -f "$wave_dst/SystemUI_wave.apk"
+        rm -f "$wave_dst/SystemUI_wave.apk" "$WAVE_STAMP_DEX"
         if [ -n "$wave_env" ] &&
            env $wave_env ANDROID_ROOT=/system ANDROID_DATA=/data \
                CLASSPATH="$STAGE/OneOSWaveRepack.dex" \
                /system/bin/app_process /system/bin com.oneos.wave.OneOSWaveRepack \
                "$QS_APK" classes3.dex "$STAGE/SystemUI_wave.dex" "$wave_dst/SystemUI_wave.apk"; then
+            rm -f "$WAVE_STAMP_DEX"
             printf '%s\n' "$wave_dex_sha" > "$WAVE_STAMP_DEX"
             echo "Guest SystemUI: built the fingerprint wave APK from the stock SystemUI"
         else
@@ -2849,6 +2852,7 @@ if [ -f "$STAGE/SystemUI_wave.dex" ] && [ -f "$STAGE/OneOSWaveRepack.dex" ] &&
         fi
     fi
     if [ -f "$wave_dst/SystemUI_wave.apk" ]; then
+        rm -f "$wave_dst/SystemUI_wave.stock.size" "$wave_dst/SystemUI_wave.stock.sha256"
         printf '%s\n' "$wave_stock_size" > "$wave_dst/SystemUI_wave.stock.size"
         printf '%s\n' "$wave_stock_sha" > "$wave_dst/SystemUI_wave.stock.sha256"
         chmod 644 "$wave_dst/SystemUI_wave.apk" "$wave_dst"/SystemUI_wave.stock.* 2>/dev/null || true
@@ -3951,10 +3955,9 @@ sed -i '/<setting id="adb_enabled" /d' "$GSET" 2>/dev/null
 # data/oneos_host_adb tells fix_app_dirs.sh the same.
 HOST_ADB=$(cat "$STAGE/host_adb_on" 2>/dev/null)
 ADB_SEED=""
+rm -f "$STAGE/data/oneos_host_adb"
 if [ "$HOST_ADB" = 1 ]; then
     ADB_SEED=adb_enabled=1; touch "$STAGE/data/oneos_host_adb"
-else
-    rm -f "$STAGE/data/oneos_host_adb"
 fi
 echo "Guest adb: $([ "$HOST_ADB" = 1 ] && echo 'on (One UI has USB debugging on)' || echo 'left alone (One UI has USB debugging off)')"
 # auto_time=0 / auto_time_zone=0: the clock is the host's, and ColorOS's time
@@ -4460,7 +4463,8 @@ fi
 
 echo "=== 5.6 $(date +%T) theme folders ==="
 # Screen recording of the session (guest_start.sh) only when asked for.
-if [ "${ONEOS_RECORD:-0}" = 1 ]; then touch "$STAGE/data/oneos_record"; else rm -f "$STAGE/data/oneos_record"; fi
+rm -f "$STAGE/data/oneos_record" "$STAGE/data/oneos_hwc" "$STAGE/data/oneos_gap_slow"
+if [ "${ONEOS_RECORD:-0}" = 1 ]; then touch "$STAGE/data/oneos_record"; fi
 echo "Screen recording: $([ -f "$STAGE/data/oneos_record" ] && echo on || echo off)"
 # Hardware overlays for the guest's SurfaceFlinger (see guest_start.sh). On by
 # default since run 44 for guests without oplus-services.jar: run 43's Pixel
@@ -4476,13 +4480,13 @@ echo "Screen recording: $([ -f "$STAGE/data/oneos_record" ] && echo on || echo o
 # rejects frames in the first 30 s, and the switch's watcher later in the
 # session. ONEOS_GUEST_HWC=0|1 overrides the default.
 HWC_DEF=1
-if [ "${ONEOS_GUEST_HWC:-$HWC_DEF}" = 1 ]; then touch "$STAGE/data/oneos_hwc"; else rm -f "$STAGE/data/oneos_hwc"; fi
+if [ "${ONEOS_GUEST_HWC:-$HWC_DEF}" = 1 ]; then touch "$STAGE/data/oneos_hwc"; fi
 rm -f "$STAGE/data/oneos_hwc_forced"
 echo "Guest HW overlays: $([ -f "$STAGE/data/oneos_hwc" ] && echo 'on (GPU composition forced only if the composer rejects frames)' || echo 'off (GPU composition)')"
 
 # ONEOS_GAP_FAST=0: guest_start.sh keeps its fixed 2 s sleeps after the
 # composer restart and the SurfaceFlinger start (run 32 timing; see there).
-if [ "${ONEOS_GAP_FAST:-1}" = 0 ]; then touch "$STAGE/data/oneos_gap_slow"; else rm -f "$STAGE/data/oneos_gap_slow"; fi
+if [ "${ONEOS_GAP_FAST:-1}" = 0 ]; then touch "$STAGE/data/oneos_gap_slow"; fi
 
 
 echo "=== 5.7 $(date +%T) flags ==="
@@ -4497,7 +4501,8 @@ echo "=== 5.7 $(date +%T) flags ==="
 # grants on every boot, only to system apps, only what an app requests and
 # never over a choice the user made. ONEOS_GUEST_OPLUS_GRANTS=0 leaves the
 # lists out (grants already given stay in the guest's permission state).
-if [ "${ONEOS_GUEST_OPLUS_GRANTS:-1}" = 1 ]; then touch "$STAGE/data/oneos_oplus_grants"; else rm -f "$STAGE/data/oneos_oplus_grants"; fi
+rm -f "$STAGE/data/oneos_oplus_grants"
+if [ "${ONEOS_GUEST_OPLUS_GRANTS:-1}" = 1 ]; then touch "$STAGE/data/oneos_oplus_grants"; fi
 echo "OPPO default grants: $([ -f "$STAGE/data/oneos_oplus_grants" ] && echo on || echo off)"
 
 # The guest's /data/misc/adb always exists, keys or not. ColorOS's (Android
@@ -7378,7 +7383,7 @@ fi
 #   SEC_FLOATING_FEATURE_<KEY>=value of $STAGE/oneui_floating_add.txt (the set's, software only)
 #   set or added. ONEOS_ONEUI_FLOATING=0 keeps the phone's list as it is.
 # - $STAGE/data/oneos_cameradata: a copy of One UI's /system/cameradata.
-rm -rf "$STAGE/data/oneos_cameradata" "$STAGE/data/oneos_floating_feature.xml" "$STAGE/data/oneos_system_floating_feature.xml"
+rm -rf "$STAGE/data/oneos_cameradata" "$STAGE/data/oneos_floating_feature.xml" "$STAGE/data/oneos_floating_feature.xml.tmp" "$STAGE/data/oneos_system_floating_feature.xml" "$STAGE/data/oneos_system_floating_feature.xml.tmp"
 if grep -q '^ro.build.version.oneui=' "$ROOTFS/system/build.prop" 2>/dev/null && [ -d "$STAGE/data" ]; then
     if [ -d /system/cameradata ] && cp -a /system/cameradata "$STAGE/data/oneos_cameradata" 2>/dev/null; then
         # Shooting modes the image's camera app has no table entry for (One UI 9.5's, on the A36:
@@ -8230,8 +8235,9 @@ setprop dev.bootcomplete 0
 setprop service.bootanim.exit 0
 command -v oneos_boot_event >/dev/null 2>&1 && oneos_boot_event 'Starting guest services'
 echo "$(date +%T) soft reboot: starting the guest again"
-echo "=== OneOS soft reboot $(date '+%F %T') ($1) ===" >> $S/data/takeover.log
-$BB unshare -m $BB sh $S/data/guest_start.sh </dev/null >>$S/data/takeover.log 2>&1 &
+[ ! -L "$S/data" ] && [ ! -L "$S/data/takeover.log" ] || rm -f "$S/data/takeover.log"
+echo "=== OneOS soft reboot $(date '+%F %T') ($1) ===" >> "$S/data/takeover.log"
+$BB unshare -m $BB sh "$S/data/guest_start.sh" </dev/null >>"$S/data/takeover.log" 2>&1 &
 TP=$!
 sleep 0.5
 NEW_NS=$(readlink /proc/$TP/ns/mnt 2>/dev/null)

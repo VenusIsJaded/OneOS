@@ -965,9 +965,11 @@ if [ -x /data/adb/ksud ] && [ "${ONEOS_GUEST_KSU_MANAGER:-0}" = 1 ]; then
         1[0-4][0-9][0-9][0-9]) ;;
         *) KSU_ID="" ;;
     esac
-    if [ -n "$KSU_PKG" ] && [ -n "$KSU_ID" ] && [ -f "$KSU_APK" ] && mkdir -p "$KSU_DIR" &&
+    if [ -n "$KSU_PKG" ] && [ -n "$KSU_ID" ] && [ -f "$KSU_APK" ] && [ ! -L "$KSU_DIR" ] && mkdir -p "$KSU_DIR" &&
+       rm -f "$KSU_DIR/manager.apk.new" "$KSU_DIR/manager" &&
        cp -f "$KSU_APK" "$KSU_DIR/manager.apk.new" && mv -f "$KSU_DIR/manager.apk.new" "$KSU_DIR/manager.apk"; then
         chmod 755 "$KSU_DIR"; chmod 644 "$KSU_DIR/manager.apk"
+        rm -f "$KSU_DIR/manager"
         echo "$KSU_PKG $KSU_ID" > "$KSU_DIR/manager"
         setprop oneos.ksu.mgr_pkg "$KSU_PKG"
         setprop oneos.ksu.mgr_appid "$KSU_ID"
@@ -1021,7 +1023,7 @@ if [ "${ONEOS_LOGCAT:-1}" = 1 ] && [ "${ONEOS_FULL_LOGS:-1}" != 1 ]; then
     fi
     rm -f "$STAGE/watches.stop"
     echo "Logcat capture: off (Full session logs off in the app)"
-    if [ -d "$STAGE/data/oneos_bootui" ]; then echo 0 > "$FULLLOGS_STATE" && chmod 644 "$FULLLOGS_STATE"; fi
+    if [ -d "$STAGE/data/oneos_bootui" ] && [ ! -L "$STAGE/data/oneos_bootui" ]; then rm -f "$FULLLOGS_STATE"; echo 0 > "$FULLLOGS_STATE" && chmod 644 "$FULLLOGS_STATE"; fi
 elif [ "${ONEOS_LOGCAT:-1}" = 1 ]; then
     rm -f "$STAGE/watches.stop"
     # pgrep -f matches the same "^logcat ... boot.log" command line in one
@@ -1059,7 +1061,7 @@ elif [ "${ONEOS_LOGCAT:-1}" = 1 ]; then
         LOGCAT_HEAD=1
         echo "Logcat capture: $LOGS/boot.log"
     fi
-    if [ -d "$STAGE/data/oneos_bootui" ]; then echo 1 > "$FULLLOGS_STATE" && chmod 644 "$FULLLOGS_STATE"; fi
+    if [ -d "$STAGE/data/oneos_bootui" ] && [ ! -L "$STAGE/data/oneos_bootui" ]; then rm -f "$FULLLOGS_STATE"; echo 1 > "$FULLLOGS_STATE" && chmod 644 "$FULLLOGS_STATE"; fi
 fi
 # Sound and vibration watch (0.4.58): rings, vibrations, audio effects and
 # crashes of the session in a small log of its own ($STAGE/sound_watch.log,
@@ -1623,6 +1625,7 @@ if [ "${ONEOS_GAP_SPLASH:-1}" = 1 ]; then
         fi
     fi
     SFP=$(pidof surfaceflinger)
+    rm -f "$STAGE/data/oneos_host_sf_frozen"
     if grep -q '^Status: ok' "$GAP_SPLASH_LOG" 2>/dev/null && grep -q '^settled' "$GAP_SPLASH_LOG" &&
        [ -n "$SFP" ] && [ "$SFP" = "${SFP%% *}" ] && echo "$SFP" > "$STAGE/data/oneos_host_sf_frozen"; then
         if [ "${ONEOS_VERBOSE_BOOT:-0}" = 1 ] && oneos_boot_ready; then
@@ -2145,6 +2148,7 @@ if [ "${ONEOS_GUEST_MEDIA:-1}" = "1" ]; then
         setprop ctl.stop $svc 2>/dev/null || true
     done
     kill -9 $(pidof mediaserver) $(pidof mediaextractor) $(pidof media.metrics) $(pidof media.codec) 2>/dev/null || true
+    rm -f "$STAGE/data/guest_media.flag"
     touch "$STAGE/data/guest_media.flag"
 else
     rm -f "$STAGE/data/guest_media.flag"
@@ -2164,6 +2168,7 @@ fi
 # Samsung's if it does not register. The HAL is stopped and started so the
 # guest's gets it fresh. ONEOS_GUEST_AUDIO=0 keeps Samsung's audioserver.
 if [ "${ONEOS_GUEST_AUDIO:-1}" = "1" ]; then
+    rm -f "$STAGE/data/guest_audio.flag"
     touch "$STAGE/data/guest_audio.flag"
     AHAL=$(getprop | sed -n 's/^\[init\.svc\.\(vendor\.audio-hal[^]]*\)\]: \[running\]$/\1/p' | tr '\n' ' ')
     echo "$AHAL" > "$STAGE/host_audio_hal_svcs"
@@ -2408,7 +2413,8 @@ if ! /system/bin/sh "$STAGE/libsec-ril-patch.sh" apply; then
     echo "!!! inbound SMS: libsec-ril.so was not patched; the guest will not receive SMS"
 fi
 
-# Launch takeover inside isolated mount namespace
+# Launch takeover inside isolated mount namespace (remove takeover.log first so a guest-planted symlink is never written through)
+rm -f "$STAGE/data/takeover.log"
 $BB unshare -m $BB sh "$STAGE/data/guest_start.sh" </dev/null >"$STAGE/data/takeover.log" 2>&1 &
 TAKEOVER_PID=$!
 # Remember the container's mount namespace: return_to_oneui.sh kills exactly
@@ -2853,22 +2859,22 @@ while true; do
             # launcher stayed in 3-button mode, so neither worked. Keep the
             # user's choice; a stage that never had the key gets gestures.
             case "\$(getprop ro.product.model)" in SM-A*|SM-M*)
-                if [ ! -f $STAGE/data/oneos_blur_default ]; then
+                if [ ! -f $STAGE/data/oneos_blur_default ] && [ ! -L $STAGE/data/oneos_blur_default ]; then
                     $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings put global disable_window_blurs 1 2>/dev/null &&
-                        touch $STAGE/data/oneos_blur_default && echo "[UI Activator] window blur off once (mid-range Galaxy; Developer options turn it back on)"
+                        rm -f $STAGE/data/oneos_blur_default && touch $STAGE/data/oneos_blur_default && echo "[UI Activator] window blur off once (mid-range Galaxy; Developer options turn it back on)"
                 fi ;;
             esac
             # Nothing OS haptics at full strength once per guest data (0.5.15). Nothing hides Android's vibration
             # intensity settings and leaves them at medium; Samsung's vibrator HAL then plays every effect at
             # EffectStrength MEDIUM (amplitude 6700 on the A36: owner, "haptics feel weak af"). 3 = high, the
             # HAL's STRONG. Once (marker), so the values can still be changed from adb.
-            if [ -e $STAGE/rootfs/system_ext/framework/nt-telephony-common.jar ] && [ ! -f $STAGE/data/oneos_haptics_default ]; then
+            if [ -e $STAGE/rootfs/system_ext/framework/nt-telephony-common.jar ] && [ ! -f $STAGE/data/oneos_haptics_default ] && [ ! -L $STAGE/data/oneos_haptics_default ]; then
                 gsh '
                     for k in haptic_feedback_intensity notification_vibration_intensity ring_vibration_intensity alarm_vibration_intensity media_vibration_intensity; do
                         /system/bin/settings put system \$k 3 2>/dev/null
                     done
                 '
-                touch $STAGE/data/oneos_haptics_default && echo "[UI Activator] Nothing OS vibration intensities at high once (Samsung HAL: STRONG)"
+                rm -f $STAGE/data/oneos_haptics_default && touch $STAGE/data/oneos_haptics_default && echo "[UI Activator] Nothing OS vibration intensities at high once (Samsung HAL: STRONG)"
             fi
             NAV_OUT=\$(gsh '
                 navk=\$(/system/bin/settings get secure hide_navigationbar_enable 2>/dev/null)
@@ -3304,6 +3310,7 @@ while true; do
                               }
                               $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/wm size -d 0 2>/dev/null | grep -q -x "Physical size: \${W}x\${H}" || continue
                               $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/wm density \$D -d 0 >/dev/null 2>&1
+                              rm -f $STAGE/data/oneos_auto_density
                               echo \$D > $STAGE/data/oneos_auto_density
                               echo "[UI Activator] density: \$D on the inner panel at the first unfold -> \$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/wm density -d 0 2>&1 | tr '\\n' ' ')"
                               exit 0
@@ -3312,6 +3319,7 @@ while true; do
                     else
                         # The density first: with a leading -d, wm only prints it.
                         $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/wm density \$D -d 0 >/dev/null 2>&1
+                        rm -f $STAGE/data/oneos_auto_density
                         echo \$D > $STAGE/data/oneos_auto_density
                         echo "[UI Activator] density: \$D (inner \${W}x\${H}, xdpi \$XDPI, base \$BD, was \${CUR:-unforced}) -> \$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/wm density -d 0 2>&1 | tr '\n' ' ')"
                     fi
@@ -3401,6 +3409,7 @@ while true; do
                                 echo "[UI Activator] density: data/oneos_auto_density(_index) is a link, not made by OneOS; left as it is"
                             else
                                 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/settings put system display_density_index_manual \$K 2>/dev/null
+                                rm -f $STAGE/data/oneos_auto_density_index $STAGE/data/oneos_auto_density
                                 echo \$K > $STAGE/data/oneos_auto_density_index
                                 echo \$VK > $STAGE/data/oneos_auto_density
                                 [ "\$EFF" = "\$VK" ] || $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/wm density \$VK -d 0 >/dev/null 2>&1
@@ -3414,6 +3423,7 @@ while true; do
                             echo "[UI Activator] density: data/oneos_auto_density is a link, not made by OneOS; left at base"
                         else
                             $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/wm density \$D -d 0 >/dev/null 2>&1
+                            rm -f $STAGE/data/oneos_auto_density
                             echo \$D > $STAGE/data/oneos_auto_density
                             echo "[UI Activator] density: \$D (One UI \$HUD at \$HW of \$HP px\${GWN%,}, \$((HW * 160 / HUD)) dp; was \${CUR:-unforced}) -> \$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/wm density -d 0 2>&1 | tr '\n' ' ')"
                         fi ;;
@@ -3531,7 +3541,7 @@ while true; do
                         /system/bin/settings put system screen_brightness 4570
                     fi
                 " 2>/dev/null
-                [ -f $STAGE/data/.oneos_curve2 ] || touch $STAGE/data/.oneos_curve2
+                [ -f $STAGE/data/.oneos_curve2 ] || { rm -f $STAGE/data/.oneos_curve2 && touch $STAGE/data/.oneos_curve2; }
             fi
             RFB=\$(gsh 'printf "min %s peak %s; brightness %s\n" "\$(/system/bin/settings get system min_refresh_rate)" "\$(/system/bin/settings get system peak_refresh_rate)" "\$(/system/bin/settings get system screen_brightness)"' 2>/dev/null | tail -n 1)
             echo "[UI Activator] refresh: \$RFB"
@@ -3682,7 +3692,8 @@ while true; do
                 # With a staged OneOSDisplayProbe.dex (patches/OneOSDisplayProbe.java,
                 # diagnostics only): the default display's possible sizes as the
                 # launcher gets them, from 15 s after HOME, five times 30 s apart (folded and not).
-                if [ -f $STAGE/OneOSDisplayProbe.dex ] && [ ! -L $STAGE/data/oneos_display_probe.dex ]; then
+                if [ -f $STAGE/OneOSDisplayProbe.dex ]; then
+                    rm -f $STAGE/data/oneos_display_probe.dex
                     cp -f $STAGE/OneOSDisplayProbe.dex $STAGE/data/oneos_display_probe.dex && chmod 644 $STAGE/data/oneos_display_probe.dex
                     ( sleep 15; for i in 1 2 3 4 5; do echo "== \$(date +%T) device state \$(timeout 10 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/cmd device_state print-state 2>&1 | tr '\n' ' ')"; timeout 20 $BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/env CLASSPATH=/data/oneos_display_probe.dex /system/bin/app_process /system/bin OneOSDisplayProbe 2>&1 | cut -c1-900; sleep 30; done > $STAGE/diag_displays.txt ) </dev/null >/dev/null 2>&1 &
                 fi
@@ -4772,7 +4783,7 @@ if [ $HEAT_CAP = 1 ] || [ $GUEST_THERMAL_MAP = 1 ]; then
                 echo \"\$(date +%T) \$tag, level \$lvl to \$new: \$pct%:\$c\" >> \$F
             fi
             # Published by rename: a reader never sees the file empty (the guest's compile worker read that as cool).
-            [ \"\$new\" = \"\$lvl\" ] && [ \$first = 0 ] || { echo \$new > $STAGE/data/.oneos_heat_level.tmp 2>/dev/null && mv -f $STAGE/data/.oneos_heat_level.tmp $STAGE/data/oneos_heat_level 2>/dev/null; }
+            [ \"\$new\" = \"\$lvl\" ] && [ \$first = 0 ] || { rm -f $STAGE/data/.oneos_heat_level.tmp $STAGE/data/oneos_heat_level 2>/dev/null; echo \$new > $STAGE/data/.oneos_heat_level.tmp 2>/dev/null && mv -f $STAGE/data/.oneos_heat_level.tmp $STAGE/data/oneos_heat_level 2>/dev/null; }
             lvl=\$new; first=0
         fi
         sleep 10
@@ -4951,7 +4962,7 @@ if [ "$RETURN_MAX" -gt 0 ]; then
                         echo \"\$(date) Full session logs turned on in the guest's OneOS app\" >> $STAGE/full_logs_mid.log
                         echo \"\$(date) Full session logs turned on in the guest's OneOS app\"
                     fi
-                    if [ \"${ONEOS_LOGCAT:-1}\" = 1 ] && [ -d $STAGE/data/oneos_bootui ]; then echo 1 > $FULLLOGS_STATE && chmod 644 $FULLLOGS_STATE; fi
+                    if [ \"${ONEOS_LOGCAT:-1}\" = 1 ] && [ -d $STAGE/data/oneos_bootui ] && [ ! -L $STAGE/data/oneos_bootui ]; then rm -f $FULLLOGS_STATE; echo 1 > $FULLLOGS_STATE && chmod 644 $FULLLOGS_STATE; fi
                 fi
                 if [ -f $GUEST_RESTART_REQ ] && [ ! -L $GUEST_RESTART_REQ ]; then
                     rm -f $GUEST_RESTART_REQ
@@ -5307,6 +5318,7 @@ if [ "$RETURN_MAX" -gt 0 ]; then
             if [ \"\${hwcarm:-0}\" = 1 ] && [ \$new_failed -gt 30 ] && [ -f $STAGE/data/oneos_hwc ] && [ ! -e $STAGE/data/oneos_hwc_forced ]; then
                 GP=\$(pidof system_server | awk '{print \$1}'); [ -n \"\$GP\" ] || GP=\$(pidof surfaceflinger | awk '{print \$1}')
                 if [ -n \"\$GP\" ]; then
+                    rm -f $STAGE/data/oneos_hwc_forced
                     : > $STAGE/data/oneos_hwc_forced
                     echo \"\$(date) composer rejected \$new_failed frames with HW overlays on: GPU composition forced: \$(timeout 10 $BB nsenter -t \$GP -m /system/bin/sh /data/oneos_genv.sh /system/bin/service call SurfaceFlinger 1008 i32 1 2>&1 | tr '\n' ' ')\"
                     new_failed=0

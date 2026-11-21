@@ -250,7 +250,11 @@ prepare)
         mkdir -p "$p"
     done
     A=$STATE/adb
-    mkdir -p "$A/oneos/bin" "$A/oneos/run/zygisk/lib64" "$A/ksu/bin" "$A/service.d" "$A/post-fs-data.d"
+    for p in "$A/oneos/bin" "$A/oneos/run" "$A/oneos/run/zygisk" "$A/oneos/run/zygisk/lib64" "$A/ksu" "$A/ksu/bin" "$A/service.d" "$A/post-fs-data.d" "$A/oneos/framework-state" "$A/lspd"; do
+        [ ! -L "$p" ] || { echo "Guest runtime: symlink $p"; exit 1; }
+        mkdir -p "$p"
+    done
+    rm -f "$A/oneos/bin/su" "$A/oneos/bin/zygiskd" "$A/oneos/bin/zygisk-ptrace64" "$A/oneos/run/zygisk/lib64/libzygisk.so" "$A/ksu/bin/busybox" "$A/ksu/bin/resetprop" "$A/oneos/run/session.log" "$A/oneos/framework" "$S/data/oneos_runtime.sh"
     cp "$S/guest_root" "$A/oneos/bin/su"
     cp "$S/guest_zygiskd" "$A/oneos/bin/zygiskd"
     cp "$S/guest_zygisk_ptrace" "$A/oneos/bin/zygisk-ptrace64"
@@ -265,20 +269,28 @@ prepare)
     : > "$A/oneos/run/session.log"
     rm -f "$A/oneos/run/injection.pid" "$A/oneos/run/su.sock" "$A/oneos/run/zygisk/cp64.sock" "$A/oneos/run/module-props"
     if [ ! -d "$A/modules/zygisk_vector" ] && [ ! -d "$A/modules_update/zygisk_vector" ]; then
+        [ ! -L "$A/modules_update/zygisk_vector" ] || { echo "Guest runtime: symlink $A/modules_update/zygisk_vector"; exit 1; }
         mkdir "$A/modules_update/zygisk_vector"
         "$S/guest_root" --unpack "$A/modules_update/zygisk_vector" < "$S/guest_vector.bundle" || exit 1
     fi
     selected=zygisk_vector
-    [ ! -f "$STATE/framework" ] || selected=$(cat "$STATE/framework")
+    [ ! -f "$STATE/framework" ] || [ -L "$STATE/framework" ] || selected=$(cat "$STATE/framework")
     case "$selected" in ''|*[!A-Za-z0-9._-]*|.*) exit 1 ;; esac
     for base in modules modules_update; do
         for provider in "$A/$base/"*; do
-            [ -f "$provider/.oneos-framework" ] || continue
+            [ -d "$provider" ] && [ ! -L "$provider" ] && [ -f "$provider/.oneos-framework" ] || continue
             # Preserve the selected provider's explicit switch; alternatives stay disabled.
-            [ "${provider##*/}" = "$selected" ] || touch "$provider/disable"
+            if [ "${provider##*/}" != "$selected" ]; then
+                rm -f "$provider/disable"
+                touch "$provider/disable"
+            fi
         done
     done
-    mkdir -p "$A/oneos/framework-state/$selected/lspd" "$A/lspd"
+    for p in "$A/oneos/framework-state/$selected" "$A/oneos/framework-state/$selected/lspd"; do
+        [ ! -L "$p" ] || { echo "Guest runtime: symlink $p"; exit 1; }
+        mkdir -p "$p"
+    done
+    rm -f "$A/oneos/framework" "$S/data/oneos_runtime.sh"
     printf '%s\n' "$selected" > "$A/oneos/framework"
     cp "$S/guest_runtime.sh" "$S/data/oneos_runtime.sh"
     # Bind the complete private root state, including framework and service.d.

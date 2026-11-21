@@ -2240,7 +2240,7 @@ guest_state() {
         return 0
     fi
     [ -z "$(mounted_under "$STAGE")" ] || refuse "the guest is running or mounted"
-    for p in "$STAGE/data" "$STAGE/data/oneos_root" "$STAGE/data/oneos_root/adb" "$STAGE/data/oneos_root/adb/modules_update"; do
+    for p in "$STAGE/data" "$STAGE/data/oneos_root" "$STAGE/data/oneos_root/adb" "$STAGE/data/oneos_root/adb/modules" "$STAGE/data/oneos_root/adb/modules_update"; do
         [ ! -L "$p" ] || refuse "guest root state contains a symlink"
         [ ! -e "$p" ] || [ -d "$p" ] || refuse "guest root state is not a folder"
         [ -d "$p" ] || mkdir "$p" || die "cannot create guest root state"
@@ -2250,7 +2250,10 @@ do_guest_runtime() {
     [ $# = 2 ] || usage "guest-runtime image action"
     guest_state "$1" "$2"
     case "$2" in
-        enable) printf '' > "$STAGE/data/oneos_root/enabled" ;;
+        enable)
+            [ ! -L "$STAGE/data/oneos_root/enabled" ] || refuse "guest root state contains a symlink"
+            rm -f "$STAGE/data/oneos_root/enabled"
+            printf '' > "$STAGE/data/oneos_root/enabled" ;;
         disable) rm -f "$STAGE/data/oneos_root/enabled" ;;
         status) ;;
         select-*)
@@ -2259,6 +2262,8 @@ do_guest_runtime() {
             if [ "$provider" != zygisk_vector ]; then
                 [ -f "$STAGE/data/oneos_root/adb/modules/$provider/.oneos-framework" ] || [ -f "$STAGE/data/oneos_root/adb/modules_update/$provider/.oneos-framework" ] || refuse "import this framework first"
             fi
+            [ ! -L "$STAGE/data/oneos_root/framework" ] || refuse "guest root state contains a symlink"
+            rm -f "$STAGE/data/oneos_root/framework"
             printf '%s\n' "$provider" > "$STAGE/data/oneos_root/framework"
             for m in "$STAGE/data/oneos_root/adb/modules/$provider" "$STAGE/data/oneos_root/adb/modules_update/$provider"; do
                 [ -d "$m" ] && [ ! -L "$m" ] || continue
@@ -2268,8 +2273,8 @@ do_guest_runtime() {
             ;;
         *) usage "guest runtime action" ;;
     esac
-    if [ -f "$STAGE/data/oneos_root/enabled" ]; then say "@@RESULT enabled"; else say "@@RESULT disabled"; fi
-    selected=zygisk_vector; [ ! -f "$STAGE/data/oneos_root/framework" ] || selected=$(cat "$STAGE/data/oneos_root/framework")
+    if [ -f "$STAGE/data/oneos_root/enabled" ] && [ ! -L "$STAGE/data/oneos_root/enabled" ]; then say "@@RESULT enabled"; else say "@@RESULT disabled"; fi
+    selected=zygisk_vector; [ ! -f "$STAGE/data/oneos_root/framework" ] || [ -L "$STAGE/data/oneos_root/framework" ] || selected=$(cat "$STAGE/data/oneos_root/framework")
     say "@@RESULT selected $selected"
     if [ -x "$STAGE/guest_root" ] && [ -f "$STAGE/guest_vector.bundle" ] && [ -f "$STAGE/guest_manager.apk" ]; then
         say "@@RESULT runtime-ready"
@@ -2316,10 +2321,12 @@ do_guest_module_state() {
                     [ "$2" = "$selected" ] || refuse "select this framework on the pre-boot page first"
                 fi
                 [ ! -L "$m/disable" ] || refuse "module flag is a symlink"
-                if [ "$3" = on ]; then rm -f "$m/disable"; else printf '' > "$m/disable"; fi ;;
+                rm -f "$m/disable"
+                if [ "$3" != on ]; then printf '' > "$m/disable"; fi ;;
             remove|restore)
                 [ ! -L "$m/remove" ] || refuse "module flag is a symlink"
-                if [ "$3" = remove ]; then printf '' > "$m/remove"; else rm -f "$m/remove"; fi ;;
+                rm -f "$m/remove"
+                if [ "$3" = remove ]; then printf '' > "$m/remove"; fi ;;
         esac
         changed=1
     done
@@ -2635,6 +2642,7 @@ do_bring_catalog() {
         mkdir "$STAGE/data" && own "$STAGE/data" 0755 || die "could not make the stage's data folder"
     fi
     mkdir_mine "$STAGE/data/oneos_bring_catalog" || die "could not make the catalog folder"
+    rm -f "$STAGE/data/oneos_bring_catalog/catalog.new" "$STAGE/data/oneos_bring_catalog/catalog.tsv"
     mv "$part" "$STAGE/data/oneos_bring_catalog/catalog.new" || die "could not write the catalog"
     own "$STAGE/data/oneos_bring_catalog/catalog.new" 0644 || die "could not write the catalog"
     mv "$STAGE/data/oneos_bring_catalog/catalog.new" "$STAGE/data/oneos_bring_catalog/catalog.tsv" || die "could not put the catalog in place"
@@ -2666,12 +2674,14 @@ do_bring_forget() {
     done
     dst="$STAGE/data/oneos_bring/.forget"
     part="$STAGE/data/oneos_bring/.forget.new"
+    rm -f "$part"
     {
         if [ -f "$dst" ] && [ ! -L "$dst" ] && mine "$dst"; then cat "$dst"; fi
         echo "$1"
     } | while read -r line; do
         if is_package "$line"; then echo "$line"; fi
     done | sort -u > "$part"
+    rm -f "$dst"
     own "$part" 0600 && mv "$part" "$dst" || die "could not record the forget"
     say "@@RESULT forgot $1 $kb"
     say "@@OK bring-forget"
