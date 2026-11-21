@@ -15,16 +15,25 @@ pinned_platform=${ANDROID_PLATFORM_VERSION:-android-35}
 pinned_bt=${ANDROID_BUILD_TOOLS_VERSION:-35.0.0}
 if [ -f "$sdk/platforms/$pinned_platform/android.jar" ]; then
     jar="$sdk/platforms/$pinned_platform/android.jar"
+elif [ "${ALLOW_UNPINNED_SDK:-0}" = 1 ]; then
+    jar=$(find "$sdk/platforms" -name android.jar | LC_ALL=C sort -V | tail -1)
 else
-    jar=$(find "$sdk/platforms" -name android.jar | sort -V | tail -1)
+    echo "error: pinned Android platform $pinned_platform not found under $sdk/platforms (set ANDROID_PLATFORM_VERSION or ALLOW_UNPINNED_SDK=1)" >&2
+    exit 1
 fi
 if [ -x "$sdk/build-tools/$pinned_bt/d8" ]; then
     d8="$sdk/build-tools/$pinned_bt/d8"
+elif [ "${ALLOW_UNPINNED_SDK:-0}" = 1 ]; then
+    d8=$(find "$sdk/build-tools" -name d8 | LC_ALL=C sort -V | tail -1)
 else
-    d8=$(find "$sdk/build-tools" -name d8 | sort -V | tail -1)
+    echo "error: pinned Android build-tools $pinned_bt not found under $sdk/build-tools (set ANDROID_BUILD_TOOLS_VERSION or ALLOW_UNPINNED_SDK=1)" >&2
+    exit 1
 fi
 apktool=${APKTOOL:-$(ls mysticgsi/tools/apktool/*.jar 2>/dev/null | LC_ALL=C sort -V | head -1)}
-[ -n "$jar" ] && [ -n "$d8" ] && [ -n "$apktool" ]
+[ -n "$jar" ] && [ -f "$jar" ] && [ -n "$d8" ] && [ -x "$d8" ] && [ -n "$apktool" ] && [ -f "$apktool" ] || {
+    echo "error: missing android.jar, d8, or apktool jar" >&2
+    exit 1
+}
 echo "build-udfps-smali toolchain: javac=$("$javac" -version 2>&1) d8=$d8 android.jar=$jar apktool=$apktool" >&2
 name=${1:-OneOSUdfps}
 case $name in OneOSUdfps|OneOSSehTouch|OneOSFpTouch) ;; *) echo "usage: $0 [OneOSUdfps|OneOSSehTouch|OneOSFpTouch]" >&2; exit 2 ;; esac

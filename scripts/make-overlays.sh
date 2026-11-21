@@ -11,20 +11,28 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 IMG="$1"
 OUT="${2:-$ROOT/out/overlays}"
 APKTOOL=${APKTOOL:-$(ls "$ROOT"/mysticgsi/tools/apktool/*.jar 2>/dev/null | LC_ALL=C sort -V | head -1)}
+[ -n "$APKTOOL" ] && [ -f "$APKTOOL" ] || { echo "error: APKTOOL jar not found (set APKTOOL=<path>)" >&2; exit 1; }
 # aapt2, zipalign, apksigner and android.jar for the checks and static RROs below.
 SDK="${ANDROID_HOME:-/opt/android-sdk}"
 PINNED_BT="${ANDROID_BUILD_TOOLS_VERSION:-35.0.0}"
 PINNED_PLATFORM="${ANDROID_PLATFORM_VERSION:-android-35}"
 if [ -d "$SDK/build-tools/$PINNED_BT" ]; then
     BT="$SDK/build-tools/$PINNED_BT"
+elif [ "${ALLOW_UNPINNED_SDK:-0}" = 1 ]; then
+    BT=$(ls -d "$SDK"/build-tools/* 2>/dev/null | LC_ALL=C sort -V | tail -1)
 else
-    BT=$(ls -d "$SDK"/build-tools/* | sort -V | tail -1)
+    echo "error: pinned Android build-tools $PINNED_BT not found under $SDK/build-tools (set ANDROID_BUILD_TOOLS_VERSION or ALLOW_UNPINNED_SDK=1)" >&2
+    exit 1
 fi
 if [ -f "$SDK/platforms/$PINNED_PLATFORM/android.jar" ]; then
     AJ="$SDK/platforms/$PINNED_PLATFORM/android.jar"
+elif [ "${ALLOW_UNPINNED_SDK:-0}" = 1 ]; then
+    AJ=$(ls "$SDK"/platforms/android-*/android.jar 2>/dev/null | LC_ALL=C sort -V | tail -1)
 else
-    AJ=$(ls "$SDK"/platforms/android-*/android.jar | sort -V | tail -1)
+    echo "error: pinned Android platform $PINNED_PLATFORM not found under $SDK/platforms (set ANDROID_PLATFORM_VERSION or ALLOW_UNPINNED_SDK=1)" >&2
+    exit 1
 fi
+[ -n "$BT" ] && [ -d "$BT" ] && [ -n "$AJ" ] && [ -f "$AJ" ] || { echo "error: Android SDK build-tools or android.jar missing" >&2; exit 1; }
 echo "make-overlays toolchain: APKTOOL=$APKTOOL BT=$BT AJ=$AJ" >&2
 DEBUGFS=$(command -v debugfs || echo /usr/sbin/debugfs)
 # A file the image has (ColorOS's own jars are not in a Pixel image).

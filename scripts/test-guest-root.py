@@ -253,6 +253,31 @@ class FullPipeNonblockingBrokerTest(unittest.TestCase):
         self.assertIn("guest_root.c", build_sh)
         self.assertIn("../assets/guest_root", build_sh)
         self.assertIn("28.2.13676358", build_sh)
+        with tempfile.TemporaryDirectory() as fake_sdk:
+            sdk = Path(fake_sdk)
+            (sdk / "platforms/android-99").mkdir(parents=True)
+            (sdk / "platforms/android-99/android.jar").write_text("x")
+            (sdk / "build-tools/99.0.0").mkdir(parents=True)
+            d8 = sdk / "build-tools/99.0.0/d8"
+            d8.write_text("#!/bin/sh\nexit 0\n")
+            d8.chmod(0o755)
+            apktool = sdk / "apktool.jar"
+            apktool.write_text("x")
+            img = sdk / "dummy.img"
+            img.write_text("x")
+            env = {
+                **os.environ,
+                "ANDROID_HOME": str(sdk),
+                "ANDROID_PLATFORM_VERSION": "android-35",
+                "ANDROID_BUILD_TOOLS_VERSION": "35.0.0",
+                "APKTOOL": str(apktool),
+            }
+            r1 = subprocess.run(["sh", str(ROOT / "scripts/build-udfps-smali.sh")], env=env, capture_output=True, text=True)
+            self.assertNotEqual(0, r1.returncode, "missing pinned platform/build-tools must fail closed")
+            self.assertIn("pinned Android", r1.stderr)
+            r2 = subprocess.run(["sh", str(ROOT / "scripts/make-overlays.sh"), str(img)], env=env, capture_output=True, text=True)
+            self.assertNotEqual(0, r2.returncode, "make-overlays must fail closed when pinned build-tools/platform is missing")
+            self.assertIn("pinned Android", r2.stderr)
 
 
 if __name__ == "__main__":
