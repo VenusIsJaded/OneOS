@@ -44,12 +44,14 @@ SHORT = {
     "pixel9proxl-komodo": "Pixel 9 Pro XL",
     "infinityx41-findx9u": "Infinity-X 4.1",
     "hyperos-lhasa": "HyperOS",
+    "hyperos-hongkong": "HyperOS 4 Global",
     "nothingos5-metroid": "Nothing OS 5",
     "oxygenos16-cph2745": "OxygenOS 16",
     "originos7-pd2609ma": "OriginOS 7",
     "coloros17-findx9u-in-1105": "ColorOS 17",
     "lineage24-infiniti": "LineageOS 24",
     "nothingos5-asteroids": "Nothing OS 5 (A series)",
+    "oneui95-s948b": "One UI 9.5",
 }
 CHIP = {
     "SM8850": "Snapdragon 8 Elite Gen 5", "SM8750": "Snapdragon 8 Elite", "SM8650": "Snapdragon 8 Gen 3",
