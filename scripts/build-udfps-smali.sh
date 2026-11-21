@@ -11,10 +11,21 @@ set -eu
 cd "$(dirname "$0")/.."
 sdk=${ANDROID_HOME:?Set ANDROID_HOME to the Android SDK}
 javac=${JAVA_HOME:+$JAVA_HOME/bin/}javac
-jar=$(find "$sdk/platforms" -name android.jar | sort -V | tail -1)
-d8=$(find "$sdk/build-tools" -name d8 | sort -V | tail -1)
-apktool=${APKTOOL:-$(ls mysticgsi/tools/apktool/*.jar 2>/dev/null | head -1)}
+pinned_platform=${ANDROID_PLATFORM_VERSION:-android-35}
+pinned_bt=${ANDROID_BUILD_TOOLS_VERSION:-35.0.0}
+if [ -f "$sdk/platforms/$pinned_platform/android.jar" ]; then
+    jar="$sdk/platforms/$pinned_platform/android.jar"
+else
+    jar=$(find "$sdk/platforms" -name android.jar | sort -V | tail -1)
+fi
+if [ -x "$sdk/build-tools/$pinned_bt/d8" ]; then
+    d8="$sdk/build-tools/$pinned_bt/d8"
+else
+    d8=$(find "$sdk/build-tools" -name d8 | sort -V | tail -1)
+fi
+apktool=${APKTOOL:-$(ls mysticgsi/tools/apktool/*.jar 2>/dev/null | LC_ALL=C sort -V | head -1)}
 [ -n "$jar" ] && [ -n "$d8" ] && [ -n "$apktool" ]
+echo "build-udfps-smali toolchain: javac=$("$javac" -version 2>&1) d8=$d8 android.jar=$jar apktool=$apktool" >&2
 name=${1:-OneOSUdfps}
 case $name in OneOSUdfps|OneOSSehTouch|OneOSFpTouch) ;; *) echo "usage: $0 [OneOSUdfps|OneOSSehTouch|OneOSFpTouch]" >&2; exit 2 ;; esac
 src=switcher/patches/$name.java

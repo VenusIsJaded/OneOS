@@ -16,6 +16,8 @@
 #include <linux/audit.h>
 #include <stddef.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <time.h>
 #include <signal.h>
 #include <errno.h>
 #include <unistd.h>
@@ -36,6 +38,39 @@ static int write_all(int fd, const void *buf, size_t n) {
     const char *p=buf;
     while(n) { ssize_t k=write(fd,p,n); if(k<0&&errno==EINTR)continue; if(k<=0)return -1; p+=k;n-=(size_t)k; }
     return 0;
+}
+/* Bounded nonblocking write for caller-supplied descriptors (A5): an unprivileged client
+ * can pass a full pipe and never read it, which would otherwise block the single-threaded
+ * daemon forever on dprintf/write. Temporarily enable O_NONBLOCK and cap total wait. */
+static int write_client_bounded(int fd, const void *buf, size_t n, int timeout_ms) {
+    if(fd<0)return -1;
+    int flags=fcntl(fd,F_GETFL);
+    if(flags<0)return -1;
+    int restore=(flags&O_NONBLOCK)==0;
+    if(restore&&fcntl(fd,F_SETFL,flags|O_NONBLOCK)<0)return -1;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC,&ts);
+    int64_t deadline=(int64_t)ts.tv_sec*1000+ts.tv_nsec/1000000+timeout_ms;
+    const char *p=buf;
+    int rc=0;
+    while(n) {
+        ssize_t k=write(fd,p,n);
+        if(k>0){p+=k;n-=(size_t)k;continue;}
+        if(k<0&&errno==EINTR)continue;
+        if(k<0&&(errno==EAGAIN||errno==EWOULDBLOCK)){
+            clock_gettime(CLOCK_MONOTONIC,&ts);
+            int64_t now=(int64_t)ts.tv_sec*1000+ts.tv_nsec/1000000;
+            if(now>=deadline){rc=-1;break;}
+            struct pollfd pfd={.fd=fd,.events=POLLOUT};
+            int pr=poll(&pfd,1,(int)(deadline-now));
+            if(pr<0&&errno==EINTR)continue;
+            if(pr<=0||(pfd.revents&(POLLERR|POLLHUP|POLLNVAL))){rc=-1;break;}
+            continue;
+        }
+        rc=-1;break;
+    }
+    if(restore)(void)fcntl(fd,F_SETFL,flags);
+    return rc;
 }
 static void reap(int sig) { (void)sig;while(waitpid(-1,NULL,WNOHANG)>0){} }
 static int safe_package(const char *s) {
@@ -172,15 +207,14 @@ static void list_apps(int out) {
         int n=snprintf(buf+off,sizeof(buf)-off,"%s %u %d\n",p,u,ok);
         if(n<0)continue;
         if((size_t)n>=sizeof(buf)-off){
-            ssize_t w=0;while(w<(ssize_t)off){ssize_t k=write(out,buf+w,off-(size_t)w);if(k<=0)break;w+=k;}
-            if(w<(ssize_t)off)break;
+            if(write_client_bounded(out,buf,off,500)<0)break;
             off=0;
             n=snprintf(buf,sizeof(buf),"%s %u %d\n",p,u,ok);
             if(n<=0||(size_t)n>=sizeof(buf))continue;
         }
         off+=(size_t)n;
     }
-    if(off){ssize_t w=0;while(w<(ssize_t)off){ssize_t k=write(out,buf+w,off-(size_t)w);if(k<=0)break;w+=k;}}
+    if(off)(void)write_client_bounded(out,buf,off,500);
     #ifdef GRANTS
     free(grants);
     #endif
@@ -212,7 +246,9 @@ static void serve(int server) {
     /* Serialize management, fork only command jobs. Bound malformed clients. */
     for(;;){
         int c=accept4(server,NULL,NULL,SOCK_CLOEXEC);if(c<0){if(errno==EINTR)continue;exit(1);}
-        struct timeval timeout={5,0};setsockopt(c,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
+        struct timeval timeout={5,0};
+        setsockopt(c,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
+        setsockopt(c,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));
         struct ucred cred;socklen_t cl=sizeof(cred);
         char payload[sizeof(struct request)+MAX_CMD],control[CMSG_SPACE(3*sizeof(int))]={0};
         struct iovec iov={payload,sizeof(payload)};struct msghdr msg={0};
@@ -226,7 +262,12 @@ static void serve(int server) {
         if(valid){
             char *arg=payload+sizeof(r);arg[r.length]=0;unsigned manager=0;
             int admin=cred.uid==0||(package_uid(MANAGER,&manager)&&cred.uid==manager);
-            if(r.op==INFO&&admin){dprintf(fds[1],"OneOS guest root API 1 manager=%s\n",MANAGER);status=0;}
+            if(r.op==INFO&&admin){
+                char info[128];
+                int ilen=snprintf(info,sizeof(info),"OneOS guest root API 1 manager=%s\n",MANAGER);
+                if(ilen>0&&(size_t)ilen<sizeof(info))(void)write_client_bounded(fds[1],info,(size_t)ilen,250);
+                status=0;
+            }
             else if(r.op==LIST&&admin){list_apps(fds[1]);status=0;}
             else if((r.op==GRANT||r.op==REVOKE)&&admin)status=edit_grant(arg,r.op==GRANT)?1:0;
             else if(r.op==RUN&&(admin||allowed(cred.uid))){
@@ -257,11 +298,15 @@ static void serve(int server) {
                 close(server);
                 if(job>0){int w=0;pid_t got;do{got=waitpid(job,&w,0);}while(got<0&&errno==EINTR);
                     status=got==job?(WIFEXITED(w)?WEXITSTATUS(w):128+WTERMSIG(w)):1;}
-                (void)write_all(c,&status,sizeof(status));_exit(0);
-            }else dprintf(fds[2],"OneOS: root permission denied; open Guest root in the OneOS guest app.\n");
+                (void)write_client_bounded(c,&status,sizeof(status),500);_exit(0);
+            }else{
+                static const char denied[]="OneOS: root permission denied; open Guest root in the OneOS guest app.\n";
+                (void)write_client_bounded(fds[2],denied,sizeof(denied)-1,250);
+            }
         }
-        (void)write_all(c,&status,sizeof(status));
-        for(int j=0;j<3;j++)if(fds[j]>=0)close(fds[j]);close(c);
+        (void)write_client_bounded(c,&status,sizeof(status),500);
+        for(int j=0;j<3;j++)if(fds[j]>=0)close(fds[j]);
+        close(c);
     }
 }
 /* Extract only plain files from OneOS's normalized stream. No ZIP installers run
@@ -340,7 +385,8 @@ static int launch(void) {
             if(stopped!=pid||!WIFSTOPPED(w)||WSTOPSIG(w)!=SIGSTOP){kill(pid,SIGKILL);waitpid(pid,NULL,0);return 1;}
             char number[24];snprintf(number,sizeof(number),"%d",pid);
             pid_t injector=fork();if(!injector){execl(BASE "/bin/zygisk-ptrace64","zygisk-ptrace64","trace",number,"--spawn",NULL);_exit(127);}
-            if(injector<0)return 1;int result;while(waitpid(injector,&result,0)<0&&errno==EINTR){}
+            if(injector<0)return 1;
+            int result;while(waitpid(injector,&result,0)<0&&errno==EINTR){}
             if(!WIFEXITED(result)||WEXITSTATUS(result)){kill(pid,SIGKILL);waitpid(pid,NULL,0);fprintf(stderr,"OneOS: guest injection failed; boot aborted\n");return 1;}
             FILE *proof=fopen(BASE "/run/injection.pid","we");
             if(proof){fprintf(proof,"%d\n",pid);fclose(proof);}
