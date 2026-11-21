@@ -4,7 +4,8 @@
 # errors and every One UI process that mapped them died with SIGBUS.
 #
 # Prints a summary; exits 1 if the manifest cannot be validated, if drop_caches
-# failed when a disk read was required, or if any file/directory read failed.
+# failed when a disk read was required, if temporary file creation failed, or
+# if any file/directory read failed.
 # Usage: check_host_apex.sh [label]
 LABEL="${1:-check}"
 INFO_XML=${ONEOS_APEX_INFO_LIST:-/apex/apex-info-list.xml}
@@ -53,8 +54,20 @@ else
     fi
 fi
 
-tmpz=$(mktemp "${TMPDIR:-/data/local/tmp}/oneos_apex.XXXXXX" 2>/dev/null) || tmpz=""
-[ -z "$tmpz" ] || trap 'rm -f "$tmpz"' EXIT HUP INT TERM
+tmpz=""
+if [ -n "$modules" ]; then
+    for td in "${TMPDIR:-}" /data/local/tmp /dev /tmp; do
+        [ -n "$td" ] && [ -d "$td" ] || continue
+        tmpz=$(mktemp "$td/oneos_apex.XXXXXX" 2>/dev/null) && [ -n "$tmpz" ] && break
+        tmpz=""
+    done
+    [ -z "$tmpz" ] || trap 'rm -f "$tmpz"' EXIT HUP INT TERM
+    if [ -z "$tmpz" ]; then
+        bad=$((bad + 1))
+        badlist="$badlist (mktemp failed)"
+        modules=""
+    fi
+fi
 
 for m in $modules; do
     case "$m" in ''|*[!A-Za-z0-9._-]*)
@@ -66,32 +79,24 @@ for m in $modules; do
     mod_count=$((mod_count + 1))
     # An active module of /data that is not mounted, cannot be listed, or has no file cannot have been read.
     if [ ! -d "$APEX_ROOT/$m" ]; then bad=$((bad + 1)); badlist="$badlist $APEX_ROOT/$m(missing)"; continue; fi
-    if [ -n "$tmpz" ]; then
-        if ! find "$APEX_ROOT/$m" -type f -print0 > "$tmpz" 2>/dev/null; then
+    if ! find "$APEX_ROOT/$m" -type f -print0 > "$tmpz" 2>/dev/null; then
+        bad=$((bad + 1))
+        badlist="$badlist $APEX_ROOT/$m(not listable)"
+        continue
+    fi
+    n=$(tr -cd '\0' < "$tmpz" | wc -c | tr -d ' ')
+    if [ "${n:-0}" -eq 0 ]; then bad=$((bad + 1)); badlist="$badlist $APEX_ROOT/$m(no files)"; continue; fi
+    files=$((files + n))
+    # Preserve NUL-delimited filenames end-to-end so even newline-containing paths are never split (A18).
+    if ! xargs -0 cat < "$tmpz" > /dev/null 2>&1; then
+        mod_bad=$(xargs -0 -n 1 sh -c 'cat -- "$1" > /dev/null 2>&1 || printf " %s" "$1" | tr "\n" "?"' sh < "$tmpz")
+        if [ -n "$mod_bad" ]; then
+            bad_n=$(xargs -0 -n 1 sh -c 'cat -- "$1" > /dev/null 2>&1 || echo x' sh < "$tmpz" | wc -l | tr -d ' ')
+            bad=$((bad + bad_n))
+            badlist="$badlist$mod_bad"
+        else
             bad=$((bad + 1))
-            badlist="$badlist $APEX_ROOT/$m(not listable)"
-            continue
-        fi
-        n=$(tr -cd '\0' < "$tmpz" | wc -c | tr -d ' ')
-        if [ "${n:-0}" -eq 0 ]; then bad=$((bad + 1)); badlist="$badlist $APEX_ROOT/$m(no files)"; continue; fi
-        files=$((files + n))
-        # Preserve NUL-delimited filenames end-to-end so even newline-containing paths are never split (A18).
-        if ! xargs -0 cat < "$tmpz" > /dev/null 2>&1; then
-            mod_bad=$(xargs -0 -n 1 sh -c 'cat -- "$1" > /dev/null 2>&1 || printf " %s" "$1" | tr "\n" "?"' sh < "$tmpz")
-            if [ -n "$mod_bad" ]; then
-                bad_n=$(xargs -0 -n 1 sh -c 'cat -- "$1" > /dev/null 2>&1 || echo x' sh < "$tmpz" | wc -l | tr -d ' ')
-                bad=$((bad + bad_n))
-                badlist="$badlist$mod_bad"
-            else
-                bad=$((bad + 1))
-                badlist="$badlist $APEX_ROOT/$m(read-failed)"
-            fi
-        fi
-    else
-        # Fallback if mktemp could not write anywhere
-        if ! find "$APEX_ROOT/$m" -type f -print0 2>/dev/null | xargs -0 -r cat > /dev/null 2>&1; then
-            bad=$((bad + 1))
-            badlist="$badlist $APEX_ROOT/$m(unreadable)"
+            badlist="$badlist $APEX_ROOT/$m(read-failed)"
         fi
     fi
 done

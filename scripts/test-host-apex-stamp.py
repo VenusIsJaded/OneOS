@@ -178,6 +178,48 @@ class HostApexIncompleteWalk(unittest.TestCase):
         self.assertEqual('[after-inplace] host APEXes on /data: 1 modules, 3 files, 0 unreadable (read from disk)', line)
         self.assertEqual((0, True), (code, stamp))
 
+    def test_empty_active_module_with_nonexistent_tmpdir_still_fails_closed(self):
+        shutil.rmtree(self.phone.root / 'apex/com.x/lib')
+        (self.phone.root / 'apex/com.x/manifest').unlink()
+        script = ('sync() { echo sync >> "$CALLS"; }\n' +
+                  (ROOT / 'switcher/assets/check_host_apex.sh').read_text().replace('/proc/sys/vm/drop_caches', self.phone.drop_target))
+        out = subprocess.run(
+            ['/bin/sh', '-c', script, 'check', 'after-inplace'],
+            capture_output=True,
+            text=True,
+            env=dict(
+                os.environ,
+                ONEOS_APEX_STAMP=str(self.phone.stamp),
+                ONEOS_APEX_INFO_LIST=str(self.phone.root / 'apex/apex-info-list.xml'),
+                ONEOS_APEX_ROOT=str(self.phone.root / 'apex'),
+                TMPDIR=str(self.phone.root / 'nonexistent-tmp'),
+                CALLS=str(self.phone.calls),
+            ),
+        )
+        self.assertEqual(1, out.returncode, out.stdout)
+        self.assertFalse(self.phone.stamp.exists(), 'empty module with bad TMPDIR must never leave a stamp')
+        self.assertTrue('(no files)' in out.stdout or '(mktemp failed)' in out.stdout, out.stdout)
+
+    def test_mktemp_failure_fails_closed_without_stamp(self):
+        script = ('sync() { echo sync >> "$CALLS"; }\n'
+                  'mktemp() { return 1; }\n' +
+                  (ROOT / 'switcher/assets/check_host_apex.sh').read_text().replace('/proc/sys/vm/drop_caches', self.phone.drop_target))
+        out = subprocess.run(
+            ['/bin/sh', '-c', script, 'check', 'after-inplace'],
+            capture_output=True,
+            text=True,
+            env=dict(
+                os.environ,
+                ONEOS_APEX_STAMP=str(self.phone.stamp),
+                ONEOS_APEX_INFO_LIST=str(self.phone.root / 'apex/apex-info-list.xml'),
+                ONEOS_APEX_ROOT=str(self.phone.root / 'apex'),
+                CALLS=str(self.phone.calls),
+            ),
+        )
+        self.assertEqual(1, out.returncode, out.stdout)
+        self.assertIn('(mktemp failed)', out.stdout)
+        self.assertFalse(self.phone.stamp.exists())
+
     def test_a_working_look_is_unchanged(self):
         line, code, _, stamp = self.phone.look('after-inplace')
         self.assertEqual('[after-inplace] host APEXes on /data: 1 modules, 2 files, 0 unreadable (read from disk)', line)
