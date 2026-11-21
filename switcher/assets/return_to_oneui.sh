@@ -660,6 +660,7 @@ if [ "$MODE" != inplace ]; then
     oneos_boot_release_display
     rm -f /data/local/tmp/oneos/data/guest_audio.flag /data/local/tmp/oneos/host_audio_hal_svcs
     STAGE=/data/local/tmp/oneos /system/bin/sh /data/local/tmp/oneos/guest_props.sh restore-persist
+    STAGE=/data/local/tmp/oneos /system/bin/sh /data/local/tmp/oneos/guest_runtime.sh restore-props-host persist-only 2>/dev/null || true
     pkill -9 -f "app_storage_loop.sh" 2>/dev/null || true
     p=$(cat $S/share_holder.pid 2>/dev/null); case "$p" in ""|*[!0-9]*) ;; *) grep -q sleep /proc/$p/cmdline 2>/dev/null && kill "$p" 2>/dev/null ;; esac; rm -f $S/share_holder.pid
     # The session is undone: record a clean return ("<boot_id> <epoch>") for this
@@ -719,6 +720,7 @@ failsafe() {
     # Enforcing, the phone stayed black).
     [ "$(getenforce 2>/dev/null)" = Permissive ] || setenforce 0 2>/dev/null
     STAGE=$S /system/bin/sh $S/guest_props.sh restore-persist >> "$IPLOG" 2>&1
+    STAGE=$S /system/bin/sh $S/guest_runtime.sh restore-props-host persist-only >> "$IPLOG" 2>&1 || true
     sync
     setprop sys.powerctl reboot,oneos-inplace-failsafe
     sleep 20
@@ -1044,6 +1046,7 @@ rm -f "$S/inplace_props.plan" "$S/inplace_props.set"
 [ "$(getprop qemu.hw.mainkeys)" = "$(base_prop qemu.hw.mainkeys)" ] ||
     failsafe "qemu.hw.mainkeys is still the guest's ($(getprop qemu.hw.mainkeys)): One UI would start without its navigation bar"
 STAGE=$S /system/bin/sh $S/guest_props.sh restore-persist >> "$IPLOG" 2>&1 || failsafe "One UI's persist props could not be restored"
+STAGE=$S /system/bin/sh $S/guest_runtime.sh restore-props-host all >> "$IPLOG" 2>&1 || failsafe "Guest module system.prop overrides could not be restored"
 # RescueParty stays off until One UI is up (in memory: the stored value is the
 # snapshot's again); the guest's system_server starts counted towards it.
 "$RP" -n persist.sys.disable_rescue true 2>/dev/null

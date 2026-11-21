@@ -13,6 +13,70 @@ verify_private_adb_bind() {
     done
 }
 
+restore_module_props() {
+    rp_dir=$1
+    mode=${2:-all}
+    snapshot="$rp_dir/oneos/run/module-props"
+    boot_stamp="$rp_dir/oneos/run/module-props.boot"
+    [ -f "$snapshot" ] || { rm -f "$boot_stamp"; return 0; }
+    [ ! -L "$snapshot" ] || { echo "Guest runtime: symlink $snapshot" >&2; return 1; }
+    rp_bin=""
+    for c in "$rp_dir/ksu/bin/resetprop" /data/adb/ksu/bin/resetprop /data/adb/ap/bin/resetprop /debug_ramdisk/resetprop /sbin/resetprop; do
+        [ -x "$c" ] && { rp_bin=$c; break; }
+    done
+    if [ "$mode" = persist-only ]; then
+        if ! grep -q '^persist\.' "$snapshot" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    [ -n "$rp_bin" ] || { echo "Guest runtime: resetprop missing for module property restore" >&2; return 1; }
+    # resetprop can exit 0 and leave the property as it was (a full property area), and
+    # getprop <key> prints an empty string both when <key> is absent and when <key> is
+    # present with an empty value (A8). Verify both presence ([key]: in full getprop)
+    # and value before removing the snapshot.
+    bad=0
+    while IFS='|' read -r key present value; do
+        case "$key" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+        if [ "$mode" = persist-only ]; then
+            case "$key" in persist.*) ;; *) continue ;; esac
+        fi
+        if [ "$present" = 1 ]; then
+            if [ "$mode" = persist-only ]; then
+                "$rp_bin" -p "$key" "$value"
+            else
+                "$rp_bin" -n "$key" "$value"
+            fi
+        else
+            "$rp_bin" --delete "$key"
+        fi
+    done < "$snapshot"
+    all_after=$(getprop)
+    while IFS='|' read -r key present value; do
+        case "$key" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+        if [ "$mode" = persist-only ]; then
+            case "$key" in persist.*) ;; *) continue ;; esac
+        fi
+        now_present=0
+        case "$all_after" in *"[$key]: ["*) now_present=1 ;; esac
+        if [ "$present" = 1 ]; then
+            now_val=$(getprop "$key")
+            if [ "$now_present" != 1 ] || [ "$now_val" != "$value" ]; then
+                echo "Guest runtime: $key was not restored to its earlier state" >&2
+                bad=$((bad + 1))
+            fi
+        else
+            if [ "$now_present" != 0 ]; then
+                echo "Guest runtime: $key was not removed" >&2
+                bad=$((bad + 1))
+            fi
+        fi
+    done < "$snapshot"
+    [ "$bad" = 0 ] || { echo "Guest runtime: $bad module properties not restored; keeping $snapshot" >&2; return 1; }
+    if [ "$mode" != persist-only ]; then
+        rm -f "$snapshot" "$boot_stamp"
+    fi
+}
+
 case "${1:-}" in
 control)
     A=/data/adb
@@ -267,7 +331,21 @@ prepare)
     chmod 711 "$A" "$A/oneos"
     chmod 755 "$A/oneos/run" "$A/oneos/run/zygisk"
     : > "$A/oneos/run/session.log"
-    rm -f "$A/oneos/run/injection.pid" "$A/oneos/run/su.sock" "$A/oneos/run/zygisk/cp64.sock" "$A/oneos/run/module-props"
+    rm -f "$A/oneos/run/injection.pid" "$A/oneos/run/su.sock" "$A/oneos/run/zygisk/cp64.sock"
+    if [ -f "$A/oneos/run/module-props" ]; then
+        cur_boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)
+        snap_boot=$(cat "$A/oneos/run/module-props.boot" 2>/dev/null || true)
+        if [ -n "$cur_boot" ] && [ -n "$snap_boot" ] && [ "$cur_boot" != "$snap_boot" ]; then
+            # A full reboot reset the in-memory property arena; only persist.* keys could survive.
+            restore_module_props "$A" persist-only || exit 1
+            rm -f "$A/oneos/run/module-props" "$A/oneos/run/module-props.boot"
+        else
+            # Same kernel boot (or unknown boot_id): restore un-cleaned module properties before new prepare.
+            restore_module_props "$A" all || exit 1
+        fi
+    else
+        rm -f "$A/oneos/run/module-props.boot"
+    fi
     if [ ! -d "$A/modules/zygisk_vector" ] && [ ! -d "$A/modules_update/zygisk_vector" ]; then
         [ ! -L "$A/modules_update/zygisk_vector" ] || { echo "Guest runtime: symlink $A/modules_update/zygisk_vector"; exit 1; }
         mkdir "$A/modules_update/zygisk_vector"
@@ -314,26 +392,11 @@ prepare)
     echo 'Guest runtime: separate permissions, module state and explicit guest injection enabled'
     ;;
 restore-props)
-    A=/data/adb
-    snapshot="$A/oneos/run/module-props"
-    if [ -f "$snapshot" ]; then
-        [ -x "$A/ksu/bin/resetprop" ] || exit 1
-        # resetprop can exit 0 and leave the property as it was (a full property area): each write is read
-        # back, and the snapshot (the only record) is kept for the next try unless every one landed.
-        bad=0
-        while IFS='|' read -r key present value; do
-            case "$key" in ''|*[!A-Za-z0-9._-]*) exit 1 ;; esac
-            if [ "$present" = 1 ]; then
-                "$A/ksu/bin/resetprop" -n "$key" "$value"
-                [ "$(getprop "$key")" = "$value" ] || { echo "Guest runtime: $key was not restored to its earlier value" >&2; bad=$((bad + 1)); }
-            else
-                "$A/ksu/bin/resetprop" --delete "$key"
-                [ -z "$(getprop "$key")" ] || { echo "Guest runtime: $key was not removed" >&2; bad=$((bad + 1)); }
-            fi
-        done < "$snapshot"
-        [ "$bad" = 0 ] || { echo "Guest runtime: $bad module properties not restored; keeping $snapshot" >&2; exit 1; }
-        rm -f "$snapshot"
-    fi
+    restore_module_props /data/adb "${2:-all}"
+    ;;
+restore-props-host)
+    [ -d "$STATE/adb" ] && [ ! -L "$STATE" ] && [ ! -L "$STATE/adb" ] || exit 0
+    restore_module_props "$STATE/adb" "${2:-all}"
     ;;
 uninstall)
     A=/data/adb
@@ -430,8 +493,12 @@ pre)
             continue
         fi
         if [ -f "$m/system.prop" ]; then
-            # OneOS snapshots/restores persistent properties on either return path.
+            # OneOS snapshots/restores module properties on soft reboot, in-place return, and reboot return.
             snapshot="$A/oneos/run/module-props"
+            boot_stamp="$A/oneos/run/module-props.boot"
+            if [ ! -f "$boot_stamp" ] && [ ! -L "$boot_stamp" ]; then
+                cat /proc/sys/kernel/random/boot_id > "$boot_stamp" 2>/dev/null || true
+            fi
             if [ -z "${MOD_ALL_PROPS_SET:-}" ]; then
                 MOD_ALL_PROPS=$(getprop)
                 MOD_ALL_PROPS_SET=1
