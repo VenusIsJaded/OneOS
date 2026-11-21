@@ -5304,7 +5304,7 @@ if [ "$RETURN_MAX" -gt 0 ]; then
             if [ \$home = 0 ] || { [ -f $STAGE/data/oneos_hwc ] && [ ! -e $STAGE/data/oneos_hwc_forced ] && [ \$total -lt 300 ]; }; then
                 now_ts=\$(date +%s)
                 if [ \"\${hwcarm:-0}\" = 1 ] && [ -n \"\$sf_ts\" ]; then
-                    new_failed=\$(timeout 5 logcat -d -b main -T \"\${sf_ts}.000\" -s SurfaceFlinger:E 2>/dev/null | grep -c 'presentOrValidate failed\|executeCommands failed')
+                    new_failed=\$(timeout 5 logcat -d -b main -T \"\${sf_ts}.000\" -s SurfaceFlinger:E 2>/dev/null | grep -c -E 'presentOrValidate failed|executeCommands failed')
                 fi
                 sf_ts=\$now_ts
             fi

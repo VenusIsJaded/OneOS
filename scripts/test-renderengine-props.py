@@ -128,21 +128,33 @@ class RenderEngineProps(unittest.TestCase):
 
 
 class PhoneGrep(unittest.TestCase):
-    """No "\\|" in a grep without -E in any script that runs on the phone."""
-    # The composer-rejection count of the session watcher: it has never counted, and turning it on arms the
-    # watcher's GPU-composition switch and its black-screen return for the whole session. The owner's decision.
-    KNOWN = {("oneos_switch.sh", r"grep -c 'presentOrValidate failed\|executeCommands failed'")}
+    """No "\\|" in a grep without -E in any script that runs on the phone (N2, A7)."""
 
     def test_every_alternation_uses_extended_expressions(self):
         bad = []
-        for f in sorted(ASSETS.glob('*.sh')):
+        for f in sorted(ASSETS.glob('*.sh')) + [ROOT / 'app-android/app/src/full/assets/root/oneos_root.sh']:
             for n, line in enumerate(f.read_text().splitlines(), 1):
                 if line.lstrip().startswith('#') or '\\|' not in line: continue
                 for m in re.finditer(r'\bgrep\b((?:\s+-[A-Za-z0-9]+(?:\s+\d+)?)*)\s+([^|]*(?:\\\|[^|]*)+)', line):
                     if 'E' in re.sub(r'\s\d+', '', m.group(1)): continue
-                    if any(f.name == name and text in line for name, text in self.KNOWN): continue
                     bad.append(f'{f.name}:{n}: {m.group(0)[:80]}')
         self.assertEqual([], bad)
+
+    def test_composer_rejection_count_matches_under_phone_grep_a7(self):
+        sw = (ASSETS / 'oneos_switch.sh').read_text()
+        self.assertIn("grep -c -E 'presentOrValidate failed|executeCommands failed'", sw)
+        with tempfile.TemporaryDirectory() as d:
+            g = Path(d) / 'grep'
+            g.write_text(PHONE_GREP)
+            g.chmod(0o755)
+            sample = (
+                "11-19 12:00:01.000  1000  1000 E SurfaceFlinger: presentOrValidate failed with error -22\n"
+                "11-19 12:00:02.000  1000  1000 E SurfaceFlinger: executeCommands failed with error -22\n"
+            )
+            r = subprocess.run([str(g), '-c', '-E', 'presentOrValidate failed|executeCommands failed'],
+                               input=sample, text=True, capture_output=True)
+            self.assertEqual(0, r.returncode)
+            self.assertEqual('2', r.stdout.strip())
 
 
 if __name__ == '__main__':
