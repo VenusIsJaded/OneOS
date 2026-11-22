@@ -208,6 +208,55 @@ class StageWriteLinks(unittest.TestCase):
         self.assertIn('rm -f "$SIGC.tmp" "$SIGC"', gp)
         self.assertIn('rm -f "$f.oneos-prev"', gp)
 
+    def test_bt_stage_conf_preserves_and_sanitizes_guest_own_config_without_deleting_input_first(self):
+        """Regression test for Section 2A: bt_stage_conf called on $BTD/bt_config.conf must not delete its own input before awk reads it."""
+        gp = (ASSETS / 'guest_prepare.sh').read_text()
+        start = 'BTC=/data/misc/bluedroid/bt_config.conf\n'
+        end = '\necho "=== 5d.'
+        block = start + gp.split(start, 1)[1].split(end, 1)[0]
+        # Replace hardcoded /data/misc/bluedroid with $HOST_BTD (matching directory boundary, not $STAGE/data/misc/bluedroid)
+        block = re.sub(r'(?<!\$STAGE)/data/misc/bluedroid', '$HOST_BTD', block)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            stage = root / 'stage'
+            btd = stage / 'data/misc/bluedroid'
+            btd.mkdir(parents=True)
+            host_btd = root / 'host_bt'
+            host_btd.mkdir(parents=True)
+            # Valid AOSP 32-hex link key + One UI leftover 64-hex link key
+            valid_key = '0123456789abcdef0123456789abcdef'
+            bad_key = valid_key * 2
+            (btd / 'bt_config.conf').write_text(
+                '[Info]\nFileSource = Empty\n\n'
+                '[Adapter]\nAddress = aa:bb:cc:dd:ee:ff\n\n'
+                f'[11:22:33:44:55:66]\nDevType = 1\nLinkKey = {valid_key}\n\n'
+                f'[aa:bb:cc:11:22:33]\nDevType = 1\nLinkKey = {bad_key}\n'
+            )
+            script = (
+                'chown() { return 0; }\n'
+                'chcon() { return 0; }\n'
+                'BB="busybox"\n'
+                'GUEST_OPLUS=0\n'
+                + block
+            )
+            env = {**os.environ, 'STAGE': str(stage), 'HOST_BTD': str(host_btd), 'ONEOS_GUEST_BT_IMPORT': '0'}
+            r = subprocess.run(['dash', '-c', script], env=env, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+            self.assertIn("the guest's own after the checks", r.stdout)
+            self.assertTrue((btd / 'bt_config.conf').is_file())
+            result = (btd / 'bt_config.conf').read_text()
+            self.assertIn('[Adapter]', result)
+            self.assertIn('[11:22:33:44:55:66]', result)
+            self.assertIn(valid_key, result)
+            self.assertNotIn('[aa:bb:cc:11:22:33]', result)
+            # Also verify a destination symlink at bt_config.conf.oneos-new or bt_config.conf cannot write through to outside
+            outside = root / 'outside_bt'
+            outside.write_text('KEEP_HOST_BT\n')
+            (btd / 'bt_config.conf.oneos-new').symlink_to(outside)
+            r2 = subprocess.run(['dash', '-c', script], env=env, capture_output=True, text=True)
+            self.assertEqual(r2.returncode, 0, r2.stderr + r2.stdout)
+            self.assertEqual(outside.read_text(), 'KEEP_HOST_BT\n')
+
 
 if __name__ == '__main__':
     unittest.main()

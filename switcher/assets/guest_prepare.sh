@@ -5713,9 +5713,11 @@ END { bad = 0; for (s in badpid) if (!(s in badkey)) bad++
 # deletes the stage's file and .bak: no pairings, never an unchecked file. Only
 # the stage's folder is written; $1 is only read.
 bt_stage_conf() {
-    rm -f "$BTD/bt_config.conf.oneos-new" "$BTD/bt_config.conf" "$BTD/bt_config.bak"
+    rm -f "$BTD/bt_config.conf.oneos-new" "$BTD/bt_config.bak"
     bt_le=1; [ "${ONEOS_GUEST_BT_LE_SANITIZE:-1}" = 0 ] && bt_le=0
-    if $BB awk -v SUM="$BTDIAG/sanitize.txt" -v LE="$bt_le" "$BT_AWK_FN$BT_SAN_AWK" "$1" > "$BTD/bt_config.conf.oneos-new" &&
+    if [ ! -L "$1" ] && [ -f "$1" ] &&
+       $BB awk -v SUM="$BTDIAG/sanitize.txt" -v LE="$bt_le" "$BT_AWK_FN$BT_SAN_AWK" "$1" > "$BTD/bt_config.conf.oneos-new" &&
+       [ ! -L "$BTD/bt_config.conf.oneos-new" ] &&
        grep -q '^\[Adapter\]' "$BTD/bt_config.conf.oneos-new" &&
        chown -h 1002:1002 "$BTD/bt_config.conf.oneos-new" && chmod 0660 "$BTD/bt_config.conf.oneos-new" &&
        rm -f "$BTD/bt_config.conf" &&
