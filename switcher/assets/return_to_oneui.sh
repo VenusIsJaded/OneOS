@@ -660,6 +660,7 @@ if [ "$MODE" != inplace ]; then
     oneos_boot_release_display
     rm -f /data/local/tmp/oneos/data/guest_audio.flag /data/local/tmp/oneos/host_audio_hal_svcs
     STAGE=/data/local/tmp/oneos /system/bin/sh /data/local/tmp/oneos/guest_props.sh restore-persist
+    persist_restore_rc=$?
     mod_restore_ok=1
     if ! STAGE=/data/local/tmp/oneos /system/bin/sh /data/local/tmp/oneos/guest_runtime.sh restore-props-host persist-only; then
         mod_restore_ok=0
@@ -669,11 +670,16 @@ if [ "$MODE" != inplace ]; then
     fi
     pkill -9 -f "app_storage_loop.sh" 2>/dev/null || true
     p=$(cat $S/share_holder.pid 2>/dev/null); case "$p" in ""|*[!0-9]*) ;; *) grep -q sleep /proc/$p/cmdline 2>/dev/null && kill "$p" 2>/dev/null ;; esac; rm -f $S/share_holder.pid
-    # The session is undone: record a clean return ("<boot_id> <epoch>") for this
-    # path too. Without it a guest power-off or a reboot return left the last
-    # launch unanswered, and a boot-safety module that reads this file (owner's
-    # backdownload) sent every later boot to Download Mode.
-    echo "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) $(date +%s)$([ "$mod_restore_ok" = 1 ] || echo ' module_props_unrestored')" > $S/return_inplace.done
+    # Only record return_inplace.done when persist restoration actually succeeded;
+    # otherwise write return_reboot.degraded so nothing mistakes an unrestored reboot
+    # for a clean One UI return.
+    if [ "$persist_restore_rc" = 0 ] && [ "$mod_restore_ok" = 1 ]; then
+        rm -f "$S/return_reboot.degraded"
+        echo "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) $(date +%s)" > "$S/return_inplace.done"
+    else
+        rm -f "$S/return_inplace.done"
+        echo "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) $(date +%s) persist_rc=$persist_restore_rc mod_restore_ok=$mod_restore_ok" > "$S/return_reboot.degraded"
+    fi
     sync
     # A guest shutdown request (low battery, thermal, power off), recorded by the
     # guarded ShutdownThread, becomes a real host shutdown; anything else reboots.

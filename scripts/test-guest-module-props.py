@@ -12,11 +12,11 @@ RETURN_SH = ROOT / 'switcher/assets/return_to_oneui.sh'
 
 
 def make_fake_prop_tools(root: Path, noop: bool = False, ignore_empty_set: bool = False, leave_empty_on_delete: bool = False):
+    (root / 'host_ksu/bin').mkdir(parents=True, exist_ok=True)
     (root / 'ksu/bin').mkdir(parents=True, exist_ok=True)
     (root / 'bin').mkdir(parents=True, exist_ok=True)
     (root / 'props').mkdir(parents=True, exist_ok=True)
-    rp = root / 'ksu/bin/resetprop'
-    rp.write_text(
+    rp_body = (
         '#!/bin/sh\n'
         'printf "[%s][%s][%s]\\n" "$1" "$2" "${3-}" >> "$CALL_LOG"\n'
         '[ -n "${NOOP:-}" ] && exit 0\n'
@@ -31,6 +31,11 @@ def make_fake_prop_tools(root: Path, noop: bool = False, ignore_empty_set: bool 
         '    ;;\n'
         'esac\n'
     )
+    rp_host = root / 'host_ksu/bin/resetprop'
+    rp_host.write_text(rp_body)
+    rp_host.chmod(0o755)
+    rp = root / 'ksu/bin/resetprop'
+    rp.write_text(rp_body)
     rp.chmod(0o755)
     gp = root / 'bin/getprop'
     gp.write_text(
@@ -42,7 +47,12 @@ def make_fake_prop_tools(root: Path, noop: bool = False, ignore_empty_set: bool 
         '  done\n'
         '  exit 0\n'
         'fi\n'
-        '[ -f "$PROPS/$1" ] && cat "$PROPS/$1"\n'
+        'if [ -f "$PROPS/$1" ]; then\n'
+        '  cat "$PROPS/$1"\n'
+        '  printf "\\n"\n'
+        'else\n'
+        '  printf "\\n"\n'
+        'fi\n'
         'exit 0\n'
     )
     gp.chmod(0o755)
@@ -50,6 +60,7 @@ def make_fake_prop_tools(root: Path, noop: bool = False, ignore_empty_set: bool 
         **os.environ,
         'CALL_LOG': str(root / 'calls'),
         'PROPS': str(root / 'props'),
+        'ONEOS_HOST_RESETPROP': str(rp_host),
         'PATH': str(root / 'bin') + ':' + os.environ['PATH'],
     }
     if noop:
@@ -224,6 +235,116 @@ class ModulePropsTest(unittest.TestCase):
             self.assertIn('invalid present metadata', r.stderr)
             self.assertTrue(snap.exists())
             self.assertEqual('orig', (adb / 'props/ro.test.key').read_text())
+
+    def test_end_to_end_capture_and_restore_preserves_backslashes_trailing_newlines_and_pipes(self):
+        """Regression test for Section 2: literal \\n, consecutive backslashes, pipes, CR, interior/trailing newlines, and empty values."""
+        gr = GUEST_RUNTIME.read_text()
+        helpers = gr[gr.index('hex_encode_file() {'):gr.index('check_prop_snapshot_dirs() {')]
+        pre_idx = gr.index('pre)\n')
+        loop_start = gr.index('    B=/data/oneos_bin/busybox\n', pre_idx)
+        loop_end = gr.index('    selected=$(cat "$A/oneos/framework")', loop_start)
+        capture_loop = helpers + '\n' + gr[loop_start:loop_end]
+
+        cases = {
+            'persist.test.lit_nl': 'a\\nb',
+            'persist.test.two_bs': 'x\\\\y\\\\',
+            'persist.test.pipes': 'left|mid|right',
+            'persist.test.crlf': 'r1\r\nr2\\r\\n',
+            'persist.test.trailing_nl': 'hello\nworld\n\n',
+            'persist.test.empty': '',
+        }
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            adb = root / 'stage/data/oneos_root/adb'
+            (adb / 'oneos/run').mkdir(parents=True)
+            (adb / 'modules/mod1').mkdir(parents=True)
+            env = make_fake_prop_tools(adb)
+            for k, v in cases.items():
+                (adb / 'props' / k).write_bytes(v.encode('utf-8'))
+            (adb / 'modules/mod1/system.prop').write_text(
+                ''.join(f'{k}=guest_override\n' for k in cases) + 'persist.test.added=guest_new\n'
+            )
+            bb = adb / 'bin/bb'
+            bb.write_text('#!/bin/sh\nexec "$@"\n')
+            bb.chmod(0o755)
+            script = (
+                f'A="{adb}"\n'
+                + capture_loop
+                .replace('B=/data/oneos_bin/busybox', f'B="{bb}"')
+                .replace('export PATH=/system/bin:/system/xbin:/data/adb/ksu/bin', f'export PATH="{adb}/bin:$PATH"')
+            )
+            r_cap = subprocess.run(['dash', '-c', script], env=env, capture_output=True, text=True)
+            self.assertEqual(0, r_cap.returncode, r_cap.stderr + r_cap.stdout)
+            for k in cases:
+                self.assertEqual('guest_override', (adb / 'props' / k).read_text())
+            self.assertEqual('guest_new', (adb / 'props/persist.test.added').read_text())
+
+            r_res = self.run_host_restore(root, env, mode='all')
+            self.assertEqual(0, r_res.returncode, r_res.stderr + r_res.stdout)
+            for k, expected in cases.items():
+                self.assertEqual(expected.encode('utf-8'), (adb / 'props' / k).read_bytes(), f'mismatch for {k}')
+            self.assertFalse((adb / 'props/persist.test.added').exists())
+            self.assertFalse((adb / 'oneos/run/module-props').exists())
+
+    def test_length_mismatch_in_hex_record_fails_closed(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            adb = root / 'stage/data/oneos_root/adb'
+            (adb / 'oneos/run').mkdir(parents=True)
+            env = make_fake_prop_tools(adb)
+            snap = adb / 'oneos/run/module-props'
+            snap.write_text('persist.test.tampered|1h:5|4142\n')
+            (adb / 'props/persist.test.tampered').write_text('keep')
+            r = self.run_host_restore(root, env)
+            self.assertEqual(1, r.returncode)
+            self.assertTrue(snap.exists())
+            self.assertEqual('keep', (adb / 'props/persist.test.tampered').read_text())
+
+    def test_host_restore_ignores_guest_staged_resetprop_and_uses_host_baseline_provenance(self):
+        """Regression test for Section 1/2: host restore must not execute guest-staged resetprop or trust forged snapshot values over host baselines."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            stage = root / 'stage'
+            adb = stage / 'data/oneos_root/adb'
+            (adb / 'oneos/run').mkdir(parents=True)
+            (stage / 'data/oneos_root/enabled').touch()
+            env = make_fake_prop_tools(adb)
+            # Replace guest-staged resetprop with a trojan regular executable
+            marker = root / 'trojan_ran'
+            trojan = adb / 'ksu/bin/resetprop'
+            trojan.write_text(f'#!/bin/sh\ntouch "{marker}"\nexit 0\n')
+            trojan.chmod(0o755)
+            # Host baseline says persist.test.host was 'real-host-val', not 'guest-forged-val'
+            (stage / 'persist_props.snapshot').write_text('persist.test.host=real-host-val\n')
+            (stage / 'persist_session.active').write_text('format=2\n')
+            (adb / 'props/persist.test.host').write_text('guest-live-val')
+            (adb / 'oneos/run/module-props').write_text('persist.test.host|1|guest-forged-val\n')
+
+            r = self.run_host_restore(root, env)
+            self.assertEqual(0, r.returncode, r.stderr)
+            self.assertFalse(marker.exists(), 'host restore must never execute guest-staged resetprop')
+            self.assertEqual('real-host-val', (adb / 'props/persist.test.host').read_text())
+
+    def test_host_restore_refuses_deleted_adb_dir_when_guest_root_enabled_and_directory_snapshot(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            stage = root / 'stage'
+            (stage / 'data/oneos_root').mkdir(parents=True)
+            (stage / 'data/oneos_root/enabled').touch()
+            # STATE/adb deleted by guest to suppress restore
+            r = subprocess.run(
+                ['sh', str(GUEST_RUNTIME), 'restore-props-host', 'all'],
+                env={**os.environ, 'STAGE': str(stage)},
+                capture_output=True, text=True,
+            )
+            self.assertNotEqual(0, r.returncode)
+
+            # Directory named module-props instead of regular file must fail closed
+            adb = stage / 'data/oneos_root/adb'
+            (adb / 'oneos/run/module-props').mkdir(parents=True)
+            env = make_fake_prop_tools(adb)
+            r2 = self.run_host_restore(root, env)
+            self.assertNotEqual(0, r2.returncode)
 
 
 if __name__ == '__main__':

@@ -9,10 +9,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 S = (ROOT / 'switcher/assets/guest_runtime.sh').read_text()
+HELPERS = S[S.index('hex_encode_file() {'):S.index('check_prop_snapshot_dirs() {')]
 a = S.index('pre)\n')
 a = S.index('    B=/data/oneos_bin/busybox\n', a)
 b = S.index('    selected=$(cat "$A/oneos/framework")', a)
-LOOP = S[a:b]
+LOOP = HELPERS + '\n' + S[a:b]
 
 
 class Cache(unittest.TestCase):
@@ -47,8 +48,9 @@ class Cache(unittest.TestCase):
 
     def test_hook_created_property_is_snapshotted_as_present(self):
         snap = self.run_loop()
-        self.assertIn('ro.x.hooked|1|fromhook', snap)
-        self.assertIn('ro.x.orig|1|o', snap)
+        self.assertIn(f'ro.x.hooked|1h:{len("fromhook")}|{"fromhook".encode().hex()}', snap)
+        self.assertIn(f'ro.x.orig|1h:{len("o")}|{"o".encode().hex()}', snap)
+        self.assertNotIn('ro.x.hooked|0h:0|', snap)
         self.assertNotIn('ro.x.hooked|0|', snap)
 
     def test_each_key_is_snapshotted_once(self):
