@@ -70,14 +70,38 @@ no_symlink() { # <relative path under $STAGE/data>: refuse if any component is a
     IFS=$_oifs
 }
 for pair in $BRIDGES; do no_symlink "${pair#*:}"; done
-for s in data misc misc/adb misc/profiles misc/user misc/bluedroid misc/bluetooth \
-         misc_ce/0 misc_de/0 system system/devicestate system/package_cache \
-         system/watchdog_timestamps system_de system_ce user/0 user_de/0 \
+for s in data misc misc/adb misc/profiles misc/profiles/cur misc/profiles/cur/0 misc/profiles/ref \
+         misc/user misc/user/0 misc/bluedroid misc/bluetooth misc/shared_relro misc/wifi misc/sms misc/textclassifier \
+         misc_ce/0 misc_ce/0/apexdata misc_de/0 misc_de/0/apexdata \
+         system system/users system/users/0 system/devicestate system/package_cache \
+         system/watchdog_timestamps system_de system_de/0 system_de/0/spblob system_ce system_ce/0 \
+         user/0 user_de/0 vendor_de vendor_de/0 vendor_de/0/fpdata vendor_ce vendor_ce/0 \
          oneos_bin oneos_bin/busybox zygote_exec oplus oplus/multimedia oplus/os \
-         oneos_bootui oneos_ksu oneos_root vfonts 1 1/ns \
-         preapps-lib media/0 anr app local/tmp resource-cache oneos_fold8 oneos_pixel_hinge oneos_hinge; do
+         oneos_bootui oneos_ksu oneos_ksu/modules oneos_ksu/modules_update \
+         oneos_root oneos_root/adb oneos_root/adb/oneos oneos_root/adb/oneos/run \
+         oneos_root/adb/modules oneos_root/adb/modules_update \
+         oneos_bring oneos_bring_requests oneos_bring_catalog sec sec/camera \
+         vfonts 1 1/ns app-lib adb apex dalvik-cache dalvik-cache/arm64 \
+         preapps-lib media/0 media/obb media/0/Android anr app local local/tmp \
+         resource-cache oneos_fold8 oneos_pixel_hinge oneos_hinge; do
     no_symlink "$s"
 done
+no_symlink_under() { # <path under $STAGE/data>: true iff $STAGE/data and every component up to $1 is not a symlink
+    _u=${1#"$STAGE/data"}
+    _u=${_u#/}
+    [ ! -L "$STAGE/data" ] || return 1
+    _up="$STAGE/data"; _uoifs=$IFS; IFS=/
+    for _uc in $_u; do
+        [ -n "$_uc" ] || continue
+        _up="$_up/$_uc"
+        if [ -L "$_up" ]; then IFS=$_uoifs; return 1; fi
+    done
+    IFS=$_uoifs
+    return 0
+}
+plain_dir_tree() { # <dir>: true iff dir is a real directory with no symlink inside it
+    [ -d "$1" ] && [ ! -L "$1" ] && [ -z "$(find "$1" -type l -print -quit 2>/dev/null)" ]
+}
 # The framework jars must be the ones built with the storage, installd and
 # power guards (scripts/make-overlays.sh records their hashes in guards.txt).
 if [ ! -f "$STAGE/guards.txt" ]; then
@@ -2821,7 +2845,8 @@ if [ -f "$STAGE/SystemUI_wave.dex" ] && [ -f "$STAGE/OneOSWaveRepack.dex" ] &&
     wave_stock_size=$(stat -c %s "$QS_APK" 2>/dev/null)
     wave_stock_sha=$(sha256sum "$QS_APK" 2>/dev/null | awk '{print $1}')
     wave_dex_sha=$(sha256sum "$STAGE/SystemUI_wave.dex" 2>/dev/null | awk '{print $1}')
-    if [ -f "$wave_dst/SystemUI_wave.apk" ] &&
+    if [ -f "$wave_dst/SystemUI_wave.apk" ] && [ ! -L "$wave_dst/SystemUI_wave.apk" ] &&
+       [ ! -L "$wave_dst/SystemUI_wave.stock.sha256" ] && [ ! -L "$WAVE_STAMP_DEX" ] &&
        [ "$(cat "$wave_dst/SystemUI_wave.stock.sha256" 2>/dev/null)" = "$wave_stock_sha" ] &&
        [ "$(cat "$WAVE_STAMP_DEX" 2>/dev/null)" = "$wave_dex_sha" ]; then
         echo "Guest SystemUI: the fingerprint wave APK is up to date"
@@ -2851,11 +2876,11 @@ if [ -f "$STAGE/SystemUI_wave.dex" ] && [ -f "$STAGE/OneOSWaveRepack.dex" ] &&
             echo "!!! WARNING: could not build the fingerprint wave APK; the stock SystemUI has no wave"
         fi
     fi
-    if [ -f "$wave_dst/SystemUI_wave.apk" ]; then
+    if [ -f "$wave_dst/SystemUI_wave.apk" ] && [ ! -L "$wave_dst/SystemUI_wave.apk" ]; then
         rm -f "$wave_dst/SystemUI_wave.stock.size" "$wave_dst/SystemUI_wave.stock.sha256"
         printf '%s\n' "$wave_stock_size" > "$wave_dst/SystemUI_wave.stock.size"
         printf '%s\n' "$wave_stock_sha" > "$wave_dst/SystemUI_wave.stock.sha256"
-        chmod 644 "$wave_dst/SystemUI_wave.apk" "$wave_dst"/SystemUI_wave.stock.* 2>/dev/null || true
+        chmod 644 "$wave_dst/SystemUI_wave.apk" "$wave_dst/SystemUI_wave.stock.size" "$wave_dst/SystemUI_wave.stock.sha256" 2>/dev/null || true
         $BB chcon -h u:object_r:system_file:s0 "$wave_dst/SystemUI_wave.apk" 2>/dev/null || true
     fi
 fi
@@ -2921,16 +2946,18 @@ if [ -d "$GUEST_PRODUCT/data-app" ] && [ "${ONEOS_GUEST_DATA_APP_LIBS:-1}" = 1 ]
             [ -f "$a" ] || continue
             t="$DAL/$n/arm64"
             [ -L "$DAL/$n" ] || [ -L "$t" ] && continue
+            if [ -e "$DAL/$n" ] && ! plain_dir_tree "$DAL/$n"; then continue; fi
             [ -n "$(ls -A "$t" 2>/dev/null)" ] && continue
             unzip -l "$a" 2>/dev/null | grep -q " lib/arm64-v8a/[^/]*\.so\$" || continue
             # 0.4.87: said before the first one. The step had no line until its end
             # (S23 HyperOS dd8e9734: the log of a first start stops right before it).
             [ -n "$DAL_SAID" ] || { DAL_SAID=1; echo "HyperOS data apps: unpacking native libraries (first start with these apps)"; }
-            mkdir -p "$t" && $BB unzip -o -j -q "$a" 'lib/arm64-v8a/*.so' -d "$t" 2>/dev/null &&
-                chown -R 1000:1000 "$DAL/$n" && chmod 755 "$DAL/$n" "$t" && chmod 644 "$t"/*.so &&
+            mkdir -p "$t" && plain_dir_tree "$DAL/$n" && $BB unzip -o -j -q "$a" 'lib/arm64-v8a/*.so' -d "$t" 2>/dev/null &&
+                plain_dir_tree "$DAL/$n" &&
+                chown -h -R 1000:1000 "$DAL/$n" && chmod 755 "$DAL/$n" "$t" && chmod 644 "$t"/*.so &&
                 DAL_DONE="$DAL_DONE $n"
         done
-        $BB chcon -R u:object_r:apk_data_file:s0 "$DAL" 2>/dev/null || true
+        $BB chcon -h -R u:object_r:apk_data_file:s0 "$DAL" 2>/dev/null || true
         echo "HyperOS data apps: native libraries unpacked for${DAL_DONE:- none (already there)}"
     fi
 fi
@@ -3689,13 +3716,15 @@ if [ "${ONEOS_GUEST_BIOMETRICS:-1}" = 1 ] && grep -q '^# biometric-remove guard'
     # removed in One UI is removed here.
     BIO_DST=$STAGE/data/system/users/0
     mkdir -p "$BIO_DST" || true
-    rm -f "$BIO_DST"/settings_fingerprint*.xml
+    rm -f "$BIO_DST"/settings_fingerprint*.xml "$BIO_DST/settings_fingerprint.xml" "$BIO_DST/settings_fingerprint_0.xml" \
+        "$BIO_DST/settings_face.xml" "$BIO_DST/face_enrolled_position_0.xml"
     bio=0
     for f in /data/system/users/0/settings_fingerprint*.xml; do
         [ -f "$f" ] || continue
         out=${f##*/}
+        rm -f "$BIO_DST/$out"
         cp -f "$f" "$BIO_DST/$out" &&
-            chown 1000:1000 "$BIO_DST/$out" 2>/dev/null &&
+            chown -h 1000:1000 "$BIO_DST/$out" 2>/dev/null &&
             chmod 644 "$BIO_DST/$out" 2>/dev/null &&
             $BB chcon -h u:object_r:system_data_file:s0 "$BIO_DST/$out" 2>/dev/null
         bio=$((bio + 1))
@@ -3703,28 +3732,28 @@ if [ "${ONEOS_GUEST_BIOMETRICS:-1}" = 1 ] && grep -q '^# biometric-remove guard'
     # The legacy name: sensor 0's file when One UI writes the numbered name, else
     # the phone's own legacy file when it does not.
     if [ -f /data/system/users/0/settings_fingerprint_0.xml ]; then
+        rm -f "$BIO_DST/settings_fingerprint.xml"
         cp -f /data/system/users/0/settings_fingerprint_0.xml "$BIO_DST/settings_fingerprint.xml" &&
-            chown 1000:1000 "$BIO_DST/settings_fingerprint.xml" 2>/dev/null &&
+            chown -h 1000:1000 "$BIO_DST/settings_fingerprint.xml" 2>/dev/null &&
             chmod 644 "$BIO_DST/settings_fingerprint.xml" 2>/dev/null &&
             $BB chcon -h u:object_r:system_data_file:s0 "$BIO_DST/settings_fingerprint.xml" 2>/dev/null &&
             bio=$((bio + 1))
     elif [ -f /data/system/users/0/settings_fingerprint.xml ] && [ ! -f "$BIO_DST/settings_fingerprint_0.xml" ]; then
+        rm -f "$BIO_DST/settings_fingerprint_0.xml"
         cp -f /data/system/users/0/settings_fingerprint.xml "$BIO_DST/settings_fingerprint_0.xml" &&
-            chown 1000:1000 "$BIO_DST/settings_fingerprint_0.xml" 2>/dev/null &&
+            chown -h 1000:1000 "$BIO_DST/settings_fingerprint_0.xml" 2>/dev/null &&
             chmod 644 "$BIO_DST/settings_fingerprint_0.xml" 2>/dev/null &&
             $BB chcon -h u:object_r:system_data_file:s0 "$BIO_DST/settings_fingerprint_0.xml" 2>/dev/null &&
             bio=$((bio + 1))
     fi
     for f in settings_face.xml face_enrolled_position_0.xml; do
+        rm -f "$BIO_DST/$f"
         if [ -f "/data/system/users/0/$f" ]; then
             cp -f "/data/system/users/0/$f" "$BIO_DST/$f" &&
-                chown 1000:1000 "$BIO_DST/$f" 2>/dev/null &&
+                chown -h 1000:1000 "$BIO_DST/$f" 2>/dev/null &&
                 chmod 644 "$BIO_DST/$f" 2>/dev/null &&
                 $BB chcon -h u:object_r:system_data_file:s0 "$BIO_DST/$f" 2>/dev/null
             bio=$((bio + 1))
-        else
-            # A print or face removed in One UI must not stay listed here.
-            rm -f "$BIO_DST/$f"
         fi
     done
     [ "$bio" -gt 0 ] && echo "Guest biometrics: carried One UI's $bio enrollment file(s) into the guest"
@@ -3898,9 +3927,10 @@ GSET="$STAGE/data/system/users/0/settings_global.xml"
 # did not come out as expected.
 seed_settings() {
     f=$1; label=$2; shift 2
-    [ -f "$f" ] && [ "$(head -c 5 "$f")" = "<?xml" ] || { echo "Guest $label: no text settings file, not seeded"; return; }
+    [ ! -L "$f" ] && [ -f "$f" ] && [ "$(head -c 5 "$f")" = "<?xml" ] || { echo "Guest $label: no text settings file, not seeded"; return; }
     for kv in "$@"; do
         k=${kv%=*}; v=${kv#*=}
+        rm -f "$f.oneos-prev"
         cp -f "$f" "$f.oneos-prev"
         if grep -q "name=\"$k\" " "$f"; then
             if grep "name=\"$k\" " "$f" | grep -q ' value="'; then
@@ -3913,7 +3943,7 @@ seed_settings() {
             sed -i "s#</settings>#<setting id=\"$NEXT_ID\" name=\"$k\" value=\"$v\" package=\"android\" />\n</settings>#" "$f"
         fi
         if [ "$(grep -c "name=\"$k\" value=\"$v\"" "$f")" != 1 ] || ! tail -c 32 "$f" | grep -q '</settings>'; then
-            cp -f "$f.oneos-prev" "$f"
+            [ ! -L "$f" ] && [ ! -L "$f.oneos-prev" ] && cp -f "$f.oneos-prev" "$f"
             echo "WARNING: Guest $label: could not set $k=$v, left as it was"
         else
             echo "Guest $label: $k=$v"
@@ -3932,14 +3962,14 @@ seed_settings() {
 U0="$STAGE/data/system/users/0"
 s_have=0; s_miss=0
 for n in settings_global.xml settings_secure.xml settings_system.xml; do
-    if [ -f "$U0/$n" ]; then s_have=$((s_have + 1)); else s_miss=$((s_miss + 1)); fi
+    if [ ! -L "$U0/$n" ] && [ -f "$U0/$n" ]; then s_have=$((s_have + 1)); else s_miss=$((s_miss + 1)); fi
 done
 if [ "$s_have" -gt 0 ] && [ "$s_miss" -gt 0 ]; then
     s_aside="$U0/oneos-partial-settings-$(date +%s)"
-    if mkdir -p "$s_aside"; then
+    if [ ! -L "$s_aside" ] && mkdir -p "$s_aside"; then
         for n in settings_global.xml settings_secure.xml settings_system.xml; do
             for f in "$U0/$n" "$U0/$n.fallback" "$U0/$n.bak"; do
-                [ -f "$f" ] && mv -f "$f" "$s_aside/"
+                [ ! -L "$f" ] && [ -f "$f" ] && mv -f "$f" "$s_aside/"
             done
         done
         echo "Guest settings: a partial set from an earlier first boot ($s_have of 3 files) moved to ${s_aside#$STAGE/}; ColorOS writes all three fresh"
@@ -3947,7 +3977,7 @@ if [ "$s_have" -gt 0 ] && [ "$s_miss" -gt 0 ]; then
         echo "WARNING: guest settings are a partial set ($s_have of 3 files) and could not be moved aside"
     fi
 fi
-sed -i '/<setting id="adb_enabled" /d' "$GSET" 2>/dev/null
+[ ! -L "$GSET" ] && sed -i '/<setting id="adb_enabled" /d' "$GSET" 2>/dev/null
 # adb_enabled=1: without it the guest's UsbDeviceManager drops adb from the
 # USB gadget seconds after its system_server starts.
 # OneOS: only when One UI has USB debugging on (oneos_switch.sh saved it
@@ -4129,8 +4159,9 @@ else
             fi
             CTX=$(ls -Z "$DSET" 2>/dev/null | awk '{ print $1 }')
             case "$CTX" in u:object_r:*) ;; *) CTX=u:object_r:system_data_file:s0 ;; esac
+            rm -f "$DSET"
             if grep -q "forcedDensity=\"$CDEN\"" "$DTXT" && mv -f "$DTXT" "$DSET"; then
-                chown 1000:1000 "$DSET"; chmod 600 "$DSET"; $BB chcon "$CTX" "$DSET" 2>/dev/null
+                chown -h 1000:1000 "$DSET"; chmod 600 "$DSET"; $BB chcon -h "$CTX" "$DSET" 2>/dev/null
                 echo "Cover density: $CDEN for $CV_NAME ($CV_XDPI dpi panel, base $BASE)"
             else
                 echo "Cover density: not set (display_settings.xml not written)"
@@ -4199,9 +4230,10 @@ else
         fi
         CTX=$(ls -Z "$DMS" 2>/dev/null | awk '{ print $1 }')
         case "$CTX" in u:object_r:*) ;; *) CTX=u:object_r:system_data_file:s0 ;; esac
+        rm -f "$DMS"
         if grep -q "<stable-display-width>$SW</stable-display-width>" "$DMT" && grep -q "<stable-display-height>$SH</stable-display-height>" "$DMT" &&
                 mv -f "$DMT" "$DMS"; then
-            chown 1000:1000 "$DMS"; chmod 600 "$DMS"; $BB chcon "$CTX" "$DMS" 2>/dev/null
+            chown -h 1000:1000 "$DMS"; chmod 600 "$DMS"; $BB chcon -h "$CTX" "$DMS" 2>/dev/null
             echo "Stable display size: $SW x $SH, this panel's (was ${WAS}; OxygenOS's status bar sorts the camera hole by it)"
         else
             echo "Stable display size: not set (display-manager-state.xml not written)"
@@ -4665,19 +4697,19 @@ $BB chcon u:object_r:fingerprint_vendor_data_file:s0 "$STAGE/data/vendor_de/0/fp
 # ColorOS reads the legacy settings_fingerprint.xml; One UI writes _0.
 BIO_DST="$STAGE/data/system/users/0"
 mkdir -p "$BIO_DST" || true
-rm -f "$BIO_DST/settings_fingerprint_0.xml"
+rm -f "$BIO_DST/settings_fingerprint_0.xml" "$BIO_DST/settings_fingerprint.xml" \
+    "$BIO_DST/settings_face.xml" "$BIO_DST/face_enrolled_position_0.xml"
 bio=0
 for f in settings_fingerprint_0.xml settings_face.xml face_enrolled_position_0.xml; do
     out=$f
     [ "$f" = settings_fingerprint_0.xml ] && out=settings_fingerprint.xml
+    rm -f "$BIO_DST/$out"
     if [ -f "/data/system/users/0/$f" ]; then
         cp -f "/data/system/users/0/$f" "$BIO_DST/$out" &&
-            chown 1000:1000 "$BIO_DST/$out" 2>/dev/null &&
+            chown -h 1000:1000 "$BIO_DST/$out" 2>/dev/null &&
             chmod 644 "$BIO_DST/$out" 2>/dev/null &&
             $BB chcon -h u:object_r:system_data_file:s0 "$BIO_DST/$out" 2>/dev/null
         bio=$((bio + 1))
-    else
-        rm -f "$BIO_DST/$out"
     fi
 done
 [ "$bio" -gt 0 ] && echo "Guest biometrics: carried One UI's $bio enrollment file(s) into the guest"
@@ -4689,11 +4721,19 @@ PRE_PKGS="com.android.providers.settings com.android.providers.telephony com.and
 pre_mkdirs=""
 pre_roots=""
 for pkg in $PRE_PKGS; do
+    for pr in "$STAGE/data/user_de/0/$pkg" "$STAGE/data/user/0/$pkg"; do
+        if [ -L "$pr" ] || { [ -e "$pr" ] && ! plain_dir_tree "$pr"; }; then
+            echo "WARNING: ${pr#$STAGE/} contains a symlink; skipping pre-creation for $pkg"
+            continue 2
+        fi
+    done
     pre_mkdirs="$pre_mkdirs $STAGE/data/user_de/0/$pkg/databases $STAGE/data/user_de/0/$pkg/shared_prefs $STAGE/data/user_de/0/$pkg/files/datastore/education $STAGE/data/user/0/$pkg/databases $STAGE/data/user/0/$pkg/shared_prefs $STAGE/data/user/0/$pkg/files"
     pre_roots="$pre_roots $STAGE/data/user_de/0/$pkg $STAGE/data/user/0/$pkg"
 done
-# shellcheck disable=SC2086
-mkdir -p $pre_mkdirs
+if [ -n "$pre_mkdirs" ]; then
+    # shellcheck disable=SC2086
+    mkdir -p $pre_mkdirs
+fi
 
 mkdir -p "$STAGE/data/resource-cache"
 chmod 771 "$STAGE/data/resource-cache"
@@ -4721,17 +4761,19 @@ echo "=== 5.9 $(date +%T) perms ==="
 # The package dirs pre-created above are root-owned until something sets an
 # owner: give them system's, as before; the realign below corrects the ones the
 # guest gave another uid.
-# shellcheck disable=SC2086
-chown -h -R 1000:1000 $pre_roots 2>/dev/null || true
-# shellcheck disable=SC2086
-chmod -R 777 $pre_roots 2>/dev/null || true
-# Code an app saved there (vivo SystemUI's plugin APKs) read-only again: since Android 14
-# ART refuses to load a writable dex file, and the sweep above made the one vivo's
-# SystemUI kept from the session before writable (eighth OriginOS run: SystemUI died
-# 17 times, "Writable dex file ... MagazinePlugin.apk is not allowed").
-# shellcheck disable=SC2086
-find $pre_roots -type f \( -name '*.apk' -o -name '*.dex' -o -name '*.jar' \) \
-    -exec chmod a-w {} + 2>/dev/null || true
+if [ -n "$pre_roots" ]; then
+    # shellcheck disable=SC2086
+    chown -h -R 1000:1000 $pre_roots 2>/dev/null || true
+    # shellcheck disable=SC2086
+    find $pre_roots ! -type l -exec chmod 777 {} + 2>/dev/null || true
+    # Code an app saved there (vivo SystemUI's plugin APKs) read-only again: since Android 14
+    # ART refuses to load a writable dex file, and the sweep above made the one vivo's
+    # SystemUI kept from the session before writable (eighth OriginOS run: SystemUI died
+    # 17 times, "Writable dex file ... MagazinePlugin.apk is not allowed").
+    # shellcheck disable=SC2086
+    find $pre_roots -type f \( -name '*.apk' -o -name '*.dex' -o -name '*.jar' \) \
+        -exec chmod a-w {} + 2>/dev/null || true
+fi
 # OneOS: not the app data trees. Resetting every app dir to 1000:1000 on each
 # switch made the host installd refuse to prepare 353 packages ("Expected path
 # ... with owner NNNNN but found 1000:1000"). Only the top levels, then every
@@ -4759,7 +4801,8 @@ echo "App data dirs realigned to their package uids: $realigned"
 # /data_mirror/ref_profiles/<pkg>) so Zygote and ART ProfileSaver find them immediately
 # at boot without ENOENT warnings.
 PROF_STAMP="$STAGE/data/misc/profiles/.oneos_raw_id"
-PREV_PROF_RAW_ID=$(cat "$PROF_STAMP" 2>/dev/null)
+PREV_PROF_RAW_ID=''
+[ ! -L "$PROF_STAMP" ] && PREV_PROF_RAW_ID=$(cat "$PROF_STAMP" 2>/dev/null)
 CUR_RAW_ID=$(cat "$STAGE/system.raw.id" 2>/dev/null)
 if [ -n "$CUR_RAW_ID" ] && [ -n "$PREV_PROF_RAW_ID" ] && [ "$PREV_PROF_RAW_ID" != "$CUR_RAW_ID" ]; then
     rm -rf "$STAGE/data/misc/profiles/cur/0/"* "$STAGE/data/misc/profiles/ref/"* 2>/dev/null
@@ -4767,6 +4810,7 @@ if [ -n "$CUR_RAW_ID" ] && [ -n "$PREV_PROF_RAW_ID" ] && [ "$PREV_PROF_RAW_ID" !
 fi
 mkdir -p "$STAGE/data/misc/profiles/cur/0" "$STAGE/data/misc/profiles/ref" 2>/dev/null
 rm -rf "$STAGE/data/misc/profiles/ref/0" 2>/dev/null
+rm -f "$PROF_STAMP"
 [ -n "$CUR_RAW_ID" ] && printf '%s\n' "$CUR_RAW_ID" > "$PROF_STAMP" 2>/dev/null
 prof_made=0
 if [ -f "$STAGE/data/system/packages.list" ]; then
@@ -5050,6 +5094,7 @@ if [ -f "$ROOTFS/system/framework/vivo-services.jar" ] && [ "$FORM" = fold ] && 
 fi
 if [ "$FOLD8_COLOR_HINGE" = 1 ] && [ "${ONEOS_GUEST_DEVICE_STATES:-$DS_DEFAULT}" = fold8-hinge ]; then
     mkdir -p "$DSDIR"
+    rm -f "$DSDIR/device_state_configuration.xml"
     cat > "$DSDIR/device_state_configuration.xml" <<'F8DSX'
 <?xml version="1.0" encoding="utf-8"?>
 <!-- OneOS Fold8 / Fold8 Ultra ColorOS hinge. Lid switch owns closed/open panels. -->
@@ -5095,11 +5140,12 @@ if [ "$FOLD8_COLOR_HINGE" = 1 ] && [ "${ONEOS_GUEST_DEVICE_STATES:-$DS_DEFAULT}"
     </device-state>
 </device-state-config>
 F8DSX
-    chown 1000:1000 "$DSDIR" "$DSDIR/device_state_configuration.xml"
+    chown -h 1000:1000 "$DSDIR" "$DSDIR/device_state_configuration.xml"
     chmod 644 "$DSDIR/device_state_configuration.xml"
     echo "Guest device states: fold hinge (0 closed, 2 half-open 15..165 degrees, 3 open)"
 elif [ "${ONEOS_GUEST_DEVICE_STATES:-$DS_DEFAULT}" = oneos ]; then
     mkdir -p "$DSDIR"
+    rm -f "$DSDIR/device_state_configuration.xml"
     cat > "$DSDIR/device_state_configuration.xml" <<'DSX'
 <?xml version="1.0" encoding="utf-8"?>
 <!-- OneOS (guest_prepare.sh): Samsung's lid-switch states with OPPO/AOSP fold properties. -->
@@ -5133,11 +5179,12 @@ elif [ "${ONEOS_GUEST_DEVICE_STATES:-$DS_DEFAULT}" = oneos ]; then
     </device-state>
 </device-state-config>
 DSX
-    chown 1000:1000 "$DSDIR" "$DSDIR/device_state_configuration.xml"
+    chown -h 1000:1000 "$DSDIR" "$DSDIR/device_state_configuration.xml"
     chmod 644 "$DSDIR/device_state_configuration.xml"
     echo "Guest device states: OneOS file (0 CLOSE = lid closed, 3 OPEN = lid open)"
 elif [ "${ONEOS_GUEST_DEVICE_STATES:-$DS_DEFAULT}" = vivo ]; then
     mkdir -p "$DSDIR"
+    rm -f "$DSDIR/device_state_configuration.xml"
     cat > "$DSDIR/device_state_configuration.xml" <<'VDSX'
 <?xml version="1.0" encoding="utf-8"?>
 <!-- OneOS (guest_prepare.sh): Samsung's lid switch with vivo's ids (0 CLOSE, 1 OPEN). -->
@@ -5170,7 +5217,7 @@ elif [ "${ONEOS_GUEST_DEVICE_STATES:-$DS_DEFAULT}" = vivo ]; then
     </device-state>
 </device-state-config>
 VDSX
-    chown 1000:1000 "$DSDIR" "$DSDIR/device_state_configuration.xml"
+    chown -h 1000:1000 "$DSDIR" "$DSDIR/device_state_configuration.xml"
     chmod 644 "$DSDIR/device_state_configuration.xml"
     echo "Guest device states: vivo (0 CLOSE = lid closed, 1 OPEN = lid open)"
 else
@@ -5666,13 +5713,14 @@ END { bad = 0; for (s in badpid) if (!(s in badkey)) bad++
 # deletes the stage's file and .bak: no pairings, never an unchecked file. Only
 # the stage's folder is written; $1 is only read.
 bt_stage_conf() {
-    rm -f "$BTD/bt_config.conf.oneos-new" "$BTD/bt_config.bak"
+    rm -f "$BTD/bt_config.conf.oneos-new" "$BTD/bt_config.conf" "$BTD/bt_config.bak"
     bt_le=1; [ "${ONEOS_GUEST_BT_LE_SANITIZE:-1}" = 0 ] && bt_le=0
     if $BB awk -v SUM="$BTDIAG/sanitize.txt" -v LE="$bt_le" "$BT_AWK_FN$BT_SAN_AWK" "$1" > "$BTD/bt_config.conf.oneos-new" &&
        grep -q '^\[Adapter\]' "$BTD/bt_config.conf.oneos-new" &&
-       chown 1002:1002 "$BTD/bt_config.conf.oneos-new" && chmod 0660 "$BTD/bt_config.conf.oneos-new" &&
+       chown -h 1002:1002 "$BTD/bt_config.conf.oneos-new" && chmod 0660 "$BTD/bt_config.conf.oneos-new" &&
+       rm -f "$BTD/bt_config.conf" &&
        mv -f "$BTD/bt_config.conf.oneos-new" "$BTD/bt_config.conf"; then
-        $BB chcon u:object_r:bluetooth_data_file:s0 "$BTD/bt_config.conf" 2>/dev/null || true
+        $BB chcon -h u:object_r:bluetooth_data_file:s0 "$BTD/bt_config.conf" 2>/dev/null || true
         return 0
     fi
     rm -f "$BTD/bt_config.conf.oneos-new" "$BTD/bt_config.conf" "$BTD/bt_config.bak"
@@ -5887,6 +5935,7 @@ if [ -f /data/adb/ksud ] && [ "${ONEOS_GUEST_KSUD_WRAP:-1}" = 1 ]; then
     KW="$STAGE/data/oneos_ksu"
     GA="$ROOTFS/data/adb"
     mkdir -p "$KW/modules" "$KW/modules_update" && chmod 755 "$KW" && chmod 755 "$KW/modules" "$KW/modules_update"
+    rm -f "$KW/ksud" "$KW/ksud.real"
     cat > "$KW/ksud" <<'KSUDWRAP'
 #!/system/bin/sh
 # OneOS: KernelSU's ksud inside a guest system. Commands that drive init would
@@ -5914,6 +5963,7 @@ esac
 exec /data/oneos_ksu/ksud.real "$@"
 KSUDWRAP
     chmod 755 "$KW/ksud"
+    rm -f "$KW/ksud.real"
     : > "$KW/ksud.real" 2>/dev/null
     # ksud's module commands (list, install, uninstall, enable, disable, action)
     # first enter the mount namespace of pid 1, as format!("/proc/{}/ns/mnt", 1):
@@ -6686,13 +6736,15 @@ if [ "${ONEOS_GUEST_BRING_REQUESTS:-1}" = 1 ] && [ -f "$STAGE/data/oneos_bring_c
         echo "!!! Bring apps from the guest: $BRQ is not a folder; off"
     else
         mkdir -p "$BRQ" && chown 0:0 "$BRQ" && chmod 0700 "$BRQ"
-        rm -f "$BRQ"/*.status "$BRQ"/.watch.pid
+        rm -f "$BRQ"/*.status "$BRQ"/.[!.]*.status.new "$BRQ"/.watch.pid
         cat > "$STAGE/bring_watch.sh" <<'BWEOF'
 #!/system/bin/sh
 # OneOS: Bring apps requests from the guest (guest_prepare.sh writes and starts this).
 STAGE=$1; BB=$2
 BRQ="$STAGE/data/oneos_bring_requests"; LOG="$STAGE/bring_watch.log"
 GAPP=com.fahadali.oneos.guest
+[ ! -L "$STAGE/data" ] && [ ! -L "$BRQ" ] && [ -d "$BRQ" ] || exit 1
+rm -f "$BRQ/.watch.pid"
 echo $$ > "$BRQ/.watch.pid"
 say() { echo "$(date +%T) $*" >> "$LOG"; }
 alive() {
@@ -6705,7 +6757,12 @@ is_package() {
     case "$1" in ''|.*|*.|*[!A-Za-z0-9._]*|*..*) return 1 ;; esac
     case "$1" in *.*) return 0 ;; *) return 1 ;; esac
 }
-status() { echo "$2" > "$BRQ/.$1.status.new" && chmod 0644 "$BRQ/.$1.status.new" && mv -f "$BRQ/.$1.status.new" "$BRQ/$1.status"; }
+status() {
+    [ ! -L "$STAGE/data" ] && [ ! -L "$BRQ" ] && [ -d "$BRQ" ] || return 1
+    rm -f "$BRQ/.$1.status.new" "$BRQ/$1.status"
+    ( set -C; echo "$2" > "$BRQ/.$1.status.new" ) 2>/dev/null && chmod 0644 "$BRQ/.$1.status.new" &&
+        [ ! -L "$BRQ/$1.status" ] && mv -f "$BRQ/.$1.status.new" "$BRQ/$1.status"
+}
 owned=""
 say "watching $BRQ"
 while alive; do
@@ -7569,6 +7626,7 @@ if [ "${ONEOS_GUEST_MIUI_SIGPERMS:-1}" = 1 ] && [ -n "$SIGL" ] && grep -q '</per
    ! grep -q 'package="com.miui.screenrecorder"' "$SIGL" &&
    { [ -d "$ROOTFS/system/product/data-app/MIUIScreenRecorder" ] || [ -d "$ROOTFS/product/data-app/MIUIScreenRecorder" ]; }; then
     SIGC="$STAGE/data/oneos_sigperms_voiceassist.xml"
+    rm -f "$SIGC.tmp" "$SIGC"
     {
         sed '/<\/permissions>/d' "$SIGL"
         echo '   <signature-permissions package="com.miui.screenrecorder">'
@@ -7581,7 +7639,7 @@ if [ "${ONEOS_GUEST_MIUI_SIGPERMS:-1}" = 1 ] && [ -n "$SIGL" ] && grep -q '</per
         echo '   </signature-permissions>'
         echo '</permissions>'
     } > "$SIGC.tmp" && mv -f "$SIGC.tmp" "$SIGC" && chmod 644 "$SIGC" &&
-    $BB chcon u:object_r:system_file:s0 "$SIGC" 2>/dev/null
+    $BB chcon -h u:object_r:system_file:s0 "$SIGC" 2>/dev/null
     if grep -q 'INTERNAL_SYSTEM_WINDOW' "$SIGC" 2>/dev/null && $BB mount --bind "$SIGC" "$SIGL"; then
         echo "HyperOS screen recorder: its signature permissions allowed (${SIGL#"$ROOTFS"/})"
     else
@@ -7966,6 +8024,9 @@ L=$S/tmp/module_mounts
 # namespaces, unlike the stage's own folders on /data).
 W=$R/data/oneos_ksu/.mirrors
 [ -n "$BB" ] || for c in /data/adb/ksu/bin/busybox /data/adb/ap/bin/busybox /data/adb/magisk/busybox; do [ -x "$c" ] && { BB=$c; break; }; done
+for _kp in "$S/data" "$S/data/oneos_root" "$K" "$M" "$U" "$K/oneos" "$K/oneos/run"; do
+    if [ -L "$_kp" ]; then echo "Modules: symlink $_kp"; exit 1; fi
+done
 [ -x "$BB" ] && [ -d "$M" ] || { echo "Modules: none for this system"; exit 0; }
 under() { case "$1" in "$R"|"$R"/*) return 0 ;; esac; return 1; }
 # One UI's own mounts (everything outside the stage) before: compared at the end.
@@ -8235,7 +8296,8 @@ setprop dev.bootcomplete 0
 setprop service.bootanim.exit 0
 command -v oneos_boot_event >/dev/null 2>&1 && oneos_boot_event 'Starting guest services'
 echo "$(date +%T) soft reboot: starting the guest again"
-[ ! -L "$S/data" ] && [ ! -L "$S/data/takeover.log" ] || rm -f "$S/data/takeover.log"
+if [ -L "$S/data" ]; then echo "soft reboot: $S/data is a symlink"; exit 1; fi
+[ ! -L "$S/data/takeover.log" ] || rm -f "$S/data/takeover.log"
 echo "=== OneOS soft reboot $(date '+%F %T') ($1) ===" >> "$S/data/takeover.log"
 $BB unshare -m $BB sh "$S/data/guest_start.sh" </dev/null >>"$S/data/takeover.log" 2>&1 &
 TP=$!

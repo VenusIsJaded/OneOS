@@ -13,21 +13,64 @@ verify_private_adb_bind() {
     done
 }
 
+encode_prop_val() {
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/\r/\\r/g' | awk 'NR > 1 { printf "\\n" } { printf "%s", $0 }'
+}
+
+decode_prop_val() {
+    awk -v s="$1" 'BEGIN {
+        out = ""
+        n = length(s)
+        for (i = 1; i <= n; i++) {
+            c = substr(s, i, 1)
+            if (c == "\\" && i < n) {
+                nx = substr(s, i + 1, 1)
+                if (nx == "n") { out = out "\n"; i++; continue }
+                if (nx == "r") { out = out "\r"; i++; continue }
+                if (nx == "\\") { out = out "\\"; i++; continue }
+            }
+            out = out c
+        }
+        printf "%s", out
+    }'
+}
+
+check_prop_snapshot_dirs() {
+    for _cpd in "$1" "$1/oneos" "$1/oneos/run"; do
+        [ ! -L "$_cpd" ] || { echo "Guest runtime: symlink $_cpd" >&2; return 1; }
+    done
+    return 0
+}
+
 restore_module_props() {
     rp_dir=$1
     mode=${2:-all}
+    check_prop_snapshot_dirs "$rp_dir" || return 1
     snapshot="$rp_dir/oneos/run/module-props"
     boot_stamp="$rp_dir/oneos/run/module-props.boot"
-    [ -f "$snapshot" ] || { rm -f "$boot_stamp"; return 0; }
     [ ! -L "$snapshot" ] || { echo "Guest runtime: symlink $snapshot" >&2; return 1; }
+    [ ! -L "$boot_stamp" ] || { echo "Guest runtime: symlink $boot_stamp" >&2; return 1; }
+    [ -f "$snapshot" ] || { rm -f "$boot_stamp"; return 0; }
     rp_bin=""
     for c in "$rp_dir/ksu/bin/resetprop" /data/adb/ksu/bin/resetprop /data/adb/ap/bin/resetprop /debug_ramdisk/resetprop /sbin/resetprop; do
-        [ -x "$c" ] && { rp_bin=$c; break; }
+        [ ! -L "$c" ] && [ -x "$c" ] && { rp_bin=$c; break; }
     done
-    if [ "$mode" = persist-only ]; then
-        if ! grep -q '^persist\.' "$snapshot" 2>/dev/null; then
-            return 0
-        fi
+    # Validate every record's syntax and metadata before considering early exit or applying writes.
+    has_persist=0
+    while IFS= read -r raw || [ -n "$raw" ]; do
+        case "$raw" in
+            *'|'*'|'*) ;;
+            *) echo "Guest runtime: malformed module property record" >&2; return 1 ;;
+        esac
+        key=${raw%%|*}
+        rest=${raw#*|}
+        present=${rest%%|*}
+        case "$key" in ''|*[!A-Za-z0-9._-]*) echo "Guest runtime: invalid property key '$key'" >&2; return 1 ;; esac
+        case "$present" in 0|1|0e|1e) ;; *) echo "Guest runtime: invalid present metadata '$present' for $key" >&2; return 1 ;; esac
+        case "$key" in persist.*) has_persist=1 ;; esac
+    done < "$snapshot"
+    if [ "$mode" = persist-only ] && [ "$has_persist" = 0 ]; then
+        return 0
     fi
     [ -n "$rp_bin" ] || { echo "Guest runtime: resetprop missing for module property restore" >&2; return 1; }
     # resetprop can exit 0 and leave the property as it was (a full property area), and
@@ -35,12 +78,19 @@ restore_module_props() {
     # present with an empty value (A8). Verify both presence ([key]: in full getprop)
     # and value before removing the snapshot.
     bad=0
-    while IFS='|' read -r key present value; do
-        case "$key" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    while IFS= read -r raw || [ -n "$raw" ]; do
+        key=${raw%%|*}
+        rest=${raw#*|}
+        present=${rest%%|*}
+        val_raw=${rest#*|}
         if [ "$mode" = persist-only ]; then
             case "$key" in persist.*) ;; *) continue ;; esac
         fi
-        if [ "$present" = 1 ]; then
+        case "$present" in
+            *e) value=$(decode_prop_val "$val_raw"); is_pres=${present%e} ;;
+            *)  value=$val_raw; is_pres=$present ;;
+        esac
+        if [ "$is_pres" = 1 ]; then
             if [ "$mode" = persist-only ]; then
                 "$rp_bin" -p "$key" "$value"
             else
@@ -51,14 +101,21 @@ restore_module_props() {
         fi
     done < "$snapshot"
     all_after=$(getprop)
-    while IFS='|' read -r key present value; do
-        case "$key" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    while IFS= read -r raw || [ -n "$raw" ]; do
+        key=${raw%%|*}
+        rest=${raw#*|}
+        present=${rest%%|*}
+        val_raw=${rest#*|}
         if [ "$mode" = persist-only ]; then
             case "$key" in persist.*) ;; *) continue ;; esac
         fi
+        case "$present" in
+            *e) value=$(decode_prop_val "$val_raw"); is_pres=${present%e} ;;
+            *)  value=$val_raw; is_pres=$present ;;
+        esac
         now_present=0
         case "$all_after" in *"[$key]: ["*) now_present=1 ;; esac
-        if [ "$present" = 1 ]; then
+        if [ "$is_pres" = 1 ]; then
             now_val=$(getprop "$key")
             if [ "$now_present" != 1 ] || [ "$now_val" != "$value" ]; then
                 echo "Guest runtime: $key was not restored to its earlier state" >&2
@@ -73,6 +130,8 @@ restore_module_props() {
     done < "$snapshot"
     [ "$bad" = 0 ] || { echo "Guest runtime: $bad module properties not restored; keeping $snapshot" >&2; return 1; }
     if [ "$mode" != persist-only ]; then
+        check_prop_snapshot_dirs "$rp_dir" || return 1
+        [ ! -L "$snapshot" ] && [ ! -L "$boot_stamp" ] || return 1
         rm -f "$snapshot" "$boot_stamp"
     fi
 }
@@ -309,6 +368,7 @@ prepare)
     for b in /data/adb/ksu/bin/busybox /data/adb/ap/bin/busybox /data/adb/magisk/busybox; do [ ! -x "$b" ] || { B=$b; break; }; done
     [ -n "$B" ] || exit 1
     # Existing prepare validates all staged data ancestors against symlinks.
+    [ ! -L "$S/data" ] || { echo "Guest runtime: symlink $S/data"; exit 1; }
     for p in "$STATE" "$STATE/adb" "$STATE/adb/oneos" "$STATE/adb/modules" "$STATE/adb/modules_update"; do
         [ ! -L "$p" ] || { echo "Guest runtime: symlink $p"; exit 1; }
         mkdir -p "$p"
@@ -395,7 +455,13 @@ restore-props)
     restore_module_props /data/adb "${2:-all}"
     ;;
 restore-props-host)
-    [ -d "$STATE/adb" ] && [ ! -L "$STATE" ] && [ ! -L "$STATE/adb" ] || exit 0
+    for _hp in "$S/data" "$STATE" "$STATE/adb" "$STATE/adb/oneos" "$STATE/adb/oneos/run" "$STATE/adb/ksu" "$STATE/adb/ksu/bin"; do
+        if [ -L "$_hp" ]; then
+            echo "Guest runtime: symlink $_hp" >&2
+            exit 1
+        fi
+    done
+    [ -d "$STATE/adb" ] || exit 0
     restore_module_props "$STATE/adb" "${2:-all}"
     ;;
 uninstall)
@@ -496,7 +562,11 @@ pre)
             # OneOS snapshots/restores module properties on soft reboot, in-place return, and reboot return.
             snapshot="$A/oneos/run/module-props"
             boot_stamp="$A/oneos/run/module-props.boot"
-            if [ ! -f "$boot_stamp" ] && [ ! -L "$boot_stamp" ]; then
+            for _mpd in "$A" "$A/oneos" "$A/oneos/run"; do
+                [ ! -L "$_mpd" ] || { echo "Guest runtime: symlink $_mpd" >&2; exit 1; }
+            done
+            [ ! -L "$snapshot" ] && [ ! -L "$boot_stamp" ] || { echo "Guest runtime: symlink module-props state" >&2; exit 1; }
+            if [ ! -f "$boot_stamp" ]; then
                 cat /proc/sys/kernel/random/boot_id > "$boot_stamp" 2>/dev/null || true
             fi
             if [ -z "${MOD_ALL_PROPS_SET:-}" ]; then
@@ -509,7 +579,7 @@ pre)
                     done < "$snapshot"
                 fi
             fi
-            while IFS= read -r line; do
+            while IFS= read -r line || [ -n "$line" ]; do
                 case "$line" in ''|'#'*) continue ;; *=*)
                     key=${line%%=*}
                     case "$key" in ''|*[!A-Za-z0-9._-]*) exit 1 ;; esac
@@ -517,8 +587,16 @@ pre)
                     case "$MOD_SEEN_KEYS" in *"|$key|"*) ;; *)
                         MOD_SEEN_KEYS="${MOD_SEEN_KEYS}${key}|"
                         present=0
-                        case "$MOD_ALL_PROPS" in *"[$key]:"*) present=1 ;; esac
-                        printf '%s|%s|%s\n' "$key" "$present" "$(getprop "$key")" >> "$snapshot"
+                        case "$MOD_ALL_PROPS" in *"[$key]: ["*) present=1 ;; esac
+                        raw_val=$(getprop "$key")
+                        case "$raw_val" in
+                            *\\*|*'
+'*|*$(printf '\r')*)
+                                enc_val=$(printf '%s' "$raw_val" | sed -e 's/\\/\\\\/g' -e 's/\r/\\r/g' | awk 'NR > 1 { printf "\\n" } { printf "%s", $0 }')
+                                printf '%s|%se|%s\n' "$key" "$present" "$enc_val" >> "$snapshot" ;;
+                            *)
+                                printf '%s|%s|%s\n' "$key" "$present" "$raw_val" >> "$snapshot" ;;
+                        esac
                     ;; esac
                     "$A/ksu/bin/resetprop" -n "$key" "${line#*=}"
                     ;; *) exit 1 ;; esac

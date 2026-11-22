@@ -192,6 +192,38 @@ class ModulePropsTest(unittest.TestCase):
             gr,
             'cold prepare must not blindly delete un-restored module-props on the same boot',
         )
+        self.assertNotIn('restore-props-host persist-only 2>/dev/null || true', ret)
+        self.assertNotIn('restore-props-host persist-only >> "$IPLOG" 2>&1 || true', ret)
+
+    def test_multiline_and_backslash_values_round_trip_cleanly(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            adb = root / 'stage/data/oneos_root/adb'
+            (adb / 'oneos/run').mkdir(parents=True)
+            env = make_fake_prop_tools(adb)
+            # Simulate pre-existing multiline/backslash property captured by encode_prop_val
+            snap = adb / 'oneos/run/module-props'
+            snap.write_text('persist.test.multi|1e|line1\\nline2\\\\tail|pipe\n')
+            (adb / 'props/persist.test.multi').write_text('overridden')
+            r = self.run_host_restore(root, env)
+            self.assertEqual(0, r.returncode, r.stderr)
+            self.assertEqual('line1\nline2\\tail|pipe', (adb / 'props/persist.test.multi').read_text())
+            self.assertFalse(snap.exists())
+
+    def test_invalid_present_metadata_fails_and_retains_snapshot(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            adb = root / 'stage/data/oneos_root/adb'
+            (adb / 'oneos/run').mkdir(parents=True)
+            env = make_fake_prop_tools(adb)
+            snap = adb / 'oneos/run/module-props'
+            snap.write_text('ro.test.key|2|orig\n')
+            (adb / 'props/ro.test.key').write_text('orig')
+            r = self.run_host_restore(root, env)
+            self.assertEqual(1, r.returncode)
+            self.assertIn('invalid present metadata', r.stderr)
+            self.assertTrue(snap.exists())
+            self.assertEqual('orig', (adb / 'props/ro.test.key').read_text())
 
 
 if __name__ == '__main__':

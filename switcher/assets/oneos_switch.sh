@@ -943,7 +943,11 @@ echo "preflight: staged sessions done $(date +%T)"
 setprop oneos.ksu.mgr_pkg "" 2>/dev/null
 setprop oneos.ksu.mgr_appid "" 2>/dev/null
 KSU_DIR="$STAGE/data/oneos_ksu"
-rm -f "$KSU_DIR/manager" "$KSU_DIR/manager.apk" 2>/dev/null
+if [ -L "$STAGE/data" ] || [ -L "$KSU_DIR" ]; then
+    echo "PREFLIGHT REFUSED: $KSU_DIR or $STAGE/data is a symlink"
+    exit 3
+fi
+rm -f "$KSU_DIR/manager" "$KSU_DIR/manager.apk" "$KSU_DIR/manager.apk.new" 2>/dev/null
 if [ -x /data/adb/ksud ] && [ "${ONEOS_GUEST_KSU_MANAGER:-0}" = 1 ]; then
     KSU_PKG="" KSU_ID=""
     for p in me.weishu.kernelsu com.rifsxd.ksunext com.sukisu.ultra app.kitsusu.manager; do
@@ -965,8 +969,8 @@ if [ -x /data/adb/ksud ] && [ "${ONEOS_GUEST_KSU_MANAGER:-0}" = 1 ]; then
         1[0-4][0-9][0-9][0-9]) ;;
         *) KSU_ID="" ;;
     esac
-    if [ -n "$KSU_PKG" ] && [ -n "$KSU_ID" ] && [ -f "$KSU_APK" ] && [ ! -L "$KSU_DIR" ] && mkdir -p "$KSU_DIR" &&
-       rm -f "$KSU_DIR/manager.apk.new" "$KSU_DIR/manager" &&
+    if [ -n "$KSU_PKG" ] && [ -n "$KSU_ID" ] && [ -f "$KSU_APK" ] && [ ! -L "$STAGE/data" ] && [ ! -L "$KSU_DIR" ] && mkdir -p "$KSU_DIR" &&
+       rm -f "$KSU_DIR/manager.apk.new" "$KSU_DIR/manager.apk" "$KSU_DIR/manager" &&
        cp -f "$KSU_APK" "$KSU_DIR/manager.apk.new" && mv -f "$KSU_DIR/manager.apk.new" "$KSU_DIR/manager.apk"; then
         chmod 755 "$KSU_DIR"; chmod 644 "$KSU_DIR/manager.apk"
         rm -f "$KSU_DIR/manager"
@@ -975,7 +979,7 @@ if [ -x /data/adb/ksud ] && [ "${ONEOS_GUEST_KSU_MANAGER:-0}" = 1 ]; then
         setprop oneos.ksu.mgr_appid "$KSU_ID"
         echo "KernelSU manager for the guest: $KSU_PKG, One UI's app id $KSU_ID ($(stat -c %s "$KSU_DIR/manager.apk") bytes staged)"
     else
-        rm -f "$KSU_DIR/manager" "$KSU_DIR/manager.apk"
+        [ ! -L "$STAGE/data" ] && [ ! -L "$KSU_DIR" ] && rm -f "$KSU_DIR/manager" "$KSU_DIR/manager.apk" "$KSU_DIR/manager.apk.new"
         echo "KernelSU manager for the guest: none (package '${KSU_PKG:-none}', app id '${KSU_ID:-none}', apk '${KSU_APK:-none}')"
     fi
 fi
@@ -2705,12 +2709,13 @@ while true; do
             # never made and no photo was saved (0.4.37, Z Fold6 report 034a7e05).
             # Made here once the camera's data folder exists.
             CAMD=$STAGE/data/user/0/com.sec.android.app.camera
-            if [ -d $STAGE/samcam_build ] && [ ! -d $STAGE/data/sec/camera ] && [ -d \$CAMD ] && [ ! -L \$CAMD ] && [ ! -L $STAGE/data/sec ]; then
+            if [ -d $STAGE/samcam_build ] && [ ! -L $STAGE/data ] && [ ! -d $STAGE/data/sec/camera ] && [ -d \$CAMD ] && [ ! -L \$CAMD ] && [ ! -L $STAGE/data/sec ] && [ ! -L $STAGE/data/sec/camera ]; then
                 CU=\$(stat -c %u \$CAMD 2>/dev/null)
                 if [ -n "\$CU" ] && [ "\$CU" -ge 10000 ]; then
-                    mkdir -p $STAGE/data/sec/camera && chown 0:0 $STAGE/data/sec && chmod 771 $STAGE/data/sec &&
+                    mkdir -p $STAGE/data/sec/camera && [ -z "\$(find $STAGE/data/sec -type l -print -quit 2>/dev/null)" ] &&
+                        chown 0:0 $STAGE/data/sec && chmod 771 $STAGE/data/sec &&
                         chown \$CU:\$CU $STAGE/data/sec/camera && chmod 2770 $STAGE/data/sec/camera &&
-                        $BB chcon -R u:object_r:app_data_file:s0 $STAGE/data/sec 2>/dev/null
+                        $BB chcon -h -R u:object_r:app_data_file:s0 $STAGE/data/sec 2>/dev/null
                     echo "[UI Activator] Samsung Camera: data/sec/camera made for uid \$CU (first session with the camera)"
                 fi
             fi
@@ -2788,13 +2793,18 @@ while true; do
                 # installed inside the guest (identified by bundled lib/arm64/libksud.so)
                 # so its root shell/WebUI uses OneOS's guest ksud wrapper instead of
                 # entering One UI's host PID 1 mount namespace (global_mnt: true).
-                if [ -f $STAGE/data/oneos_ksu/ksud ]; then
+                if [ -f $STAGE/data/oneos_ksu/ksud ] && [ ! -L $STAGE/data ] && [ ! -L $STAGE/data/app ] && [ ! -L $STAGE/data/oneos_ksu ] && [ ! -L $STAGE/data/oneos_ksu/ksud ]; then
                     for GK in $STAGE/data/app/~~*/*/lib/arm64/libksud.so $STAGE/data/app/*/lib/arm64/libksud.so; do
                         [ -f "\$GK" ] && [ ! -L "\$GK" ] || continue
-                        gd=\${GK%/lib/arm64/libksud.so}; gbn=\${gd##*/}; gpkg=\${gbn%-*}
+                        gd=\${GK%/lib/arm64/libksud.so}; gp_dir=\${gd%/*}
+                        [ ! -L "\$gp_dir" ] && [ ! -L "\$gd" ] && [ ! -L "\$gd/lib" ] && [ ! -L "\$gd/lib/arm64" ] || continue
+                        gbn=\${gd##*/}; gpkg=\${gbn%-*}
                         if ! cmp -s $STAGE/data/oneos_ksu/ksud "\$GK" 2>/dev/null; then
-                            cp -f $STAGE/data/oneos_ksu/ksud "\$GK" 2>/dev/null && chmod 755 "\$GK" 2>/dev/null &&
-                                echo "[UI Activator] KernelSU manager (spoofed package \$gpkg): wrapped bundled libksud.so so WebUI/su stays in the guest namespace"
+                            rm -f "\$GK.oneos-tmp" &&
+                            cp -f $STAGE/data/oneos_ksu/ksud "\$GK.oneos-tmp" 2>/dev/null && chmod 755 "\$GK.oneos-tmp" 2>/dev/null &&
+                            [ ! -L "\$gd/lib/arm64" ] && [ ! -L "\$GK" ] && mv -f "\$GK.oneos-tmp" "\$GK" 2>/dev/null &&
+                                echo "[UI Activator] KernelSU manager (spoofed package \$gpkg): wrapped bundled libksud.so so WebUI/su stays in the guest namespace" ||
+                                rm -f "\$GK.oneos-tmp" 2>/dev/null
                         fi
                     done
                 else
@@ -3557,12 +3567,12 @@ while true; do
             if [ $GUEST_OPLUS = 1 ]; then
                 su_uid=\$($BB nsenter -t \$PID -m /system/bin/sh /data/oneos_genv.sh /system/bin/cmd package list packages -U com.android.systemui 2>/dev/null | sed -n 's/^package:com[.]android[.]systemui uid://p' | head -1 | tr -dc 0-9)
                 depth=$STAGE/data/oplus/os
-                if [ -n "\$su_uid" ] && [ -d \$depth ] && [ ! -L \$depth ] && [ ! -L $STAGE/data/oplus ]; then
+                if [ -n "\$su_uid" ] && [ -d \$depth ] && [ ! -L $STAGE/data ] && [ ! -L \$depth ] && [ ! -L $STAGE/data/oplus ]; then
                     chmod 701 \$depth
                     for n in deep_scenery_image0 deep_scenery_image_secondaryDisplay0; do
                         [ ! -L \$depth/\$n ] || continue
-                        [ -f \$depth/\$n ] || : > \$depth/\$n
-                        $BB chown -h \$su_uid:\$su_uid \$depth/\$n && chmod 600 \$depth/\$n
+                        [ -f \$depth/\$n ] || ( set -C; : > \$depth/\$n ) 2>/dev/null
+                        [ ! -L \$depth/\$n ] && $BB chown -h \$su_uid:\$su_uid \$depth/\$n && chmod 600 \$depth/\$n
                     done
                     echo "[UI Activator] depth effect: \$depth/deep_scenery_image* for SystemUI (uid \$su_uid)"
                 else

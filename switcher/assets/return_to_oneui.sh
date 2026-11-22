@@ -237,7 +237,7 @@ echo "=== [1/4] $(date +%T) Terminating Container Supervision & Zygote ==="
 # segment 6 as soon as segment 5 was finalised, that one was killed with the
 # guest (a 30 KB unplayable file) and its retry logged 'Failed to get display
 # id' once SurfaceFlinger was gone.
-[ ! -L /data/local/tmp/oneos/data ] && { rm -f /data/local/tmp/oneos/data/oneos_rec_stop 2>/dev/null; touch /data/local/tmp/oneos/data/oneos_rec_stop 2>/dev/null; }
+[ ! -L /data/local/tmp/oneos/data ] && [ ! -L /data/local/tmp/oneos/data/oneos_rec_stop ] && { rm -f /data/local/tmp/oneos/data/oneos_rec_stop 2>/dev/null; ( set -C; : > /data/local/tmp/oneos/data/oneos_rec_stop ) 2>/dev/null; }
 # Restore only limits still owned by this session before One UI resumes.
 STAGE="$S" BB="$BB" /system/bin/sh "$S/fold8_coloros.sh" performance-restore || echo "Performance limits: restore failed; see performance_handover.log"
 # The return-keys readers (oneos_switch.sh) live in the host namespace.
@@ -660,14 +660,20 @@ if [ "$MODE" != inplace ]; then
     oneos_boot_release_display
     rm -f /data/local/tmp/oneos/data/guest_audio.flag /data/local/tmp/oneos/host_audio_hal_svcs
     STAGE=/data/local/tmp/oneos /system/bin/sh /data/local/tmp/oneos/guest_props.sh restore-persist
-    STAGE=/data/local/tmp/oneos /system/bin/sh /data/local/tmp/oneos/guest_runtime.sh restore-props-host persist-only 2>/dev/null || true
+    mod_restore_ok=1
+    if ! STAGE=/data/local/tmp/oneos /system/bin/sh /data/local/tmp/oneos/guest_runtime.sh restore-props-host persist-only; then
+        mod_restore_ok=0
+        echo "!!! WARNING: guest module persist.* properties could not be restored before reboot; snapshot retained for retry" | tee "$S/module_props_restore.failed"
+    else
+        rm -f "$S/module_props_restore.failed"
+    fi
     pkill -9 -f "app_storage_loop.sh" 2>/dev/null || true
     p=$(cat $S/share_holder.pid 2>/dev/null); case "$p" in ""|*[!0-9]*) ;; *) grep -q sleep /proc/$p/cmdline 2>/dev/null && kill "$p" 2>/dev/null ;; esac; rm -f $S/share_holder.pid
     # The session is undone: record a clean return ("<boot_id> <epoch>") for this
     # path too. Without it a guest power-off or a reboot return left the last
     # launch unanswered, and a boot-safety module that reads this file (owner's
     # backdownload) sent every later boot to Download Mode.
-    echo "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) $(date +%s)" > $S/return_inplace.done
+    echo "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) $(date +%s)$([ "$mod_restore_ok" = 1 ] || echo ' module_props_unrestored')" > $S/return_inplace.done
     sync
     # A guest shutdown request (low battery, thermal, power off), recorded by the
     # guarded ShutdownThread, becomes a real host shutdown; anything else reboots.
@@ -720,7 +726,12 @@ failsafe() {
     # Enforcing, the phone stayed black).
     [ "$(getenforce 2>/dev/null)" = Permissive ] || setenforce 0 2>/dev/null
     STAGE=$S /system/bin/sh $S/guest_props.sh restore-persist >> "$IPLOG" 2>&1
-    STAGE=$S /system/bin/sh $S/guest_runtime.sh restore-props-host persist-only >> "$IPLOG" 2>&1 || true
+    if ! STAGE=$S /system/bin/sh $S/guest_runtime.sh restore-props-host persist-only >> "$IPLOG" 2>&1; then
+        say "!!! WARNING: guest module persist.* properties could not be restored before failsafe reboot; snapshot retained for retry"
+        echo "failsafe: module persist.* restore failed at $(date +%T)" > "$S/module_props_restore.failed"
+    else
+        rm -f "$S/module_props_restore.failed"
+    fi
     sync
     setprop sys.powerctl reboot,oneos-inplace-failsafe
     sleep 20

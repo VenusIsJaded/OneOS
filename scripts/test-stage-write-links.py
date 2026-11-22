@@ -34,6 +34,7 @@ DEST_EXPR = (
     r'|/data/local/tmp/oneos/data/[A-Za-z0-9_./-]+'
     r'|\$STATE/[A-Za-z0-9_./${}-]+'
     r'|\$A/(?:oneos|ksu)/[A-Za-z0-9_./${}-]+'
+    r'|\$(?:PROF_STAMP|DSDIR|KW|SIGC|BIO_DST|BRQ|KSU_DIR|UFILE|LFILE|TFILE|ICODES|NHOST|VRRDATA|BTD)(?:/[A-Za-z0-9_./${}-]+|\.tmp)?'
     r'|\$FULLLOGS_STATE'
     r'|\$WAVE_STAMP_DEX'
     r'|\$wave_dst/[A-Za-z0-9_.-]+'
@@ -176,6 +177,36 @@ class StageWriteLinks(unittest.TestCase):
             run('rm -f "$D"; ')
             self.assertEqual(Path(victim).read_text(), 'HOST FILE\n')
             self.assertFalse(os.path.islink(dest))
+
+    def test_restore_props_host_refuses_nested_run_symlink(self):
+        """Nested run/ symlink under data/oneos_root/adb/oneos must fail closed instead of deleting outside boot stamp."""
+        with tempfile.TemporaryDirectory() as d:
+            outside = Path(d) / 'outside_run'
+            outside.mkdir()
+            boot_victim = outside / 'module-props.boot'
+            boot_victim.write_text('keep-boot-stamp\n')
+            stage = Path(d) / 'stage'
+            oneos_dir = stage / 'data/oneos_root/adb/oneos'
+            oneos_dir.mkdir(parents=True)
+            (oneos_dir / 'run').symlink_to(outside)
+            r = subprocess.run(
+                ['sh', str(ASSETS / 'guest_runtime.sh'), 'restore-props-host', 'all'],
+                env={**os.environ, 'STAGE': str(stage)},
+                capture_output=True, text=True,
+            )
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn('symlink', r.stderr)
+            self.assertTrue(boot_victim.exists(), 'outside module-props.boot must not be deleted through a nested symlink')
+
+    def test_bring_watch_status_removes_dotfile_and_rejects_linked_target(self):
+        gp = (ASSETS / 'guest_prepare.sh').read_text()
+        self.assertIn('rm -f "$BRQ"/*.status "$BRQ"/.[!.]*.status.new "$BRQ"/.watch.pid', gp)
+        self.assertIn('rm -f "$BRQ/.$1.status.new" "$BRQ/$1.status"', gp)
+        self.assertIn('rm -f "$PROF_STAMP"', gp)
+        self.assertIn('rm -f "$DSDIR/device_state_configuration.xml"', gp)
+        self.assertIn('rm -f "$KW/ksud" "$KW/ksud.real"', gp)
+        self.assertIn('rm -f "$SIGC.tmp" "$SIGC"', gp)
+        self.assertIn('rm -f "$f.oneos-prev"', gp)
 
 
 if __name__ == '__main__':
