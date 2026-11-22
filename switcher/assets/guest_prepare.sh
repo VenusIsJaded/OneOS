@@ -99,8 +99,10 @@ no_symlink_under() { # <path under $STAGE/data>: true iff $STAGE/data and every 
     IFS=$_uoifs
     return 0
 }
-plain_dir_tree() { # <dir>: true iff dir is a real directory with no symlink inside it
-    [ -d "$1" ] && [ ! -L "$1" ] && [ -z "$(find "$1" -type l -print -quit 2>/dev/null)" ]
+plain_dir_tree() { # <dir>: true iff dir is a real directory with no symlink inside it and find succeeds
+    [ -d "$1" ] && [ ! -L "$1" ] || return 1
+    _pdt_out=$(find "$1" -type l -print -quit 2>/dev/null) || return 1
+    [ -z "$_pdt_out" ]
 }
 # The framework jars must be the ones built with the storage, installd and
 # power guards (scripts/make-overlays.sh records their hashes in guards.txt).
@@ -6761,9 +6763,17 @@ is_package() {
 }
 status() {
     [ ! -L "$STAGE/data" ] && [ ! -L "$BRQ" ] && [ -d "$BRQ" ] || return 1
-    rm -f "$BRQ/.$1.status.new" "$BRQ/$1.status"
-    ( set -C; echo "$2" > "$BRQ/.$1.status.new" ) 2>/dev/null && chmod 0644 "$BRQ/.$1.status.new" &&
-        [ ! -L "$BRQ/$1.status" ] && mv -f "$BRQ/.$1.status.new" "$BRQ/$1.status"
+    _brq_di=$(stat -c %d:%i "$BRQ" 2>/dev/null) || return 1
+    (
+        exec 9<"$BRQ" 2>/dev/null || exit 1
+        [ "$(stat -Lc %d:%i /proc/self/fd/9 2>/dev/null)" = "$_brq_di" ] || exit 1
+        cd -P /proc/self/fd/9 2>/dev/null || exit 1
+        [ "$(stat -c %d:%i . 2>/dev/null)" = "$_brq_di" ] || exit 1
+        exec 9<&-
+        rm -f "./.$1.status.new" "./$1.status"
+        ( set -C; echo "$2" > "./.$1.status.new" ) 2>/dev/null && chmod 0644 "./.$1.status.new" &&
+            [ ! -L "./$1.status" ] && mv -f "./.$1.status.new" "./$1.status"
+    )
 }
 owned=""
 say "watching $BRQ"

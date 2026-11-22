@@ -34,7 +34,9 @@ DEST_EXPR = (
     r'|/data/local/tmp/oneos/data/[A-Za-z0-9_./-]+'
     r'|\$STATE/[A-Za-z0-9_./${}-]+'
     r'|\$A/(?:oneos|ksu)/[A-Za-z0-9_./${}-]+'
-    r'|\$(?:PROF_STAMP|DSDIR|KW|SIGC|BIO_DST|BRQ|KSU_DIR|UFILE|LFILE|TFILE|ICODES|NHOST|VRRDATA|BTD)(?:/[A-Za-z0-9_./${}-]+|\.tmp)?'
+    r'|\$(?:PROF_STAMP|DSDIR|KW|SIGC|BIO_DST|BRQ|KSU_DIR|UFILE|LFILE|TFILE|ICODES|NHOST|VRRDATA|BTD|DAL)(?:/[A-Za-z0-9_./${}-]+|\.tmp)?'
+    r'|\\?\$GK(?:\.oneos-tmp)?'
+    r'|\$f\.oneos-prev'
     r'|\$FULLLOGS_STATE'
     r'|\$WAVE_STAMP_DEX'
     r'|\$wave_dst/[A-Za-z0-9_.-]+'
@@ -201,12 +203,123 @@ class StageWriteLinks(unittest.TestCase):
     def test_bring_watch_status_removes_dotfile_and_rejects_linked_target(self):
         gp = (ASSETS / 'guest_prepare.sh').read_text()
         self.assertIn('rm -f "$BRQ"/*.status "$BRQ"/.[!.]*.status.new "$BRQ"/.watch.pid', gp)
-        self.assertIn('rm -f "$BRQ/.$1.status.new" "$BRQ/$1.status"', gp)
+        self.assertIn('cd -P /proc/self/fd/9', gp)
+        self.assertIn('rm -f "./.$1.status.new" "./$1.status"', gp)
         self.assertIn('rm -f "$PROF_STAMP"', gp)
         self.assertIn('rm -f "$DSDIR/device_state_configuration.xml"', gp)
         self.assertIn('rm -f "$KW/ksud" "$KW/ksud.real"', gp)
         self.assertIn('rm -f "$SIGC.tmp" "$SIGC"', gp)
         self.assertIn('rm -f "$f.oneos-prev"', gp)
+
+    def test_live_directory_swap_races_are_blocked_by_pinned_fd(self):
+        """Regression test for Section 1: BRQ status(), GK libksud wrap, runtime snapshot unlink, and failed find in plain_dir_tree."""
+        gp = (ASSETS / 'guest_prepare.sh').read_text()
+        sw = (ASSETS / 'oneos_switch.sh').read_text()
+        gr = (ASSETS / 'guest_runtime.sh').read_text()
+
+        # 1. plain_dir_tree must fail closed when find exits non-zero even with empty stdout
+        pdt_start = gp.index('plain_dir_tree() {')
+        pdt_fn = gp[pdt_start:gp.index('\n}\n', pdt_start) + 3]
+        with tempfile.TemporaryDirectory() as d:
+            real_dir = Path(d) / 'real'
+            real_dir.mkdir()
+            fake_bin = Path(d) / 'bin'
+            fake_bin.mkdir()
+            fail_find = fake_bin / 'find'
+            fail_find.write_text('#!/bin/sh\nexit 1\n')
+            fail_find.chmod(0o755)
+            r = subprocess.run(
+                ['dash', '-c', pdt_fn + '\nplain_dir_tree "$1"\n', '_', str(real_dir)],
+                env={**os.environ, 'PATH': f'{fake_bin}:{os.environ["PATH"]}'},
+                capture_output=True, text=True,
+            )
+            self.assertNotEqual(r.returncode, 0, 'plain_dir_tree must fail closed when find fails')
+
+        # 2. BRQ status() directory swap race between check and write
+        bw_body = gp.split("cat > \"$STAGE/bring_watch.sh\" <<'BWEOF'\n", 1)[1].split('\nBWEOF\n', 1)[0]
+        st_start = bw_body.index('status() {')
+        st_fn = bw_body[st_start:bw_body.index('\n}\n', st_start) + 3]
+        # Inject directory swap immediately after fd 9 is opened & verified, proving subsequent writes stay in original inode
+        race_hook = (
+            'exec 9<&-\n'
+            'mv "$BRQ" "$BRQ.moved" && ln -s "$OUTSIDE" "$BRQ"\n'
+        )
+        raced_st = st_fn.replace('exec 9<&-\n', race_hook, 1)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            stage = root / 'stage'
+            brq = stage / 'data/oneos_bring_requests'
+            brq.mkdir(parents=True)
+            outside = root / 'outside'
+            outside.mkdir()
+            r = subprocess.run(
+                ['dash', '-c', f'STAGE="{stage}"\nBRQ="{brq}"\nOUTSIDE="{outside}"\n{raced_st}\nstatus com.example.pkg copying\n'],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertFalse((outside / 'com.example.pkg.status').exists(), 'BRQ swap escaped to outside!')
+            self.assertEqual((stage / 'data/oneos_bring_requests.moved/com.example.pkg.status').read_text(), 'copying\n')
+
+        # 3. GK libksud wrapper swap race
+        gk_start = sw.index('                        if ! cmp -s $STAGE/data/oneos_ksu/ksud "\\$GK" 2>/dev/null; then')
+        gk_end = sw.index('                        fi\n                    done', gk_start) + len('                        fi')
+        gk_block = sw[gk_start:gk_end]
+        # Unescape outer double-quoted activator escapes
+        gk_unquoted = re.sub(r'\\([$"\\`])', r'\1', gk_block)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            stage = root / 'stage'
+            (stage / 'data/oneos_ksu').mkdir(parents=True)
+            (stage / 'data/oneos_ksu/ksud').write_text('#!/system/bin/sh\n# wrapper\n')
+            arm64 = stage / 'data/app/pkg-1/lib/arm64'
+            arm64.mkdir(parents=True)
+            (arm64 / 'libksud.so').write_text('old-binary')
+            outside = root / 'outside_gk'
+            outside.mkdir()
+            (outside / 'libksud.so').write_text('HOST_KEEP')
+            gk_raced = gk_unquoted.replace(
+                'exec 9<&-\n',
+                f'exec 9<&-\nmv "{arm64}" "{arm64}.moved" && ln -s "{outside}" "{arm64}"\n',
+                1,
+            ).replace('$STAGE', str(stage))
+            r = subprocess.run(
+                ['dash', '-c', f'GK="{arm64}/libksud.so"\ngpkg="pkg"\n{gk_raced}\n'],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual((outside / 'libksud.so').read_text(), 'HOST_KEEP', 'GK swap overwrote outside file!')
+            self.assertIn('# wrapper', (Path(f'{arm64}.moved') / 'libksud.so').read_text())
+
+        # 4. unlink_prop_snapshots_pinned race when run/ is swapped to outside symlink
+        ups_start = gr.index('unlink_prop_snapshots_pinned() {')
+        ups_fn = gr[ups_start:gr.index('\n}\n', ups_start) + 3]
+        cp_start = gr.index('check_prop_snapshot_dirs() {')
+        cp_fn = gr[cp_start:gr.index('\n}\n', cp_start) + 3]
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            adb = root / 'adb'
+            run_dir = adb / 'oneos/run'
+            run_dir.mkdir(parents=True)
+            (run_dir / 'module-props').write_text('snap')
+            (run_dir / 'module-props.boot').write_text('boot')
+            outside = root / 'outside_snap'
+            outside.mkdir()
+            (outside / 'module-props').write_text('KEEP1')
+            (outside / 'module-props.boot').write_text('KEEP2')
+            ups_raced = ups_fn.replace(
+                'exec 9<&-\n',
+                f'exec 9<&-\nmv "{run_dir}" "{run_dir}.moved" && ln -s "{outside}" "{run_dir}"\n',
+                1,
+            )
+            r = subprocess.run(
+                ['dash', '-c', f'{cp_fn}\n{ups_raced}\nunlink_prop_snapshots_pinned "{adb}" module-props module-props.boot\n'],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual((outside / 'module-props').read_text(), 'KEEP1')
+            self.assertEqual((outside / 'module-props.boot').read_text(), 'KEEP2')
+            self.assertFalse((Path(f'{run_dir}.moved') / 'module-props').exists())
+            self.assertFalse((Path(f'{run_dir}.moved') / 'module-props.boot').exists())
 
     def test_bt_stage_conf_preserves_and_sanitizes_guest_own_config_without_deleting_input_first(self):
         """Regression test for Section 2A: bt_stage_conf called on $BTD/bt_config.conf must not delete its own input before awk reads it."""

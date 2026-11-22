@@ -2800,11 +2800,22 @@ while true; do
                         [ ! -L "\$gp_dir" ] && [ ! -L "\$gd" ] && [ ! -L "\$gd/lib" ] && [ ! -L "\$gd/lib/arm64" ] || continue
                         gbn=\${gd##*/}; gpkg=\${gbn%-*}
                         if ! cmp -s $STAGE/data/oneos_ksu/ksud "\$GK" 2>/dev/null; then
-                            rm -f "\$GK.oneos-tmp" &&
-                            cp -f $STAGE/data/oneos_ksu/ksud "\$GK.oneos-tmp" 2>/dev/null && chmod 755 "\$GK.oneos-tmp" 2>/dev/null &&
-                            [ ! -L "\$gd/lib/arm64" ] && [ ! -L "\$GK" ] && mv -f "\$GK.oneos-tmp" "\$GK" 2>/dev/null &&
-                                echo "[UI Activator] KernelSU manager (spoofed package \$gpkg): wrapped bundled libksud.so so WebUI/su stays in the guest namespace" ||
-                                rm -f "\$GK.oneos-tmp" 2>/dev/null
+                            _gk_dir="\${GK%/*}"
+                            _gk_di=\$(stat -c %d:%i "\$_gk_dir" 2>/dev/null)
+                            if [ -n "\$_gk_di" ] && (
+                                exec 9<"\$_gk_dir" 2>/dev/null || exit 1
+                                [ "\$(stat -Lc %d:%i /proc/self/fd/9 2>/dev/null)" = "\$_gk_di" ] || exit 1
+                                cd -P /proc/self/fd/9 2>/dev/null || exit 1
+                                [ "\$(stat -c %d:%i . 2>/dev/null)" = "\$_gk_di" ] || exit 1
+                                exec 9<&-
+                                rm -f "./libksud.so.oneos-tmp"
+                                ( set -C; cat $STAGE/data/oneos_ksu/ksud > "./libksud.so.oneos-tmp" ) 2>/dev/null &&
+                                    chmod 755 "./libksud.so.oneos-tmp" 2>/dev/null &&
+                                    [ ! -L "./libksud.so" ] && mv -f "./libksud.so.oneos-tmp" "./libksud.so" 2>/dev/null ||
+                                    { rm -f "./libksud.so.oneos-tmp" 2>/dev/null; exit 1; }
+                            ); then
+                                echo "[UI Activator] KernelSU manager (spoofed package \$gpkg): wrapped bundled libksud.so so WebUI/su stays in the guest namespace"
+                            fi
                         fi
                     done
                 else

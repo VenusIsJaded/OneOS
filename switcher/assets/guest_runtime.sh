@@ -112,6 +112,29 @@ check_prop_snapshot_dirs() {
     return 0
 }
 
+unlink_prop_snapshots_pinned() {
+    # Unlink module-props and module-props.boot via a pinned directory fd so a
+    # concurrent swap of $1/oneos/run between check and rm cannot redirect unlinks.
+    _ups_dir=$1
+    shift
+    check_prop_snapshot_dirs "$_ups_dir" || return 1
+    [ -d "$_ups_dir/oneos/run" ] || return 0
+    _ups_di=$(stat -c %d:%i "$_ups_dir/oneos/run" 2>/dev/null) || return 1
+    (
+        exec 9<"$_ups_dir/oneos/run" 2>/dev/null || exit 1
+        [ "$(stat -Lc %d:%i /proc/self/fd/9 2>/dev/null)" = "$_ups_di" ] || exit 1
+        cd -P /proc/self/fd/9 2>/dev/null || exit 1
+        [ "$(stat -c %d:%i . 2>/dev/null)" = "$_ups_di" ] || exit 1
+        exec 9<&-
+        for _ups_f in "$@"; do
+            [ ! -L "./$_ups_f" ] || exit 1
+        done
+        for _ups_f in "$@"; do
+            rm -f "./$_ups_f"
+        done
+    )
+}
+
 restore_module_props() {
     rp_dir=$1
     mode=${2:-all}
@@ -122,7 +145,7 @@ restore_module_props() {
     [ ! -L "$snapshot" ] || { echo "Guest runtime: symlink $snapshot" >&2; return 1; }
     [ ! -L "$boot_stamp" ] || { echo "Guest runtime: symlink $boot_stamp" >&2; return 1; }
     if [ ! -e "$snapshot" ]; then
-        rm -f "$boot_stamp"
+        unlink_prop_snapshots_pinned "$rp_dir" module-props.boot || return 1
         return 0
     fi
     [ -f "$snapshot" ] || { echo "Guest runtime: non-regular snapshot $snapshot" >&2; return 1; }
@@ -273,9 +296,7 @@ restore_module_props() {
     rm -rf "$_rmp_tmp"
     [ "$bad" = 0 ] || { echo "Guest runtime: $bad module properties not restored; keeping $snapshot" >&2; return 1; }
     if [ "$mode" != persist-only ]; then
-        check_prop_snapshot_dirs "$rp_dir" || return 1
-        [ ! -L "$snapshot" ] && [ ! -L "$boot_stamp" ] || return 1
-        rm -f "$snapshot" "$boot_stamp"
+        unlink_prop_snapshots_pinned "$rp_dir" module-props module-props.boot || return 1
     fi
 }
 
@@ -543,9 +564,7 @@ prepare)
         if [ -n "$cur_boot" ] && [ -n "$snap_boot" ] && [ "$cur_boot" != "$snap_boot" ]; then
             # A full reboot reset the in-memory property arena; only persist.* keys could survive.
             restore_module_props "$A" persist-only host || exit 1
-            check_prop_snapshot_dirs "$A" || exit 1
-            [ ! -L "$A/oneos/run/module-props" ] && [ ! -L "$A/oneos/run/module-props.boot" ] || exit 1
-            rm -f "$A/oneos/run/module-props" "$A/oneos/run/module-props.boot"
+            unlink_prop_snapshots_pinned "$A" module-props module-props.boot || exit 1
         else
             # Same kernel boot (or unknown boot_id): restore un-cleaned module properties before new prepare.
             restore_module_props "$A" all host || exit 1
@@ -554,8 +573,7 @@ prepare)
         echo "Guest runtime: symlink module-props state" >&2
         exit 1
     else
-        check_prop_snapshot_dirs "$A" || exit 1
-        rm -f "$A/oneos/run/module-props.boot"
+        unlink_prop_snapshots_pinned "$A" module-props.boot || exit 1
     fi
     if [ ! -d "$A/modules/zygisk_vector" ] && [ ! -d "$A/modules_update/zygisk_vector" ]; then
         [ ! -L "$A/modules_update/zygisk_vector" ] || { echo "Guest runtime: symlink $A/modules_update/zygisk_vector"; exit 1; }
